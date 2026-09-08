@@ -226,6 +226,10 @@ export interface StandaloneLLMOverrideConfig {
     /** 是否用 memory systemUser.userKey 作为 Authorization（默认 true）。 */
     useMemorySystemUserKey?: boolean;
   };
+  /** 附加请求头（随每个 LLM 请求发送，如 OpenCode Go 要求的 x-opencode-session）。 */
+  headers?: Record<string, string>;
+  /** 该厂商需要关闭思考模式（与 env TDAI_DISABLE_THINKING 双轨，任一命中即注入）。 */
+  disableThinking?: boolean;
 }
 
 /** Context Offload settings — controls multi-layer context compression. */
