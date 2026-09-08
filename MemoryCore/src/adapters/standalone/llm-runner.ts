@@ -100,6 +100,10 @@ export interface StandaloneLLMConfig {
     /** 是否用 memory systemUser.userKey 作为 Authorization（默认 true）。 */
     useMemorySystemUserKey?: boolean;
   };
+  /** 附加请求头（如 OpenCode Go 要求的 x-opencode-session），随该厂商每个 LLM 请求发送。 */
+  headers?: Record<string, string>;
+  /** 该厂商需要关闭思考模式（如 DeepSeek 官方，reasoning_content 会干扰解析）。与 env TDAI_DISABLE_THINKING 双轨。 */
+  disableThinking?: boolean;
 }
 
 // ============================
@@ -277,16 +281,43 @@ export class StandaloneLLMRunner implements LLMRunner {
 
     this.logger?.debug?.(
       `${TAG} run() start: taskId=${params.taskId}, model=${this.model}, ` +
-      `tools=${effectiveEnableTools}${callerProvidedTools ? "(caller)" : ""}, timeout=${timeoutMs}ms`,
+      `tools=${effectiveEnableTools}${callerProvidedTools ? "(caller)" : ""}, timeout=${timeoutMs}ms, maxTokens=${maxTokens}, disableThinking=${this.config.disableThinking || process.env.TDAI_DISABLE_THINKING === "true"}`,
     );
 
     // Create OpenAI-compatible provider via AI SDK
     // Use "compatible" mode to call /chat/completions (not Responses API),
     // which works with all OpenAI-compatible backends (DeepSeek, Qwen, etc.)
+    // 关思考双轨开关:厂商配置 disableThinking 或全局 env TDAI_DISABLE_THINKING 任一命中。
+    // DeepSeek-V4 系列默认开启思考模式(reasoning_content),会烧光 max_tokens 导致
+    // content 为空/截断(finishReason=length),L1/L2/L3 解析器拿到空输出(extracted=0)。
+    // 实现注意(2026-09-08 实测):AI SDK v3 openai-compatible provider 不会把
+    // providerOptions.openai.thinking 序列化进请求体(fetch 探针实测 thinking=undefined),
+    // 因此改在 fetch 层直接改写 JSON body 注入 thinking:{type:"disabled"}。
+    const wantsDisableThinking =
+      this.config.disableThinking || process.env.TDAI_DISABLE_THINKING === "true";
     const provider = createOpenAI({
       baseURL: this.config.baseUrl,
       apiKey: this.config.apiKey,
       compatibility: "compatible",
+      ...(this.config.headers && Object.keys(this.config.headers).length > 0
+        ? { headers: this.config.headers }
+        : {}),
+      ...(wantsDisableThinking
+        ? {
+            fetch: async (url: unknown, init?: RequestInit) => {
+              if (typeof init?.body === "string") {
+                try {
+                  const body = JSON.parse(init.body) as Record<string, unknown>;
+                  body.thinking = { type: "disabled" };
+                  init = { ...init, body: JSON.stringify(body) };
+                } catch {
+                  // body 非 JSON 时保持原样
+                }
+              }
+              return fetch(url as Parameters<typeof fetch>[0], init);
+            },
+          }
+        : {}),
     });
 
     // Select tools based on mode + storage
@@ -330,13 +361,6 @@ export class StandaloneLLMRunner implements LLMRunner {
           : {}),
         maxOutputTokens: maxTokens,
         abortSignal: combinedSignal,
-        // DeepSeek-V4 系列默认开启思考模式(reasoning_content),其返回格式与
-        // L1/L2/L3 解析器不兼容(extracted=0)。设置 TDAI_DISABLE_THINKING=true
-        // 时,通过 thinking:{type:"disabled"} 关闭思考,让模型返回标准 content。
-        // 仅对 DeepSeek-V4 系列有效,对其他模型无副作用。
-        ...(process.env.TDAI_DISABLE_THINKING === "true"
-          ? { providerOptions: { openai: { thinking: { type: "disabled" } } } }
-          : {}),
         experimental_telemetry: {
           isEnabled: true,
           functionId: params.taskId,

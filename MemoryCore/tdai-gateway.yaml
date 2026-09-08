@@ -15,13 +15,36 @@ server:
 data:
   baseDir: "~/.memory-tencentdb/memory-tdai"
 
-# ── LLM (必填) ── OpenCode Go 中转(coding plan 包月),OpenAI 兼容接口,key 通过环境变量注入
-# 注意: 该中转实测会忽略 thinking:{type:"disabled"} 参数(仍返回 reasoning_content),
-#   蒸馏是否正常以切换后的实际运行为准
+# ── LLM (必填) ── 多厂商配置:activeProvider 选当前生效厂商,切换=改这一行+重启 Gateway
+# 每厂商条目: baseUrl / apiKeyEnv(环境变量名,yaml 零明文) / model(当前使用) / models(可用清单)
+#   extra.disableThinking: 该厂商蒸馏须关闭思考模式时置 true(DeepSeek 官方需要)
+# env 覆盖链(优先级高于本文件折叠结果): TDAI_ACTIVE_PROVIDER / TDAI_LLM_BASE_URL /
+#   TDAI_LLM_API_KEY(全局应急覆盖) / TDAI_LLM_MODEL / TDAI_LLM_MAX_TOKENS / TDAI_LLM_TIMEOUT_MS
+# 厂商实测档案: OpenCode Go 中转会忽略 thinking:{type:"disabled"}(仍返回 reasoning_content)
+#   但 content 干净,蒸馏可用;新厂商接入后必须实测一轮蒸馏(extracted>0)才算接入成功
 llm:
-  baseUrl: "https://opencode.ai/zen/go/v1"
-  apiKey: "${TDAI_LLM_API_KEY}"
-  model: "deepseek-v4-flash"
+  activeProvider: "opencode-go"
+  providers:
+    - name: opencode-go            # OpenCode Go 中转(coding plan 包月,31 个模型)
+      baseUrl: "https://opencode.ai/zen/go/v1"
+      apiKeyEnv: "TDAI_KEY_OPENCODE"
+      model: "deepseek-v4-flash"
+      models:
+        - deepseek-v4-flash
+      extra:
+        headers:
+          # 上游要求稳定会话 ID 做路由/缓存优化,缺失时拒绝请求(2026-09-08 起)
+          x-opencode-session: "8ae1bd54-2614-41ae-9ada-c21a2a3e7a00"
+    # 新增厂商: 追加条目即可(零代码改动),接入后必须跑一轮蒸馏验收
+    - name: deepseek-official       # DeepSeek 官方(按量付费,已验证)
+      baseUrl: "https://api.deepseek.com/v1"
+      apiKeyEnv: "TDAI_KEY_DEEPSEEK"
+      model: "deepseek-v4-flash"
+      models:
+        - deepseek-v4-flash
+        - deepseek-v4-pro
+      extra:
+        disableThinking: true       # 官方侧思考模式必须关闭,否则 reasoning_content 干扰解析(extracted=0)
   maxTokens: 4096
   timeoutMs: 120000
 
