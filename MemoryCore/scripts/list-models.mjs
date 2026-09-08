@@ -38,7 +38,10 @@ if (!base) {
 
 let resp;
 try {
-  resp = await fetch(`${base}/models`, { headers: { Authorization: `Bearer ${key}` } });
+  resp = await fetch(`${base}/models`, {
+    headers: { Authorization: `Bearer ${key}` },
+    signal: AbortSignal.timeout(30_000),
+  });
 } catch (err) {
   console.error(`请求失败: ${err instanceof Error ? err.message : String(err)}`);
   process.exit(1);
