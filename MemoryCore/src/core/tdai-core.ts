@@ -631,6 +631,8 @@ export class TdaiCore {
     model: string;
     maxTokens: number;
     timeoutMs: number;
+    headers?: Record<string, string>;
+    disableThinking?: boolean;
   } {
     const resolved = resolveStandaloneLlmForRuntime(this.cfg.llm, this.instanceId);
     return {
@@ -639,6 +641,8 @@ export class TdaiCore {
       model: resolved.model,
       maxTokens: resolved.maxTokens ?? 4096,
       timeoutMs: resolved.timeoutMs ?? 120_000,
+      ...(resolved.headers ? { headers: resolved.headers } : {}),
+      ...(resolved.disableThinking ? { disableThinking: resolved.disableThinking } : {}),
     };
   }
 

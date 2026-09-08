@@ -445,16 +445,67 @@ export function loadGatewayConfig(overrides?: Partial<GatewayConfig>): GatewayCo
   const rawLlmProvider = env("TDAI_LLM_PROVIDER") ?? str(llmConfig, "provider");
   const llmProvider: "openai" | "proxy" =
     rawLlmProvider === "proxy" ? "proxy" : "openai";
+
+  // ── 多厂商解析（解析边界折叠）──
+  // llm 段支持 activeProvider + providers[] 声明多个候选厂商；在此把 activeProvider
+  // 指向的条目折叠成下方单对象形状，下游 resolver / runner 构造点零改动。
+  // 注意 provider（openai|proxy，传输模式）≠ activeProvider（厂商选择），勿混用两个字段。
+  // apiKey 来源优先级：TDAI_LLM_API_KEY（全局应急覆盖）> env[<entry>.apiKeyEnv] > 启动报错。
+  // fail-fast：activeProvider 未命中或对应 env 缺失时直接抛错，不静默回落。
+  const providersRaw = llmConfig.providers;
+  const activeProviderName = env("TDAI_ACTIVE_PROVIDER") ?? str(llmConfig, "activeProvider");
+  let entryBaseUrl: string | undefined;
+  let entryApiKey: string | undefined;
+  let entryModel: string | undefined;
+  let entryMaxTokens: number | undefined;
+  let entryTimeoutMs: number | undefined;
+  let entryHeaders: Record<string, string> | undefined;
+  let entryDisableThinking: boolean | undefined;
+  if (Array.isArray(providersRaw) && providersRaw.length > 0) {
+    const providers = providersRaw as Record<string, unknown>[];
+    const activeEntry = providers.find((p) => str(p, "name") === activeProviderName);
+    if (!activeEntry) {
+      const names = providers.map((p) => str(p, "name")).filter(Boolean).join(", ");
+      throw new Error(
+        `[config] llm.activeProvider="${activeProviderName ?? "(未设置)"}" 未命中 providers 中任何 name（可用: ${names || "(空)"}）`,
+      );
+    }
+    const apiKeyEnvName = str(activeEntry, "apiKeyEnv");
+    const keyFromEnv = apiKeyEnvName ? getEnv(apiKeyEnvName) : undefined;
+    if (!keyFromEnv) {
+      throw new Error(
+        `[config] providers[name=${String(activeProviderName)}].apiKeyEnv="${apiKeyEnvName ?? "(未设置)"}" 对应环境变量未设置或为空`,
+      );
+    }
+    entryBaseUrl = str(activeEntry, "baseUrl");
+    entryApiKey = keyFromEnv;
+    entryModel = str(activeEntry, "model");
+    entryMaxTokens = num(activeEntry, "maxTokens");
+    entryTimeoutMs = num(activeEntry, "timeoutMs");
+    const extra = obj(activeEntry, "extra");
+    entryDisableThinking = extra ? bool(extra, "disableThinking") : undefined;
+    const rawHeaders = extra ? extra.headers : undefined;
+    if (rawHeaders && typeof rawHeaders === "object" && !Array.isArray(rawHeaders)) {
+      entryHeaders = Object.fromEntries(
+        Object.entries(rawHeaders as Record<string, unknown>)
+          .filter(([, v]) => typeof v === "string")
+          .map(([k, v]) => [k, v as string]),
+      );
+    }
+  }
+
   const llm: StandaloneLLMConfig = {
-    baseUrl: env("TDAI_LLM_BASE_URL") ?? str(llmConfig, "baseUrl") ?? "https://api.openai.com/v1",
-    apiKey: env("TDAI_LLM_API_KEY") ?? str(llmConfig, "apiKey") ?? "",
-    model: env("TDAI_LLM_MODEL") ?? str(llmConfig, "model") ?? "gpt-4o",
-    maxTokens: envInt("TDAI_LLM_MAX_TOKENS") ?? num(llmConfig, "maxTokens") ?? 4096,
-    timeoutMs: envInt("TDAI_LLM_TIMEOUT_MS") ?? num(llmConfig, "timeoutMs") ?? 120_000,
+    baseUrl: env("TDAI_LLM_BASE_URL") ?? entryBaseUrl ?? "https://api.openai.com/v1",
+    apiKey: env("TDAI_LLM_API_KEY") ?? entryApiKey ?? "",
+    model: env("TDAI_LLM_MODEL") ?? entryModel ?? "gpt-4o",
+    maxTokens: envInt("TDAI_LLM_MAX_TOKENS") ?? entryMaxTokens ?? 4096,
+    timeoutMs: envInt("TDAI_LLM_TIMEOUT_MS") ?? entryTimeoutMs ?? 120_000,
     provider: llmProvider,
     proxy: {
       useMemorySystemUserKey: bool(llmProxyConfig, "useMemorySystemUserKey") ?? true,
     },
+    ...(entryHeaders ? { headers: entryHeaders } : {}),
+    ...(entryDisableThinking ? { disableThinking: entryDisableThinking } : {}),
   };
 
   // Memory config (reuse the plugin's parseConfig for full compatibility)
@@ -489,6 +540,8 @@ export function loadGatewayConfig(overrides?: Partial<GatewayConfig>): GatewayCo
       proxy: {
         useMemorySystemUserKey: llm.proxy?.useMemorySystemUserKey ?? true,
       },
+      ...(llm.headers ? { headers: llm.headers } : {}),
+      ...(llm.disableThinking ? { disableThinking: llm.disableThinking } : {}),
     };
   }
 
