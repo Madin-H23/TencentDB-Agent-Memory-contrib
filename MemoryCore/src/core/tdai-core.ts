@@ -680,8 +680,10 @@ export class TdaiCore {
    * actually be enabled (otherwise `resolveRuntimeLlm` has nothing to
    * work with).
    */
-  private shouldOverrideRunnerFactory(useStandaloneRunner: boolean): boolean {
+  private shouldOverrideRunnerFactory(useStandaloneRunner: boolean, layer?: "l1" | "l2" | "l3"): boolean {
     if (!useStandaloneRunner || !this.cfg.llm.enabled) return false;
+    // 该层配置了分层覆盖时必须走 per-call 重建,否则 llm.layers 在 gateway 模式下是死配置
+    if (layer && this.cfg.llm.layers?.[layer]) return true;
     if (this.hostAdapter.hostType === "openclaw") return true;
     return this.cfg.llm.provider === "proxy";
   }
@@ -1065,7 +1067,7 @@ export class TdaiCore {
       : undefined;
 
     let runnerFactory = this.runnerFactory;
-    if (this.shouldOverrideRunnerFactory(useStandaloneRunner)) {
+    if (this.shouldOverrideRunnerFactory(useStandaloneRunner, "l1")) {
       const runtimeLlm = this.resolveRuntimeLlm("l1");
       runnerFactory = new StandaloneLLMRunnerFactory({
         config: runtimeLlm,
@@ -1114,7 +1116,7 @@ export class TdaiCore {
       : undefined;
 
     let runnerFactory = this.runnerFactory;
-    if (this.shouldOverrideRunnerFactory(useStandaloneRunner)) {
+    if (this.shouldOverrideRunnerFactory(useStandaloneRunner, "l2")) {
       const runtimeLlm = this.resolveRuntimeLlm("l2");
       runnerFactory = new StandaloneLLMRunnerFactory({
         config: runtimeLlm,
@@ -1158,7 +1160,7 @@ export class TdaiCore {
       : undefined;
 
     let runnerFactory = this.runnerFactory;
-    if (this.shouldOverrideRunnerFactory(useStandaloneRunner)) {
+    if (this.shouldOverrideRunnerFactory(useStandaloneRunner, "l3")) {
       const runtimeLlm = this.resolveRuntimeLlm("l3");
       runnerFactory = new StandaloneLLMRunnerFactory({
         config: runtimeLlm,
