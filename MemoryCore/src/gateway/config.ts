@@ -461,6 +461,37 @@ export function loadGatewayConfig(overrides?: Partial<GatewayConfig>): GatewayCo
   let entryTimeoutMs: number | undefined;
   let entryHeaders: Record<string, string> | undefined;
   let entryDisableThinking: boolean | undefined;
+  let entryLayers: NonNullable<StandaloneLLMConfig["layers"]> | undefined;
+  // ── 分层覆盖解析（llm.layers.l1/l2/l3，可选）──
+  // 按蒸馏层覆盖标量字段（model/maxTokens/timeoutMs/disableThinking），
+  // 未配置的层沿用全局折叠结果；未知层键 fail-fast（拼写错误静默失效比报错更危险）。
+  const rawLayers = llmConfig.layers;
+  if (rawLayers !== undefined && (typeof rawLayers !== "object" || Array.isArray(rawLayers))) {
+    throw new Error("[config] llm.layers 存在但不是映射，请检查 yaml 格式");
+  }
+  if (rawLayers && typeof rawLayers === "object") {
+    const parsed: NonNullable<StandaloneLLMConfig["layers"]> = {};
+    for (const [layerKey, rawVal] of Object.entries(rawLayers as Record<string, unknown>)) {
+      if (layerKey !== "l1" && layerKey !== "l2" && layerKey !== "l3") {
+        throw new Error(`[config] llm.layers 含未知层 "${layerKey}"（合法: l1|l2|l3）`);
+      }
+      if (!rawVal || typeof rawVal !== "object") continue;
+      const layerSrc = rawVal as Record<string, unknown>;
+      const ov: { model?: string; maxTokens?: number; timeoutMs?: number; disableThinking?: boolean } = {};
+      const lModel = str(layerSrc, "model");
+      if (lModel) ov.model = lModel;
+      const lMaxTokens = num(layerSrc, "maxTokens");
+      if (lMaxTokens !== undefined) ov.maxTokens = lMaxTokens;
+      const lTimeoutMs = num(layerSrc, "timeoutMs");
+      if (lTimeoutMs !== undefined) ov.timeoutMs = lTimeoutMs;
+      const lDisableThinking = bool(layerSrc, "disableThinking");
+      if (lDisableThinking !== undefined) ov.disableThinking = lDisableThinking;
+      if (Object.keys(ov).length > 0) {
+        parsed[layerKey as "l1" | "l2" | "l3"] = ov;
+      }
+    }
+    if (Object.keys(parsed).length > 0) entryLayers = parsed;
+  }
   if (providersRaw !== undefined && !Array.isArray(providersRaw)) {
     // providers 字段写错形态(如误写成映射)时明确告警,避免静默走空配置导致运行期 401
     console.warn(
@@ -523,6 +554,7 @@ export function loadGatewayConfig(overrides?: Partial<GatewayConfig>): GatewayCo
     },
     ...(entryHeaders ? { headers: entryHeaders } : {}),
     ...(entryDisableThinking ? { disableThinking: entryDisableThinking } : {}),
+    ...(entryLayers ? { layers: entryLayers } : {}),
   };
 
   // Memory config (reuse the plugin's parseConfig for full compatibility)
@@ -559,6 +591,7 @@ export function loadGatewayConfig(overrides?: Partial<GatewayConfig>): GatewayCo
       },
       ...(llm.headers ? { headers: llm.headers } : {}),
       ...(llm.disableThinking ? { disableThinking: llm.disableThinking } : {}),
+      ...(llm.layers ? { layers: llm.layers } : {}),
     };
   }
 
