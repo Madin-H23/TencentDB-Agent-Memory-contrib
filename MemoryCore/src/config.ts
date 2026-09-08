@@ -230,6 +230,12 @@ export interface StandaloneLLMOverrideConfig {
   headers?: Record<string, string>;
   /** 该厂商需要关闭思考模式（与 env TDAI_DISABLE_THINKING 双轨，任一命中即注入）。 */
   disableThinking?: boolean;
+  /** 分层覆盖（可选）：按蒸馏层（l1|l2|l3）覆盖 model/maxTokens/timeoutMs/disableThinking。 */
+  layers?: {
+    l1?: { model?: string; maxTokens?: number; timeoutMs?: number; disableThinking?: boolean };
+    l2?: { model?: string; maxTokens?: number; timeoutMs?: number; disableThinking?: boolean };
+    l3?: { model?: string; maxTokens?: number; timeoutMs?: number; disableThinking?: boolean };
+  };
 }
 
 /** Context Offload settings — controls multi-layer context compression. */

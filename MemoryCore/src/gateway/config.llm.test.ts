@@ -113,3 +113,62 @@ describe("loadGatewayConfig llm 多厂商折叠", () => {
     }
   });
 });
+
+describe("loadGatewayConfig llm.layers 分层覆盖", () => {
+  const LAYERS_YAML = `
+llm:
+  activeProvider: "vendor-a"
+  providers:
+    - name: vendor-a
+      baseUrl: "https://vendor-a.example/v1"
+      apiKeyEnv: "TDAI_TEST_KEY_A"
+      model: "model-a1"
+      models: [model-a1]
+      extra:
+        disableThinking: true
+  layers:
+    l2:
+      maxTokens: 16384
+      disableThinking: false
+    l3:
+      model: "model-strong"
+`;
+
+  function withFixture(yaml: string, fn: () => void): void {
+    const p = path.join(tmpDir, "fixture-layers.yaml");
+    fs.writeFileSync(p, yaml, "utf-8");
+    const prev = process.env.TDAI_GATEWAY_CONFIG;
+    process.env.TDAI_GATEWAY_CONFIG = p;
+    try {
+      fn();
+    } finally {
+      if (prev === undefined) delete process.env.TDAI_GATEWAY_CONFIG;
+      else process.env.TDAI_GATEWAY_CONFIG = prev;
+    }
+  }
+
+  it("layers 折叠进配置对象:标量覆盖+层内 disableThinking 显式 false 保留(三态)", () => {
+    withFixture(LAYERS_YAML, () => {
+      const cfg = loadGatewayConfig();
+      expect(cfg.llm.layers?.l2).toEqual({ maxTokens: 16384, disableThinking: false });
+      expect(cfg.llm.layers?.l3).toEqual({ model: "model-strong" });
+      expect(cfg.llm.layers?.l1).toBeUndefined();
+      // 全局值不受 layers 影响(层覆盖发生在 resolveRuntimeLlm,不在折叠处)
+      expect(cfg.llm.maxTokens).not.toBe(16384);
+    });
+  });
+
+  it("未知层键 fail-fast 启动报错", () => {
+    withFixture(LAYERS_YAML + "\n    l4:\n      maxTokens: 999\n", () => {
+      expect(() => loadGatewayConfig()).toThrow(/未知层 "l4"/);
+    });
+  });
+
+  it("layers 非映射形态 fail-fast", () => {
+    // 注意:构造"yaml 合法但 layers 是数组"的形态——若 yaml 整体坏掉会被文件级 catch 吞成 env-only
+    const badLayers = LAYERS_YAML.replace(/  layers:[\s\S]*$/, "  layers: [1, 2]\n");
+    withFixture(badLayers, () => {
+      expect(() => loadGatewayConfig()).toThrow(/llm\.layers 存在但不是映射/);
+    });
+  });
+});

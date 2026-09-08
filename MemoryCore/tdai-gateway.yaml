@@ -48,6 +48,11 @@ llm:
         disableThinking: true       # 官方侧思考模式必须关闭,否则 reasoning_content 干扰解析(extracted=0)
   maxTokens: 4096
   timeoutMs: 120000
+  # 分层覆盖(可选):按蒸馏层覆盖 model/maxTokens/timeoutMs/disableThinking,未配置的层用上方全局结果。
+  # 典型用法:L2 场景合并上下文大可单独提预算;L3 画像合成可换更强模型;某层实验开思考时须同步配大 maxTokens。
+  # layers:
+  #   l2:
+  #     maxTokens: 16384
 
 # ── Memory 引擎配置 ──
 memory:

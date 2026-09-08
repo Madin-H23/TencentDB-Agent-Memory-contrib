@@ -104,6 +104,17 @@ export interface StandaloneLLMConfig {
   headers?: Record<string, string>;
   /** 该厂商需要关闭思考模式（如 DeepSeek 官方，reasoning_content 会干扰解析）。与 env TDAI_DISABLE_THINKING 双轨。 */
   disableThinking?: boolean;
+  /** 分层覆盖（可选）：按蒸馏层（l1|l2|l3）覆盖标量字段，未列出的层用全局折叠结果。 */
+  layers?: Record<"l1" | "l2" | "l3", LlmLayerOverride>;
+}
+
+/** llm.layers.<层> 可覆盖的标量字段。不支持按层换 baseUrl/apiKeyEnv（换厂商仍走 activeProvider）。 */
+export interface LlmLayerOverride {
+  model?: string;
+  maxTokens?: number;
+  timeoutMs?: number;
+  /** 三态：true 强制关 / false 强制开(压过全局 env) / 未设沿用全局(env 兜底)。 */
+  disableThinking?: boolean;
 }
 
 // ============================
@@ -281,20 +292,21 @@ export class StandaloneLLMRunner implements LLMRunner {
 
     this.logger?.debug?.(
       `${TAG} run() start: taskId=${params.taskId}, model=${this.model}, ` +
-      `tools=${effectiveEnableTools}${callerProvidedTools ? "(caller)" : ""}, timeout=${timeoutMs}ms, maxTokens=${maxTokens}, disableThinking=${this.config.disableThinking || process.env.TDAI_DISABLE_THINKING === "true"}`,
+      `tools=${effectiveEnableTools}${callerProvidedTools ? "(caller)" : ""}, timeout=${timeoutMs}ms, maxTokens=${maxTokens}, disableThinking=${this.config.disableThinking ?? process.env.TDAI_DISABLE_THINKING === "true"}`,
     );
 
     // Create OpenAI-compatible provider via AI SDK
     // Use "compatible" mode to call /chat/completions (not Responses API),
     // which works with all OpenAI-compatible backends (DeepSeek, Qwen, etc.)
-    // 关思考双轨开关:厂商配置 disableThinking 或全局 env TDAI_DISABLE_THINKING 任一命中。
+    // 关思考三态开关:config.disableThinking 显式值(厂商 extra 或 llm.layers.<层> 覆盖)
+    // 优先——层内显式 false 可压过全局 env;未设置时回落 env TDAI_DISABLE_THINKING。
     // DeepSeek-V4 系列默认开启思考模式(reasoning_content),会烧光 max_tokens 导致
     // content 为空/截断(finishReason=length),L1/L2/L3 解析器拿到空输出(extracted=0)。
     // 实现注意(2026-09-08 实测):AI SDK v3 openai-compatible provider 不会把
     // providerOptions.openai.thinking 序列化进请求体(fetch 探针实测 thinking=undefined),
     // 因此改在 fetch 层直接改写 JSON body 注入 thinking:{type:"disabled"}。
     const wantsDisableThinking =
-      this.config.disableThinking || process.env.TDAI_DISABLE_THINKING === "true";
+      this.config.disableThinking ?? process.env.TDAI_DISABLE_THINKING === "true";
     const provider = createOpenAI({
       baseURL: this.config.baseUrl,
       apiKey: this.config.apiKey,
