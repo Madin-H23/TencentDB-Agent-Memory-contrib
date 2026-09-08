@@ -461,6 +461,12 @@ export function loadGatewayConfig(overrides?: Partial<GatewayConfig>): GatewayCo
   let entryTimeoutMs: number | undefined;
   let entryHeaders: Record<string, string> | undefined;
   let entryDisableThinking: boolean | undefined;
+  if (providersRaw !== undefined && !Array.isArray(providersRaw)) {
+    // providers 字段写错形态(如误写成映射)时明确告警,避免静默走空配置导致运行期 401
+    console.warn(
+      "[config] llm.providers 存在但不是数组,已忽略 —— 多厂商折叠未生效,请检查 yaml 格式",
+    );
+  }
   if (Array.isArray(providersRaw) && providersRaw.length > 0) {
     const providers = providersRaw as Record<string, unknown>[];
     const activeEntry = providers.find((p) => str(p, "name") === activeProviderName);
