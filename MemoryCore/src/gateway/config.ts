@@ -482,6 +482,17 @@ export function loadGatewayConfig(overrides?: Partial<GatewayConfig>): GatewayCo
     entryModel = str(activeEntry, "model");
     entryMaxTokens = num(activeEntry, "maxTokens");
     entryTimeoutMs = num(activeEntry, "timeoutMs");
+    // model 不在 models 清单:告警不阻断(厂商新增模型的场景,清单允许滞后)。
+    // 校验最终生效值(含 TDAI_LLM_MODEL env 覆盖后),而非条目原值。
+    const effectiveModel = env("TDAI_LLM_MODEL") ?? entryModel;
+    const declaredModels = Array.isArray(activeEntry.models)
+      ? (activeEntry.models as unknown[]).map(String)
+      : [];
+    if (effectiveModel && declaredModels.length > 0 && !declaredModels.includes(effectiveModel)) {
+      console.warn(
+        `[config] providers[name=${String(activeProviderName)}].model="${effectiveModel}" 不在 models 清单 [${declaredModels.join(", ")}] 中,请核对或更新清单`,
+      );
+    }
     const extra = obj(activeEntry, "extra");
     entryDisableThinking = extra ? bool(extra, "disableThinking") : undefined;
     const rawHeaders = extra ? extra.headers : undefined;
@@ -498,8 +509,8 @@ export function loadGatewayConfig(overrides?: Partial<GatewayConfig>): GatewayCo
     baseUrl: env("TDAI_LLM_BASE_URL") ?? entryBaseUrl ?? "https://api.openai.com/v1",
     apiKey: env("TDAI_LLM_API_KEY") ?? entryApiKey ?? "",
     model: env("TDAI_LLM_MODEL") ?? entryModel ?? "gpt-4o",
-    maxTokens: envInt("TDAI_LLM_MAX_TOKENS") ?? entryMaxTokens ?? 4096,
-    timeoutMs: envInt("TDAI_LLM_TIMEOUT_MS") ?? entryTimeoutMs ?? 120_000,
+    maxTokens: envInt("TDAI_LLM_MAX_TOKENS") ?? entryMaxTokens ?? num(llmConfig, "maxTokens") ?? 4096,
+    timeoutMs: envInt("TDAI_LLM_TIMEOUT_MS") ?? entryTimeoutMs ?? num(llmConfig, "timeoutMs") ?? 120_000,
     provider: llmProvider,
     proxy: {
       useMemorySystemUserKey: bool(llmProxyConfig, "useMemorySystemUserKey") ?? true,
