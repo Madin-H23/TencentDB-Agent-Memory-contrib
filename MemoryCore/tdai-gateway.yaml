@@ -18,14 +18,15 @@ data:
 # ── LLM (必填) ── 多厂商配置:activeProvider 选当前生效厂商,切换=改这一行+重启 Gateway
 # 每厂商条目: baseUrl / apiKeyEnv(环境变量名,yaml 零明文) / model(当前使用) / models(可用清单)
 #   extra.disableThinking: 该厂商蒸馏须关闭思考模式时置 true(DeepSeek 官方需要)
+#   extra.headers: 附加请求头(如 OpenCode Go 2026-09-08 起要求的 x-opencode-session)
 # env 覆盖链(优先级高于本文件折叠结果): TDAI_ACTIVE_PROVIDER / TDAI_LLM_BASE_URL /
 #   TDAI_LLM_API_KEY(全局应急覆盖) / TDAI_LLM_MODEL / TDAI_LLM_MAX_TOKENS / TDAI_LLM_TIMEOUT_MS
-# 厂商实测档案: OpenCode Go 中转会忽略 thinking:{type:"disabled"}(仍返回 reasoning_content)
-#   但 content 干净,蒸馏可用;新厂商接入后必须实测一轮蒸馏(extracted>0)才算接入成功
+# 厂商实测档案见 handoff-memory-config-provider-dev-20260908.md §4;新厂商接入后必须
+#   实测一轮蒸馏(extracted>0)才算接入成功
 llm:
   activeProvider: "opencode-go"
   providers:
-    - name: opencode-go            # OpenCode Go 中转(coding plan 包月,31 个模型)
+    - name: opencode-go            # OpenCode Go 中转(coding plan 包月,35 个模型,GET /models 可列)
       baseUrl: "https://opencode.ai/zen/go/v1"
       apiKeyEnv: "TDAI_KEY_OPENCODE"
       model: "deepseek-v4-flash"
