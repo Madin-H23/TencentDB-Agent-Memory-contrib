@@ -226,6 +226,16 @@ export interface StandaloneLLMOverrideConfig {
     /** 是否用 memory systemUser.userKey 作为 Authorization（默认 true）。 */
     useMemorySystemUserKey?: boolean;
   };
+  /** 附加请求头（随每个 LLM 请求发送，如 OpenCode Go 要求的 x-opencode-session）。 */
+  headers?: Record<string, string>;
+  /** 该厂商需要关闭思考模式（与 env TDAI_DISABLE_THINKING 双轨，任一命中即注入）。 */
+  disableThinking?: boolean;
+  /** 分层覆盖（可选）：按蒸馏层（l1|l2|l3）覆盖 model/maxTokens/timeoutMs/disableThinking。 */
+  layers?: {
+    l1?: { model?: string; maxTokens?: number; timeoutMs?: number; disableThinking?: boolean };
+    l2?: { model?: string; maxTokens?: number; timeoutMs?: number; disableThinking?: boolean };
+    l3?: { model?: string; maxTokens?: number; timeoutMs?: number; disableThinking?: boolean };
+  };
   /**
    * 是否用流式请求(streamText)调用上游。默认 false(generateText 非流式)。
    * 个别 OpenAI 兼容上游只接受流式请求时置 true。

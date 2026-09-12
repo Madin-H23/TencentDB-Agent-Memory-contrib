@@ -625,22 +625,42 @@ export class TdaiCore {
    * provider=openai 时透传；provider=proxy 时替换 baseUrl 为 `${baseUrl}/proxy/<iid>/v1`，
    * apiKey 用 env.TDAI_MEMORY_SYSTEM_USER_KEY。四个 runner factory 构造点共用。
    */
-  private resolveRuntimeLlm(): {
+  /**
+   * 把 this.cfg.llm 按 provider 解析成运行时可直接用的 (baseUrl, apiKey, model)。
+   * provider=openai 时透传；provider=proxy 时替换 baseUrl 为 `${baseUrl}/proxy/<iid>/v1`，
+   * apiKey 用 env.TDAI_MEMORY_SYSTEM_USER_KEY。
+   * layer（可选）：蒸馏层标识（l1|l2|l3），命中 yaml llm.layers.<layer> 时按层覆盖
+   * model/maxTokens/timeoutMs/disableThinking，未配置的层沿用全局结果。
+   */
+  private resolveRuntimeLlm(layer?: "l1" | "l2" | "l3"): {
     baseUrl: string;
     apiKey: string;
     model: string;
     maxTokens: number;
     timeoutMs: number;
     stream: boolean;
+    headers?: Record<string, string>;
+    disableThinking?: boolean;
   } {
     const resolved = resolveStandaloneLlmForRuntime(this.cfg.llm, this.instanceId);
-    return {
+    const base = {
       baseUrl: resolved.baseUrl,
       apiKey: resolved.apiKey,
       model: resolved.model,
       maxTokens: resolved.maxTokens ?? 4096,
       timeoutMs: resolved.timeoutMs ?? 120_000,
       stream: resolved.stream ?? false,
+      ...(resolved.headers ? { headers: resolved.headers } : {}),
+      ...(resolved.disableThinking ? { disableThinking: resolved.disableThinking } : {}),
+    };
+    const ov = layer ? this.cfg.llm.layers?.[layer] : undefined;
+    if (!ov) return base;
+    return {
+      ...base,
+      ...(ov.model ? { model: ov.model } : {}),
+      ...(ov.maxTokens !== undefined ? { maxTokens: ov.maxTokens } : {}),
+      ...(ov.timeoutMs !== undefined ? { timeoutMs: ov.timeoutMs } : {}),
+      ...(ov.disableThinking !== undefined ? { disableThinking: ov.disableThinking } : {}),
     };
   }
 
@@ -662,8 +682,10 @@ export class TdaiCore {
    * actually be enabled (otherwise `resolveRuntimeLlm` has nothing to
    * work with).
    */
-  private shouldOverrideRunnerFactory(useStandaloneRunner: boolean): boolean {
+  private shouldOverrideRunnerFactory(useStandaloneRunner: boolean, layer?: "l1" | "l2" | "l3"): boolean {
     if (!useStandaloneRunner || !this.cfg.llm.enabled) return false;
+    // 该层配置了分层覆盖时必须走 per-call 重建,否则 llm.layers 在 gateway 模式下是死配置
+    if (layer && this.cfg.llm.layers?.[layer]) return true;
     if (this.hostAdapter.hostType === "openclaw") return true;
     return this.cfg.llm.provider === "proxy";
   }
@@ -693,9 +715,9 @@ export class TdaiCore {
     // if resolver would throw we swallow it and keep the host runner as
     // fallback — the per-call site will succeed once instanceId is set.
     let runnerFactory = this.runnerFactory;
-    if (this.shouldOverrideRunnerFactory(useStandaloneRunner)) {
+    if (this.shouldOverrideRunnerFactory(useStandaloneRunner, "l1")) {
       try {
-        const runtimeLlm = this.resolveRuntimeLlm();
+        const runtimeLlm = this.resolveRuntimeLlm("l1");
         runnerFactory = new StandaloneLLMRunnerFactory({
           config: runtimeLlm,
           logger: this.logger,
@@ -1058,8 +1080,8 @@ export class TdaiCore {
       : undefined;
 
     let runnerFactory = this.runnerFactory;
-    if (this.shouldOverrideRunnerFactory(useStandaloneRunner)) {
-      const runtimeLlm = this.resolveRuntimeLlm();
+    if (this.shouldOverrideRunnerFactory(useStandaloneRunner, "l1")) {
+      const runtimeLlm = this.resolveRuntimeLlm("l1");
       runnerFactory = new StandaloneLLMRunnerFactory({
         config: runtimeLlm,
         logger: this.logger,
@@ -1108,8 +1130,8 @@ export class TdaiCore {
       : undefined;
 
     let runnerFactory = this.runnerFactory;
-    if (this.shouldOverrideRunnerFactory(useStandaloneRunner)) {
-      const runtimeLlm = this.resolveRuntimeLlm();
+    if (this.shouldOverrideRunnerFactory(useStandaloneRunner, "l2")) {
+      const runtimeLlm = this.resolveRuntimeLlm("l2");
       runnerFactory = new StandaloneLLMRunnerFactory({
         config: runtimeLlm,
         logger: this.logger,
@@ -1152,8 +1174,8 @@ export class TdaiCore {
       : undefined;
 
     let runnerFactory = this.runnerFactory;
-    if (this.shouldOverrideRunnerFactory(useStandaloneRunner)) {
-      const runtimeLlm = this.resolveRuntimeLlm();
+    if (this.shouldOverrideRunnerFactory(useStandaloneRunner, "l3")) {
+      const runtimeLlm = this.resolveRuntimeLlm("l3");
       runnerFactory = new StandaloneLLMRunnerFactory({
         config: runtimeLlm,
         logger: this.logger,
