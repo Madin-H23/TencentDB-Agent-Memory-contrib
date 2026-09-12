@@ -232,14 +232,15 @@ memory:
 # Skill 是额外能力的加入，不影响上面的 Memory 引擎。
 # 启用后 skill 数据存储在 {baseDir}/skills/ 目录下。
 # 也可通过环境变量 TDAI_SKILL_ENABLED=true 启用。
-# skill:
-#   enabled: true
-#   routing:
-#     mode: "bm25"
-#     searchTopK: 20        # listing 接口最多注入多少条 skill（name+description）
-#   extraction:
-#     enabled: true         # 需要 llm 配置有效
-#     maxIterations: 16
-#   resources:
-#     maxResourceSizeBytes: 5000000
-#     allowExecutable: false
+# 09-13 用户拍板：开启基础档（库+10路由+检索注入），萃取档等面板 Skills 管理页批次再开。
+skill:
+  enabled: true
+  routing:
+    mode: "bm25"
+    searchTopK: 20        # listing 接口最多注入多少条 skill（name+description）
+  # extraction:           # 萃取档暂不开（与面板管理页捆绑，观察期结束后一批交付）
+  #   enabled: true       # 需要 llm 配置有效
+  #   maxIterations: 16
+  resources:
+    maxResourceSizeBytes: 5000000
+    allowExecutable: false
