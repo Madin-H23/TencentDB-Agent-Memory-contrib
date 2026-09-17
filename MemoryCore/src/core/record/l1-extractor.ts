@@ -62,6 +62,42 @@ export interface L1ExtractionResult {
   lastSceneName?: string;
 }
 
+/**
+ * Raised when an L1 extraction attempt must be treated as FAILED instead of as
+ * "nothing to remember".
+ *
+ * Background (upstream #1395; our in-service incident 2026-09-17): the LLM-call
+ * failure path used to return `{ success: false, extractedCount: 0 }`, and the
+ * L1 runner does not consume that flag for L1 — it advanced the per-session
+ * cursor anyway. Because the cursor is the only filter for the next L0 read,
+ * the affected conversations were never re-read: dropped silently, with no
+ * retry and nothing visible to the operator (the panel's pending count is
+ * cursor-based and therefore cannot see it).
+ *
+ * Throwing instead travels the path that already exists: the pipeline task
+ * fails, the task layer retries with backoff / dead-letters it, and the
+ * checkpoint cursor stays where it is — L0 accumulates and the batch is
+ * distilled later (or after an operator-triggered run).
+ *
+ * `reason`:
+ *   - `llm_error`   : the LLM call itself failed (timeout / 4xx-5xx / quota)
+ *   - `parse_error` : the response could not be understood — no JSON array
+ *                     found, parsed JSON was not an array, or JSON.parse
+ *                     failed (e.g. truncated by `max_tokens`)
+ *
+ * A parseable response that simply contains nothing memorable stays a SUCCESS
+ * (`success: true, extractedCount: 0`) so the cursor may advance.
+ */
+export class L1ExtractionFailure extends Error {
+  readonly reason: "llm_error" | "parse_error";
+
+  constructor(reason: "llm_error" | "parse_error", message: string) {
+    super(message);
+    this.name = "L1ExtractionFailure";
+    this.reason = reason;
+  }
+}
+
 // ============================
 // Core function
 // ============================
@@ -183,8 +219,24 @@ export async function extractL1Memories(params: {
     });
     logger?.debug?.(`${TAG} LLM detected ${scenes.length} scene(s)`);
   } catch (err) {
+    // Parse-side failures are thrown from inside callLlmExtraction and must keep
+    // their own classification (parse_error) instead of being remapped below.
+    if (err instanceof L1ExtractionFailure) {
+      logger?.warn?.(
+        `${TAG} l1-deferred reason=${err.reason} sessionKey=${sessionKey} — batch deferred, checkpoint cursor unchanged`,
+      );
+      throw err;
+    }
     logger?.error(`${TAG} LLM extraction failed: ${err instanceof Error ? err.message : String(err)}`);
-    return { success: false, extractedCount: 0, storedCount: 0, records: [], sceneNames: [] };
+    // Must NOT be reported as a successful empty run: the batch has to be
+    // retried, so the caller keeps the checkpoint cursor untouched (#1395).
+    logger?.warn?.(
+      `${TAG} l1-deferred reason=llm_error sessionKey=${sessionKey} — batch deferred, checkpoint cursor unchanged`,
+    );
+    throw new L1ExtractionFailure(
+      "llm_error",
+      `L1 extraction failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 
   // Flatten all memories across scenes
@@ -468,7 +520,7 @@ function parseExtractionResult(raw: string, logger?: Logger): SceneSegment[] {
       logger?.warn?.(
         `${TAG} [l1-debug] NO_JSON taskId=l1-extraction, rawLen=${raw.length}, cleanedLen=${cleaned.length}, rawFull=${JSON.stringify(rawPreview)}${raw.length > 2048 ? `…(+${raw.length - 2048})` : ""}`,
       );
-      return [];
+      throw new L1ExtractionFailure("parse_error", "L1 extraction response contained no JSON array");
     }
 
     // Sanitize control characters inside JSON string literals that LLM may produce.
@@ -488,7 +540,7 @@ function parseExtractionResult(raw: string, logger?: Logger): SceneSegment[] {
 
     if (!Array.isArray(parsed)) {
       logger?.warn?.(`${TAG} Extraction response is not an array`);
-      return [];
+      throw new L1ExtractionFailure("parse_error", "L1 extraction response is not a JSON array");
     }
 
     const scenes: SceneSegment[] = [];
@@ -515,12 +567,17 @@ function parseExtractionResult(raw: string, logger?: Logger): SceneSegment[] {
 
     return scenes;
   } catch (err) {
+    // Already classified inside this function (no_json / not_array) — keep it.
+    if (err instanceof L1ExtractionFailure) throw err;
     logger?.warn?.(`${TAG} Failed to parse extraction result: ${err instanceof Error ? err.message : String(err)}`);
     const rawPreview = raw.slice(0, 2048);
     logger?.warn?.(
       `${TAG} [l1-debug] PARSE_FAIL rawLen=${raw.length}, rawFull=${JSON.stringify(rawPreview)}${raw.length > 2048 ? `…(+${raw.length - 2048})` : ""}`,
     );
-    return [];
+    throw new L1ExtractionFailure(
+      "parse_error",
+      `L1 extraction response could not be parsed: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 }
 
