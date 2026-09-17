@@ -25,6 +25,12 @@ const PI_SLOT_MAP: Record<string, string | null> = {
 const LABEL_RE = /^([A-Z][A-Za-z ]*):\s*$/;
 // XML block sections: <project_context> ... </project_context>
 const XML_OPEN_RE = /^<([a-z_]+)>\s*$/;
+// Depth tracking only (never opens a section by itself): also recognizes
+// attribute-bearing opens like <project_instructions path="..."> and any
+// close tag, so label-shaped lines INSIDE an XML block stay in the
+// enclosing section's body (#1411).
+const XML_OPEN_WITH_ATTRS_RE = /^<([a-z_]+)(?:\s[^>]*)?>\s*$/;
+const XML_CLOSE_RE = /^<\/([a-z_]+)>\s*$/;
 
 export function splitByPiLabels(systemText: string): PromptSegment[] {
   const lines = systemText.split("\n");
@@ -33,6 +39,7 @@ export function splitByPiLabels(systemText: string): PromptSegment[] {
   let buffer: string[] = [];
   let currentKey: string | null = null;
   let currentKind: "plain" | "markdown_section" = "plain";
+  let xmlDepth = 0;
 
   const flush = () => {
     if (buffer.length === 0) return;
@@ -66,12 +73,24 @@ export function splitByPiLabels(systemText: string): PromptSegment[] {
   };
 
   for (const line of lines) {
-    const labelMatch = LABEL_RE.exec(line);
-    const xmlMatch = XML_OPEN_RE.exec(line);
+    // Split decision uses the depth BEFORE this line: a top-level bare open
+    // tag still opens its section, while any line at nesting depth > 0
+    // (label-shaped, or a nested tag) stays in the enclosing section's body.
+    // Files carried by blocks like <project_instructions path="..."> routinely
+    // contain "Guidelines:"-style lines; without the depth check they split
+    // the enclosing section and duplicated anchor keys, which made the
+    // pipeline inject a memory block once per bogus matching segment (#1411).
+    const labelMatch = xmlDepth === 0 ? LABEL_RE.exec(line) : null;
+    const xmlMatch = xmlDepth === 0 ? XML_OPEN_RE.exec(line) : null;
     if (labelMatch || xmlMatch) {
       flush();
       currentKey = labelMatch ? labelMatch[1].trim() : xmlMatch![1];
       currentKind = "markdown_section";
+    }
+    if (XML_OPEN_WITH_ATTRS_RE.test(line)) {
+      xmlDepth++;
+    } else if (XML_CLOSE_RE.test(line)) {
+      xmlDepth = Math.max(0, xmlDepth - 1);
     }
     buffer.push(line);
   }
