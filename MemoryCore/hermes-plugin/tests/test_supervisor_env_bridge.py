@@ -90,6 +90,40 @@ def test_bridge_covers_exactly_the_documented_schema_names():
     )
 
 
+def _capture_warnings():
+    """Attach a capturing handler to the supervisor logger; returns records list."""
+    import logging
+
+    records = []
+    handler = logging.Handler()
+    handler.emit = lambda record: records.append(record)
+    sup_logger = logging.getLogger("memory.memory_tencentdb.supervisor")
+    sup_logger.addHandler(handler)
+    sup_logger.setLevel(logging.WARNING)
+    return records, sup_logger, handler
+
+
+def test_warns_when_no_source_yields_tdai_llm_api_key():
+    # #1386 follow-up: "bridged but empty" and "not bridged" must be
+    # distinguishable from the outside — a missing resolved key warns.
+    records, sup_logger, handler = _capture_warnings()
+    try:
+        supervisor.bridge_llm_env({})
+    finally:
+        sup_logger.removeHandler(handler)
+    assert any("TDAI_LLM_API_KEY" in r.getMessage() for r in records)
+
+
+def test_no_warning_when_key_resolves_from_either_source():
+    records, sup_logger, handler = _capture_warnings()
+    try:
+        supervisor.bridge_llm_env({"MEMORY_TENCENTDB_LLM_API_KEY": "sk-hermes"})
+        supervisor.bridge_llm_env({"TDAI_LLM_API_KEY": "sk-operator"})
+    finally:
+        sup_logger.removeHandler(handler)
+    assert not any("TDAI_LLM_API_KEY" in r.getMessage() for r in records)
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(
