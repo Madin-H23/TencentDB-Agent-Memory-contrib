@@ -54,6 +54,13 @@ def bridge_llm_env(env: Dict[str, str]) -> Dict[str, str]:
     bridge only fills names that are unset, mirroring the port/host dual-export
     above. Empty MEMORY_TENCENTDB_LLM_* values are treated as unset.
 
+    When NO source yields ``TDAI_LLM_API_KEY``, emits a single warning: without
+    this line, "bridged but empty" and "not bridged at all" are indistinguishable
+    from the outside, and the Gateway boots green while every L1 extraction
+    fails on the missing key (#1386). This is NOT a warning when the operator
+    deliberately configures llm.apiKey in the Gateway yaml instead — the
+    message says so.
+
     Returns ``env`` for convenience.
     """
     for memory_name, tdai_name in LLM_ENV_BRIDGE:
@@ -64,6 +71,13 @@ def bridge_llm_env(env: Dict[str, str]) -> Dict[str, str]:
                 "memory-tencentdb: bridged %s -> %s for the Gateway child process",
                 memory_name, tdai_name,
             )
+    if not env.get("TDAI_LLM_API_KEY"):
+        logger.warning(
+            "memory-tencentdb: no TDAI_LLM_API_KEY in the Gateway child env "
+            "(neither MEMORY_TENCENTDB_LLM_API_KEY nor TDAI_LLM_API_KEY is set) — "
+            "L1/L2/L3 extraction will fail unless llm.apiKey is configured in the "
+            "Gateway yaml; see issue #1386"
+        )
     return env
 
 # Health check parameters
