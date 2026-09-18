@@ -3,8 +3,9 @@
 # TDAI Memory Gateway 一键启动脚本
 # ============================================================
 # 用法:
-#   先设置你的 DeepSeek API Key:
-#     export TDAI_LLM_API_KEY=你的deepseek_key
+#   先设置你的 LLM API Key (对应 tdai-gateway.yaml llm.providers 里
+#   activeProvider 所引用的 apiKeyEnv; TDAI_LLM_API_KEY 为脚本最低校验项):
+#     export TDAI_LLM_API_KEY=你的key
 #   然后运行:
 #     ./start-gateway.sh
 #
@@ -29,13 +30,15 @@ if [ -z "$TDAI_LLM_API_KEY" ]; then
   echo "   请先运行: export TDAI_LLM_API_KEY=你的deepseek_key"
   exit 1
 fi
-echo "✅ LLM Key 已设置 (DeepSeek-V4-Flash)"
+echo "✅ TDAI_LLM_API_KEY 已设置 (生效厂商/模型以 tdai-gateway.yaml llm.activeProvider 为准)"
 
 # ── 可选:开启 Gateway 鉴权(给桥接层/Hook 用)──
 # 取消下行注释并填入自定义 key,则桥接层需配相同的 TDAI_GATEWAY_API_KEY
 # export TDAI_GATEWAY_API_KEY=your-gateway-secret
 
-# ── DeepSeek-V4 系列:关闭思考模式(否则返回 reasoning_content,L1 蒸馏会失败)──
+# ── 思考型模型须关思考(否则 reasoning 烧穿 maxTokens,蒸馏 extracted=0)──
+# 对所有 OpenAI 兼容通道生效(DeepSeek/OpenCode Go/智谱等),开关在 providers 条目
+# 或层配置里也可用 llm.disableThinking 覆盖
 export TDAI_DISABLE_THINKING=true
 
 echo "工作目录: $PROJECT_DIR"

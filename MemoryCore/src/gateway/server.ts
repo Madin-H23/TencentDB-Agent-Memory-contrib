@@ -130,8 +130,14 @@ function nowLocalIso(): string {
 }
 
 function createConsoleLogger(): Logger {
+  // debug is opt-in via TDAI_LOG_LEVEL=debug — an always-on debug firehose made
+  // the standalone err/out logs noisy and harder to triage (WARN-level signals
+  // drowned in per-request DEBUG lines).
+  const debugEnabled = (process.env.TDAI_LOG_LEVEL ?? "").trim().toLowerCase() === "debug";
   return {
-    debug: (msg: string) => console.debug(`${nowLocalIso()} DEBUG ${TAG} ${msg}`),
+    debug: (msg: string) => {
+      if (debugEnabled) console.debug(`${nowLocalIso()} DEBUG ${TAG} ${msg}`);
+    },
     info: (msg: string) => console.info(`${nowLocalIso()} INFO  ${TAG} ${msg}`),
     warn: (msg: string) => console.warn(`${nowLocalIso()} WARN  ${TAG} ${msg}`),
     error: (msg: string) => console.error(`${nowLocalIso()} ERROR ${TAG} ${msg}`),
@@ -2772,6 +2778,14 @@ async function main(): Promise<void> {
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
+
+  // Fire-and-forget promise bugs (pipeline hooks, async cleanup) would otherwise
+  // hit Node's default throw-and-crash. Log with full detail and keep serving —
+  // single-user standalone favors availability; uncaughtException keeps default
+  // crash semantics (state after a sync throw is not trustworthy).
+  process.on("unhandledRejection", (reason) => {
+    console.error(`${TAG} Unhandled promise rejection:`, reason);
+  });
 
   await gateway.start();
 }

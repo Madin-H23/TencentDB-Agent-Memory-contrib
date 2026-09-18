@@ -728,7 +728,7 @@ async function handleConversationAdd(body: unknown, auth: V2AuthContext, request
 
     let emb: Float32Array | undefined;
     if (embedding) {
-      try { emb = await embedding.embed(msg.content); } catch (e) { console.warn(`[v2-router] L0 embedding failed:`, e); }
+      try { emb = await embedding.embed(msg.content); } catch (e) { deps.logger.warn(`[v2-router] L0 embedding failed: ${e instanceof Error ? e.message : String(e)}`); }
     }
 
     await store.upsertL0(record, emb);
@@ -1055,7 +1055,7 @@ async function handleAtomicUpdate(body: unknown, _auth: V2AuthContext, requestId
 
   const embedding = deps.getEmbedding();
   let emb: Float32Array | undefined;
-  if (embedding) { try { emb = await embedding.embed(content); } catch (e) { console.warn(`[v2-router] L1 embedding failed:`, e); } }
+  if (embedding) { try { emb = await embedding.embed(content); } catch (e) { deps.logger.warn(`[v2-router] L1 embedding failed: ${e instanceof Error ? e.message : String(e)}`); } }
 
   await store.upsertL1(updated, emb);
 

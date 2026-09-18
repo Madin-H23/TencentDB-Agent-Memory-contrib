@@ -2320,7 +2320,7 @@ export class VectorStore implements IMemoryStore {
         rows = this.stmtL0QueryAll.all(sessionKey, limit) as Array<Record<string, unknown>>;
       }
 
-      this.logger?.info(
+      this.logger?.debug(
         `${TAG} [L0-query] session=${sessionKey}, afterRecordedAtMs=${afterRecordedAtMs ?? "(all)"}, ` +
         `limit=${limit}, returned ${rows.length} row(s)`,
       );
@@ -2404,7 +2404,7 @@ export class VectorStore implements IMemoryStore {
       }
       groups.sort((a, b) => a.messages[0].timestamp - b.messages[0].timestamp);
 
-      this.logger?.info(
+      this.logger?.debug(
         `${TAG} [L0-query-grouped] session=${sessionKey}, afterRecordedAtMs=${afterRecordedAtMs ?? "(all)"}, ` +
         `${rows.length} messages across ${groups.length} group(s)`,
       );
