@@ -71,6 +71,22 @@ export interface L0ConversationRecord {
 
 const TAG = "[memory-tdai][l0]";
 
+// Rate-limit for the "cannot locate target raw message" warning: certain agent
+// workflows trigger it on every capture round, and an unconditional WARN floods
+// the err log (observed in long-running single-user deployments). First
+// occurrence per window logs WARN; the rest degrade to debug.
+const TARGET_MISS_WARN_INTERVAL_MS = 10 * 60 * 1000;
+let lastTargetMissWarnAt = 0;
+
+/** True when this occurrence should log at WARN level (first within the window). */
+export function shouldWarnTargetMiss(now: number): boolean {
+  if (now - lastTargetMissWarnAt >= TARGET_MISS_WARN_INTERVAL_MS) {
+    lastTargetMissWarnAt = now;
+    return true;
+  }
+  return false;
+}
+
 // ============================
 // Core function
 // ============================
@@ -245,10 +261,17 @@ export async function recordConversation(params: {
         `skipping replacement, will rely on sanitizeText().`,
       );
     } else {
-      logger?.warn?.(
-        `${TAG} Have originalUserText but cannot locate target raw message — ` +
-        `skipping replacement, will rely on sanitizeText().`,
-      );
+      if (shouldWarnTargetMiss(Date.now())) {
+        logger?.warn?.(
+          `${TAG} Have originalUserText but cannot locate target raw message — ` +
+          `skipping replacement, will rely on sanitizeText(). (rate-limited: once per 10min)`,
+        );
+      } else {
+        logger?.debug?.(
+          `${TAG} Have originalUserText but cannot locate target raw message — ` +
+          `skipping replacement (rate-limited)`,
+        );
+      }
     }
   }
 

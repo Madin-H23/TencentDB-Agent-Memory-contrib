@@ -410,8 +410,14 @@ export function loadGatewayConfig(overrides?: Partial<GatewayConfig>): GatewayCo
           : {};
       }
       fileConfig = expandEnvVars(fileConfig) as Record<string, unknown>;
-    } catch {
-      // Config file is optional — malformed files fall back to env-only config.
+    } catch (err) {
+      // A missing config file is fine (env-only mode), but a MALFORMED one must be
+      // visible — silently falling back to env-only hides typos and costs long
+      // debugging sessions ("why is my yaml setting ignored?").
+      console.error(
+        `[tdai-gateway] Failed to parse config file ${configPath} — falling back to env-only config: ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
