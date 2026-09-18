@@ -285,6 +285,16 @@ export interface V2RouterDeps {
    */
   pipelineWorker?: PipelineWorker;
 
+  /**
+   * Thunk 返回 standalone 管线管理器，供 /v2/pipeline/l1/trigger 手动排空
+   * 某会话的 L1 积压（enqueueL1Drain）。仅 standalone 使用——service 模式
+   * 处理器在触达该字段前即返回 404。用 thunk 是因为管理器在 router deps
+   * 构建之后才被赋值。
+   */
+  getStatefulPipelineManager?: () => {
+    enqueueL1Drain(sessionKey: string, instanceId?: string, teamId?: string, agentId?: string): Promise<void>;
+  } | null;
+
   // ── Tenancy isolation (three-dim) ──
   //
   // `isolationConfig` is set once at gateway start.  `requestIsolation` and
@@ -463,6 +473,7 @@ const routeTable: Record<string, RouteHandler> = {
   [`${V2_PREFIX}/task/delete`]: handleTaskDelete, // @deprecated 改用 /v3/meta/task/delete
   // ── end @deprecated v2 entity 路由 ──
   [`${V2_PREFIX}/pipeline/status`]: handlePipelineStatus,
+  [`${V2_PREFIX}/pipeline/l1/trigger`]: handlePipelineL1Trigger,
 };
 
 export async function handleV2Route(
@@ -2186,6 +2197,58 @@ async function handlePipelineStatus(
   };
 
   return successEnvelope<PipelineStatusData>(data, requestId);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// /v2/pipeline/l1/trigger —— 仅 standalone：手动排空某会话的 L1 积压。
+//
+// 与 gateway/server.ts executeL1 的"积压搁浅防护"配套，服务两类场景：
+//   1. 历史上被 count=0 误跳过的批次（定时器已消耗、无新捕获不再武装）
+//      —— 此端点把本该跑的那次 L1 补上；
+//   2. 运维主动要求立即蒸馏 pending L0，不等 everyN/idle 阈值。
+//
+// Body: { session_key: string }（必填——调用方自己枚举待蒸会话，端点保持
+// 精确且不猜会话存在性）。service 模式返回 404（与 /v2/pipeline/status 一致）。
+// ─────────────────────────────────────────────────────────────────────────
+
+interface PipelineL1TriggerData {
+  queued: string[];
+}
+
+async function handlePipelineL1Trigger(
+  body: unknown,
+  _auth: V2AuthContext,
+  requestId: string,
+  deps: V2RouterDeps,
+): Promise<ApiResponseEnvelope> {
+  if (deps.deployMode !== "standalone") {
+    return errorEnvelope(404, "Not found", requestId);
+  }
+
+  const sessionKey =
+    typeof (body as { session_key?: unknown })?.session_key === "string"
+      ? ((body as { session_key: string }).session_key).trim()
+      : "";
+  if (!sessionKey) {
+    return errorEnvelope(400, "session_key is required", requestId);
+  }
+
+  const manager = deps.getStatefulPipelineManager?.();
+  if (!manager) {
+    return errorEnvelope(503, "Pipeline manager not available", requestId);
+  }
+
+  try {
+    await manager.enqueueL1Drain(sessionKey);
+  } catch (err) {
+    return errorEnvelope(
+      500,
+      `Failed to enqueue L1 drain: ${err instanceof Error ? err.message : String(err)}`,
+      requestId,
+    );
+  }
+
+  return successEnvelope<PipelineL1TriggerData>({ queued: [sessionKey] }, requestId);
 }
 
 // ============================

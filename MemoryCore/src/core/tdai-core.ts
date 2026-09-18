@@ -540,6 +540,17 @@ export class TdaiCore {
     return this.storage;
   }
 
+  /**
+   * 读取会话当前 L1 游标（checkpoint runner state，recorded_at epoch-ms 语义）。
+   * 从未蒸馏过返回 0。供网关执行器的"积压搁浅防护"用：定时器触发的 L1 不得
+   * 仅凭过期的 conversation_count 跳过——游标之后若仍有行，必须继续执行。
+   */
+  async getL1Cursor(sessionKey: string): Promise<number> {
+    const checkpoint = new CheckpointManager(this.dataDir, this.logger, this.storage);
+    const cp = await checkpoint.read();
+    return checkpoint.getRunnerState(cp, sessionKey).last_l1_cursor ?? 0;
+  }
+
   /** Skill module facade (may be undefined when skill.enabled=false or wiring failed). */
   getSkillCore(): SkillCore | undefined {
     return this.skillCore;
