@@ -156,6 +156,7 @@ function createConsoleLogger(): Logger {
  * comments above.
  */
 import { resolveMaxBodyBytes } from "../utils/env-config.js";
+import { countPendingL0Rows } from "./l1-pending.js";
 
 const MAX_BODY_BYTES = resolveMaxBodyBytes();
 
@@ -881,6 +882,9 @@ export class TdaiGateway {
         // the handler returns 503 in that case.
         stateBackend: this.stateBackend ?? undefined,
         pipelineWorker: this.pipelineWorker ?? undefined,
+        // 手动 L1 排空（/v2/pipeline/l1/trigger，仅 standalone）。thunk：管理器
+        // 在启动构建本 deps 对象之后才被赋值。
+        getStatefulPipelineManager: () => this.statefulPipelineManager,
         logger: this.logger,
         // `V3_STRICT_ISOLATION` controls only /v3 L0–L3 memory data-plane
         // strictness. Default OFF for local/integration; production should set it.
@@ -2394,13 +2398,17 @@ export class TdaiGateway {
         // before we even started, bail out without doing any work.
         if (signal?.aborted) throw signal.reason ?? new Error("executeL1: aborted before start");
 
-        // Dedup: if triggered by timer but session already processed (count=0), skip
+        // Dedup 快路径：定时器触发的 L1 若会话确实无新数据则是空跑。但
+        // `conversation_count === 0` 单独不足以证明——并发的"新捕获 +1"会被
+        // 完成中的 L1"清零"覆盖（2026-09-17 实测：一对 2 行数据被搁浅一整天，
+        // 定时器触发的任务因 count=0 被跳过；定时器已消耗且无新捕获不再武装，
+        // 积压永远无法排空：界面一直显示"2 轮未蒸馏"、L1 无产出）。
+        // 因此这里只置一个标志，"跳过"的最终裁定放到 resolveStore 之后——
+        // 由 L0 真相源确认游标之后确实无行。
+        let counterSaysIdle = false;
         if (task.data?.triggeredBy === "timer_scanner" && gateway.stateBackend) {
           const state = await gateway.stateBackend.getSessionState(instanceId, task.sessionId, teamId, agentId);
-          if (state && state.conversation_count === 0) {
-            gateway.logger.debug?.(`[executor] L1 skipped: session ${task.sessionId} already processed (count=0)`);
-            return;
-          }
+          counterSaysIdle = !!state && state.conversation_count === 0;
         }
 
         // Credit quota check before LLM call
@@ -2417,6 +2425,26 @@ export class TdaiGateway {
 
         core.setInstanceId(instanceId);
         const { store, embedding } = await resolveStore(task);
+
+        // 积压搁浅防护（见上方 dedup 快路径注释）：只有 L0 真相源确认游标之后
+        // 确实无行，才允许因 conversation_count=0 跳过；否则继续执行并告警。
+        if (counterSaysIdle) {
+          const l1Cursor = await core.getL1Cursor(task.sessionId);
+          const pendingRows = await countPendingL0Rows(
+            store,
+            task.sessionId,
+            l1Cursor > 0 ? l1Cursor : undefined,
+          );
+          if (pendingRows === 0) {
+            gateway.logger.debug?.(`[executor] L1 skipped: session ${task.sessionId} has no pending L0 rows past cursor`);
+            return;
+          }
+          gateway.logger.warn?.(
+            `[executor] L1 proceeding despite conversation_count=0: ${pendingRows} pending L0 row(s) for ` +
+            `${task.sessionId} past cursor (counter race guard; without this the backlog would strand)`,
+          );
+        }
+
         const storage = await resolveStorage(task);
         const result = await core.runL1WithStore(task.sessionId, store, embedding, storage ?? undefined);
 
