@@ -621,9 +621,12 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
     }
     const apiKeyEnvName = str(activeEntry, "apiKeyEnv");
     const keyFromEnv = apiKeyEnvName ? env(apiKeyEnvName) : undefined;
-    if (!keyFromEnv) {
+    // TDAI_LLM_API_KEY 是全局应急覆盖,优先级高于厂商条目:存在时允许条目的
+    // apiKeyEnv 暂缺。若先对条目缺钥 fail-fast,覆盖读取(下方 apiKey 折叠链)
+    // 就永远不可达 —— 全局覆盖恰恰是条目缺钥时的逃生通道。
+    if (!keyFromEnv && !env("TDAI_LLM_API_KEY")) {
       throw new Error(
-        `[config] providers[name=${String(activeProviderName)}].apiKeyEnv="${apiKeyEnvName ?? "(未设置)"}" 对应环境变量未设置或为空`,
+        `[config] providers[name=${String(activeProviderName)}].apiKeyEnv="${apiKeyEnvName ?? "(未设置)"}" 对应环境变量未设置或为空,且未设置 TDAI_LLM_API_KEY 应急覆盖`,
       );
     }
     entryBaseUrl = str(activeEntry, "baseUrl");

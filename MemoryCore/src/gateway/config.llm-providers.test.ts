@@ -152,6 +152,21 @@ describe("loadGatewayConfig llm multi-provider fold", () => {
     }
   });
 
+  it("entry apiKeyEnv unset but TDAI_LLM_API_KEY present → global override rescues instead of fail-fast", () => {
+    delete process.env.TDAI_TEST_KEY_A;
+    process.env.TDAI_LLM_API_KEY = "emergency-global-key";
+    try {
+      withFixture(FIXTURE_YAML, () => {
+        const cfg = loadGatewayConfig();
+        expect(cfg.llm.apiKey).toBe("emergency-global-key");
+        expect(cfg.llm.baseUrl).toBe("https://vendor-a.example/v1");
+      });
+    } finally {
+      delete process.env.TDAI_LLM_API_KEY;
+      process.env.TDAI_TEST_KEY_A = "test-key-a-value";
+    }
+  });
+
   it("activeProvider matching no entry → fail-fast at startup", () => {
     process.env.TDAI_ACTIVE_PROVIDER = "no-such-vendor";
     try {
@@ -177,6 +192,7 @@ describe("loadGatewayConfig llm multi-provider fold", () => {
 
   it("entry apiKeyEnv pointing at an unset env var → fail-fast", () => {
     delete process.env.TDAI_TEST_KEY_A;
+    delete process.env.TDAI_LLM_API_KEY;
     try {
       withFixture(FIXTURE_YAML, () => {
         expect(() => loadGatewayConfig()).toThrow(/环境变量未设置或为空/);
