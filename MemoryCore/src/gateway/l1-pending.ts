@@ -22,6 +22,11 @@ import type { IMemoryStore } from "../core/store/types.js";
  *
  * `limit` defaults to 1 — callers only need presence/absence; the newest
  * `limit` rows are inspected, which is exactly the pending tail.
+ *
+ * The store is asked to `throwOnError`: sqlite/tcvdb normally swallow query
+ * failures into `[]`, and an error read as "zero pending" here would skip the
+ * timer-fired L1 and strand the backlog — the exact failure this guard exists
+ * to prevent. A failed query therefore rejects instead of returning 0.
  */
 export async function countPendingL0Rows(
   store: Pick<IMemoryStore, "queryL0GroupedBySessionId">,
@@ -29,7 +34,9 @@ export async function countPendingL0Rows(
   cursorOrUndefined: number | undefined,
   limit = 1,
 ): Promise<number> {
-  const groups = await store.queryL0GroupedBySessionId(sessionKey, cursorOrUndefined, limit);
+  const groups = await store.queryL0GroupedBySessionId(sessionKey, cursorOrUndefined, limit, {
+    throwOnError: true,
+  });
   let total = 0;
   for (const g of groups) {
     total += g.messages?.length ?? 0;
