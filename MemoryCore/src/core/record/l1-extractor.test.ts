@@ -94,4 +94,23 @@ describe("extractL1Memories: failure vs. genuine empty (#1395)", () => {
     expect(res.success).toBe(true);
     expect(res.extractedCount).toBe(0);
   });
+
+  it("defers (normalized_all_dropped) when parse succeeded but every memory has an unknown type", async () => {
+    // The LLM returned well-formed scenes with real content — only the `type`
+    // field is outside the accepted taxonomy. Advancing the cursor here would
+    // silently drop the extracted content with no retry.
+    const unknownType = JSON.stringify([
+      {
+        scene_name: "用户在设计项目方案",
+        message_ids: ["m1"],
+        memories: [
+          { type: "mystery_kind", content: "项目方案敲定采用事件溯源架构", priority: 60 },
+        ],
+      },
+    ]);
+    await expect(extract(runnerReturning(unknownType))).rejects.toBeInstanceOf(L1ExtractionFailure);
+    await expect(extract(runnerReturning(unknownType))).rejects.toMatchObject({
+      reason: "normalized_all_dropped",
+    });
+  });
 });

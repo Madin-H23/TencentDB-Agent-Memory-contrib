@@ -114,6 +114,7 @@ export const L1_DEFERRING_REASONS: ReadonlySet<L1EmptyReason> = new Set<L1EmptyR
   "no_json",
   "not_array",
   "parse_fail",
+  "normalized_all_dropped",
 ]);
 
 // ============================
@@ -296,7 +297,7 @@ export async function extractL1Memories(params: {
     //   - `earlyEmptyReason` from parseExtractionResult (parse-side signal)
     //   - `normalized_all_dropped` fallback: parse succeeded with scenes, but
     //     the type-normalization loop above rejected every entry.
-    const finalReason: L1EmptyReason | "normalized_all_dropped" =
+    const finalReason: L1EmptyReason =
       earlyEmptyReason ?? (scenes.length > 0 ? "normalized_all_dropped" : "empty_scenes");
     logger?.warn?.(
       `${TAG} l1-empty reason=${finalReason} sessionKey=${sessionKey} scenes=${scenes.length} inputMsgs=${messages.length}`,
@@ -319,9 +320,14 @@ export async function extractL1Memories(params: {
     // ── Failure vs. genuine empty (#1395) ──
     // `empty_scenes` means the model answered properly and simply had nothing
     // worth remembering → success, the cursor may advance.
+    // `normalized_all_dropped` also defers: the LLM DID extract content, only
+    // the type normalization rejected it — advancing here would silently drop
+    // real memories with no retry. A persistently unknown type shows up as a
+    // repeatedly deferred batch on the `l1-deferred` warn line, which ops can
+    // see and act on, instead of data vanishing.
     // The deferring reasons mean we never got a usable answer → defer the batch
     // (throw) so the same L0 rows are retried instead of being skipped forever.
-    if (finalReason !== "normalized_all_dropped" && L1_DEFERRING_REASONS.has(finalReason)) {
+    if (L1_DEFERRING_REASONS.has(finalReason)) {
       logger?.warn?.(
         `${TAG} l1-deferred reason=${finalReason} sessionKey=${sessionKey} — batch deferred, checkpoint cursor unchanged`,
       );
@@ -610,7 +616,8 @@ export type L1EmptyReason =
   | "no_json"        // /\[[\s\S]*\]/ did not match in raw content
   | "parse_fail"     // JSON.parse threw on the extracted substring
   | "not_array"      // parse succeeded but result is not an array
-  | "empty_scenes";  // parse succeeded, array had 0 scenes OR all scenes had 0 memories
+  | "empty_scenes"   // parse succeeded, array had 0 scenes OR all scenes had 0 memories
+  | "normalized_all_dropped"; // parse succeeded with scenes, but every memory was rejected by type normalization
 
 interface ParseExtractionOutcome {
   scenes: SceneSegment[];
