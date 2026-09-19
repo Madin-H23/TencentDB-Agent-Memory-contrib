@@ -124,6 +124,70 @@ def test_no_warning_when_key_resolves_from_either_source():
     assert not any("TDAI_LLM_API_KEY" in r.getMessage() for r in records)
 
 
+def test_ensure_running_passes_bridged_env_to_gateway_child():
+    """Popen env spy (#1409 review follow-up): bridge_llm_env is tested in
+    isolation above, but the reviewer asked for proof that the REAL
+    ensure_running path hands the bridged variables to the spawned Gateway
+    child. Patch Popen, capture the env kwarg."""
+    import contextlib
+    import tempfile
+
+    sup = supervisor.GatewaySupervisor(
+        host="127.0.0.1", port=39999, gateway_cmd="node gateway.js --x"
+    )
+    captured = {}
+
+    class _FakeProc:  # minimal stand-in; _wait_for_health is patched out
+        pass
+
+    def _fake_popen(cmd, env=None, **kwargs):
+        captured["cmd"] = cmd
+        captured["env"] = dict(env or {})
+        return _FakeProc()
+
+    log_dir = tempfile.mkdtemp(prefix="supervisor-env-spy-")
+    orig_popen = supervisor.subprocess.Popen
+    orig_singleflight = supervisor._startup_singleflight
+    supervisor.subprocess.Popen = _fake_popen
+    supervisor._startup_singleflight = lambda host, port: contextlib.nullcontext()
+    sup.is_running = lambda: False
+    sup._resolve_log_dir = lambda: log_dir  # real dir; keeps makedirs happy
+    sup._wait_for_health = lambda: True
+    os.environ["MEMORY_TENCENTDB_LLM_API_KEY"] = "sk-child-env"
+    os.environ["MEMORY_TENCENTDB_LLM_BASE_URL"] = "https://vendor.example/v1"
+    try:
+        assert sup.ensure_running() is True
+    finally:
+        supervisor.subprocess.Popen = orig_popen
+        supervisor._startup_singleflight = orig_singleflight
+        sup._close_log_handles()
+        os.environ.pop("MEMORY_TENCENTDB_LLM_API_KEY", None)
+        os.environ.pop("MEMORY_TENCENTDB_LLM_BASE_URL", None)
+        import shutil
+
+        shutil.rmtree(log_dir, ignore_errors=True)
+
+    assert captured["env"]["TDAI_LLM_API_KEY"] == "sk-child-env"
+    assert captured["env"]["TDAI_LLM_BASE_URL"] == "https://vendor.example/v1"
+    # original names still flow through for the provider itself
+    assert captured["env"]["MEMORY_TENCENTDB_LLM_API_KEY"] == "sk-child-env"
+
+
+def test_warning_names_the_yaml_escape_hatch():
+    """The supervisor is yaml-blind (it only sees the child env), so the
+    missing-key warning also fires when the operator configured llm.apiKey in
+    the Gateway yaml. The message must say so explicitly so it can be ignored
+    in that case (#1409 review follow-up)."""
+    records, sup_logger, handler = _capture_warnings()
+    try:
+        supervisor.bridge_llm_env({})
+    finally:
+        sup_logger.removeHandler(handler)
+    messages = " ".join(r.getMessage() for r in records)
+    assert "llm.apiKey is configured in the Gateway yaml" in messages
+    assert "does not apply to you" in messages
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(

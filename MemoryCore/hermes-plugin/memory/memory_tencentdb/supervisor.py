@@ -57,9 +57,10 @@ def bridge_llm_env(env: Dict[str, str]) -> Dict[str, str]:
     When NO source yields ``TDAI_LLM_API_KEY``, emits a single warning: without
     this line, "bridged but empty" and "not bridged at all" are indistinguishable
     from the outside, and the Gateway boots green while every L1 extraction
-    fails on the missing key (#1386). This is NOT a warning when the operator
-    deliberately configures llm.apiKey in the Gateway yaml instead — the
-    message says so.
+    fails on the missing key (#1386). The supervisor is yaml-blind — it only
+    sees the child env — so the warning also fires when the operator
+    deliberately configures ``llm.apiKey`` in the Gateway yaml instead; the
+    message says so explicitly so it can be ignored in that case.
 
     Returns ``env`` for convenience.
     """
@@ -76,7 +77,9 @@ def bridge_llm_env(env: Dict[str, str]) -> Dict[str, str]:
             "memory-tencentdb: no TDAI_LLM_API_KEY in the Gateway child env "
             "(neither MEMORY_TENCENTDB_LLM_API_KEY nor TDAI_LLM_API_KEY is set) — "
             "L1/L2/L3 extraction will fail unless llm.apiKey is configured in the "
-            "Gateway yaml; see issue #1386"
+            "Gateway yaml. If you have already configured llm.apiKey there, this "
+            "warning does not apply to you (the supervisor only sees the child "
+            "env, not the yaml); see issue #1386"
         )
     return env
 
