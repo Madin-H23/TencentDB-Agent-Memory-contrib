@@ -45,12 +45,25 @@ describe("countPendingL0Rows — stranded-backlog guard", () => {
   it("forwards the cursor as afterRecordedAtMs and defaults limit to 1", async () => {
     const { store, queryL0GroupedBySessionId } = fakeStore([]);
     await countPendingL0Rows(store, "sess-x", 987654);
-    expect(queryL0GroupedBySessionId).toHaveBeenCalledWith("sess-x", 987654, 1);
+    expect(queryL0GroupedBySessionId).toHaveBeenCalledWith("sess-x", 987654, 1, { throwOnError: true });
   });
 
   it("passes undefined for a never-distilled session (cursor 0 upstream)", async () => {
     const { store, queryL0GroupedBySessionId } = fakeStore([]);
     await countPendingL0Rows(store, "sess-new", undefined, 5);
-    expect(queryL0GroupedBySessionId).toHaveBeenCalledWith("sess-new", undefined, 5);
+    expect(queryL0GroupedBySessionId).toHaveBeenCalledWith("sess-new", undefined, 5, { throwOnError: true });
+  });
+
+  it("propagates a store query failure instead of reading it as zero pending", async () => {
+    const queryL0GroupedBySessionId = vi.fn(async () => {
+      throw new Error("db temporarily unavailable");
+    });
+    const store = { queryL0GroupedBySessionId } as unknown as Pick<
+      IMemoryStore,
+      "queryL0GroupedBySessionId"
+    >;
+    // A swallowed failure here would skip the timer-fired L1 and strand the
+    // backlog — the guard must surface the error to the retry path instead.
+    await expect(countPendingL0Rows(store, "s1", 1234)).rejects.toThrow("db temporarily unavailable");
   });
 });
