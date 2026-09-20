@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { extractL1Memories, L1ExtractionFailure } from "./l1-extractor.js";
-import type { LLMRunner } from "../types.js";
+import type { LLMRunner, Logger } from "../types.js";
 
 /**
  * 回归测试（对应上游 #1395；本机事故 2026-09-17）——
@@ -47,12 +47,13 @@ function runnerThrowing(message: string): LLMRunner {
   } as unknown as LLMRunner;
 }
 
-function extract(runner: LLMRunner) {
+function extract(runner: LLMRunner, logger?: Logger) {
   return extractL1Memories({
     messages: MESSAGES,
     sessionKey: "l1-extractor-test",
     baseDir: "/tmp/l1-extractor-test",
     config: {},
+    logger,
     options: { enableDedup: false, promptMode: "chat", llmRunner: runner },
   });
 }
@@ -89,5 +90,13 @@ describe("extractL1Memories：失败 vs 合法空（#1395）", () => {
     );
     expect(res.success).toBe(true);
     expect(res.extractedCount).toBe(0);
+  });
+
+  it("空产出轮必须留 INFO 锚点（面板『最近蒸馏』以此定位轮次）", async () => {
+    const infos: string[] = [];
+    const logger = { info: (m: string) => infos.push(m) } as unknown as Logger;
+    const res = await extract(runnerReturning("[]"), logger);
+    expect(res.extractedCount).toBe(0);
+    expect(infos.some((m) => m.includes("Extraction complete: extracted=0, stored=0"))).toBe(true);
   });
 });
