@@ -781,6 +781,11 @@ export class VectorStore implements IMemoryStore {
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l0_timestamp ON l0_conversations(timestamp)");
     // Isolation indexes (three-dim tenancy)
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l0_user_agent_session ON l0_conversations(user_id, agent_id, session_id)");
+    // 分页查询的驱动索引：等值前缀 (user_id, agent_id) + timestamp 有序，
+    // 让 queryL0Paginated 的 ORDER BY timestamp DESC LIMIT/OFFSET 走索引顺序、
+    // 不再每次重建 TEMP B-TREE（session_key=? OR session_id=? 的 OR 条件无法
+    // 单独驱动有序访问；实测 3.2k 行时分页+计数 21.5ms→5.9ms、深翻页 40.6ms→5.5ms）。
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_l0_user_agent_ts ON l0_conversations(user_id, agent_id, timestamp DESC)");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l0_user_recorded  ON l0_conversations(user_id, recorded_at)");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l0_agent_recorded ON l0_conversations(agent_id, recorded_at)");
 
