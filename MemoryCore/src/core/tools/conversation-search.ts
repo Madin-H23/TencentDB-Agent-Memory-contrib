@@ -191,6 +191,11 @@ export async function executeConversationSearch(params: {
         return ftsResults.map((r) => ({
           id: r.record_id,
           session_key: r.session_key,
+          // 与 vec 分支对齐：FTS 命中同样携带 session/isolation 维度，
+          // 否则 /conversation/search 的 hit 在 FTS 策略下丢 session_id
+          session_id: r.session_id,
+          user_id: r.user_id,
+          agent_id: r.agent_id,
           role: r.role,
           content: r.message_text,
           score: r.score,
