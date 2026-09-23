@@ -95,3 +95,34 @@ describe("queryL0Paginated（分页/过滤/排序语义 + 驱动索引）", () =
     expect(idx).toBeTruthy();
   });
 });
+
+describe("listL0Sessions（/conversation/sessions 的 store 层）", () => {
+  it("按会话分组计数、按最近活跃倒序", async () => {
+    store.upsertL0(rec("s1a", "sess-A", 1000), undefined);
+    store.upsertL0(rec("s1b", "sess-A", 2000), undefined);
+    store.upsertL0(rec("s2a", "sess-B", 5000), undefined);
+    const list = store.listL0Sessions();
+    expect(list.map((s) => [s.session_key, s.message_count, s.first_active, s.last_active])).toEqual([
+      ["sess-B", 1, 5000, 5000], // 最近活跃在前
+      ["sess-A", 2, 1000, 2000],
+    ]);
+    expect(list[0]).toMatchObject({ session_id: "default", team_id: "default", user_id: "default", agent_id: "default" });
+  });
+
+  it("session 过滤 + limit 收窄", async () => {
+    store.upsertL0(rec("x1", "sess-A", 1000), undefined);
+    store.upsertL0(rec("x2", "sess-B", 2000), undefined);
+    store.upsertL0(rec("x3", "sess-B", 3000), undefined);
+    expect(store.listL0Sessions({ sessionId: "sess-A" }).map((s) => s.session_key)).toEqual(["sess-A"]);
+    expect(store.listL0Sessions({ sessionId: "sess-B" }).map((s) => s.session_key)).toEqual(["sess-B"]);
+    expect(store.listL0Sessions({ limit: 1 }).map((s) => s.session_key)).toEqual(["sess-B"]);
+    expect(store.listL0Sessions({ limit: 999 }).length).toBe(2); // 超上限钳到 200 内，不影响小集
+  });
+
+  it("时间窗过滤与 queryL0Paginated 口径一致", async () => {
+    store.upsertL0(rec("w1", "sess-A", 1000), undefined);
+    store.upsertL0(rec("w2", "sess-A", 5000), undefined);
+    const inWin = store.listL0Sessions({ timeStartMs: 2000, timeEndMs: 8000 });
+    expect(inWin.map((s) => [s.session_key, s.message_count])).toEqual([["sess-A", 1]]);
+  });
+});
