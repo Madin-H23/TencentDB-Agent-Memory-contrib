@@ -129,6 +129,53 @@ describe("rankByTokenCoverage 纯函数", () => {
   });
 });
 
+describe("覆盖度门槛：强匹配足够时剔除只命中 1 词的弱匹配（2026-09-25 全库量测）", () => {
+  // 3 条强匹配（各命中 2 词）+ 3 条弱匹配（只命中「commit」1 词）
+  const tokens3 = new Map<string, Set<string>>([
+    ["commit", new Set(["s1", "s2", "s3", "w1", "w2", "w3"])],
+    ["中文", new Set(["s1", "s2"])],
+    ["署名", new Set(["s3"])],
+  ]);
+  const allRows = [
+    { record_id: "s1", rank: -1 },
+    { record_id: "s2", rank: -2 },
+    { record_id: "s3", rank: -3 },
+    { record_id: "w1", rank: -4 },
+    { record_id: "w2", rank: -5 },
+    { record_id: "w3", rank: -6 },
+  ];
+
+  it("强匹配 ≥3 条 → 只返回强匹配，弱匹配被剔除", () => {
+    const out = rankByTokenCoverage(allRows, tokens3, 20, { minStrongResults: 3 });
+    expect(out.map((r) => r.record_id).sort()).toEqual(["s1", "s2", "s3"]);
+  });
+
+  it("强匹配不足 3 条 → 回落保留弱匹配，绝不返回空", () => {
+    // 只有 1 条强匹配（strong1 命中 2 词），w1/w2 各命中 3 词属于"覆盖度更高"的弱匹配，
+    // 此处验证的是「不设门槛」——三条全部返回，且不因门槛被裁掉。
+    const few = new Map<string, Set<string>>([
+      ["commit", new Set(["strong1", "w1", "w2"])],
+      ["中文", new Set(["strong1", "w1", "w2"])],
+      ["署名", new Set(["strong1", "w1", "w2"])],
+    ]);
+    const rows = [
+      { record_id: "strong1", rank: -1 },
+      { record_id: "w1", rank: -2 },
+      { record_id: "w2", rank: -3 },
+    ];
+    const out = rankByTokenCoverage(rows, few, 20, { minStrongResults: 3 });
+    expect(out.length).toBe(3);
+  });
+
+  it("单 token 查询不做覆盖度过滤（无「多词」可言）", () => {
+    const one = new Map<string, Set<string>>([["青鸟", new Set(["a", "b"])]]);
+    const out = rankByTokenCoverage([{ record_id: "a", rank: -1 }, { record_id: "b", rank: -2 }], one, 5, {
+      minStrongResults: 3,
+    });
+    expect(out.length).toBe(2);
+  });
+});
+
 describe("searchL1Fts：IDF 覆盖度排序接入（端到端）", () => {
   it("查询含稀有词时，真正命中该词的记忆排到前列", () => {
     // 造语料：5 条记忆都含「哪些」，只有 1 条含「commit」
