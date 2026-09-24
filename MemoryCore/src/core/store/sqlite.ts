@@ -306,6 +306,79 @@ export function bm25RankToScore(rank: number): number {
   return 1 / (1 + rank);
 }
 
+/**
+ * IDF 覆盖度重排时，每个查询 token 最多扫描多少条命中。
+ * 上限保证最坏情况的查询开销有界（单 token FTS 查询约 1ms，5 个 token ≈ 5ms）。
+ * 超出上限会让该 token 的 df 被低估、权重偏高——对「长尾查询」可接受，
+ * 且只影响相对排序、不影响是否召回。
+ */
+const TOKEN_SCAN_LIMIT = 200;
+
+/**
+ * 按「命中的查询词 IDF 加权和」重排 FTS 结果。
+ *
+ * 动机（2026-09-25 用户模拟实测）：`buildFtsQuery` 把 query 的 token OR 起来，
+ * 只靠 BM25 排序时，一篇**短**的、仅命中高频词的记忆会压过一篇**长**的、真正命中
+ * 稀有词的记忆（实测生产库 1643 条下「commit 有哪些规矩」首位命中的是含"哪些"
+ * 的网页迁移记忆，commit 约定那条不在前列）。固定阈值救不了——生产库分数常年
+ * 0.85~0.90，阈值从未触发。
+ *
+ * 排序键：① 命中的 token 个数（降序）② 命中的 token IDF 权重和（降序）
+ *        ③ 原 BM25 序（稳定）。
+ * **为什么「命中个数」排在「权重和」前面**（2026-09-25 实测）：短查询里最稀有的
+ * token 往往是碰巧撞上的垃圾词——实测「ZCode 怎么备份」中「怎么」全库只出现 1 次
+ * （在某条"管怎么写好"的记忆里），IDF 权重 7.00，压过真正相关的 ZCode+备份
+ * （1.81+2.99=4.81）。先比权重和会让这种单点意外命中霸榜；先比覆盖度则
+ * 命中两个词的备份记忆稳定压过只命中一个词的那条。
+ * token 权重用 BM25 同款 IDF：ln((N - df + 0.5) / (df + 0.5) + 1)，df 越大权重越低；
+ * 所有 token 权重均为 0（查询词全是超高频词，如"用户"）时退化为原 BM25 序，
+ * 因此对既有行为零影响。
+ *
+ * @param rows        BM25 序的原始结果（保持传入顺序作为最终 tie-breaker）
+ * @param tokenDocIds token → 命中的 record_id 集合
+ * @param totalDocs   语料总文档数（用于 IDF）
+ */
+export function rankByTokenCoverage<T extends { record_id: string }>(
+  rows: T[],
+  tokenDocIds: Map<string, Set<string>>,
+  totalDocs: number,
+): T[] {
+  if (rows.length <= 1 || tokenDocIds.size === 0) return rows;
+
+  const n = Math.max(totalDocs, 1);
+  const weights = new Map<string, number>();
+  for (const [token, ids] of tokenDocIds) {
+    const df = Math.min(ids.size, n);
+    weights.set(token, Math.log((n - df + 0.5) / (df + 0.5) + 1));
+  }
+  const anyPositive = [...weights.values()].some((w) => w > 0);
+  if (!anyPositive) return rows; // 全是超高频词：保持 BM25 原序
+
+  const scored = rows.map((row, idx) => {
+    let weightSum = 0;
+    let matched = 0;
+    for (const [token, ids] of tokenDocIds) {
+      if (ids.has(row.record_id)) {
+        matched += 1;
+        weightSum += weights.get(token) ?? 0;
+      }
+    }
+    return { row, idx, weightSum, matched };
+  });
+
+  return scored
+    .sort((a, b) => b.matched - a.matched || b.weightSum - a.weightSum || a.idx - b.idx)
+    .map((s) => s.row);
+}
+
+/** 从 buildFtsQuery 产出的表达式反解 token（`"a" OR "b"` → [a, b]）。 */
+function parseFtsQueryTokens(ftsQuery: string): string[] {
+  return ftsQuery
+    .split(" OR ")
+    .map((t) => t.trim().replace(/^"|"$/g, ""))
+    .filter(Boolean);
+}
+
 /** FTS5 search result for L1 records. */
 export interface FtsSearchResult {
   record_id: string;
@@ -3014,7 +3087,9 @@ export class VectorStore implements IMemoryStore {
 
   /**
    * FTS5 keyword search on L1 records.
-   * Returns top-`limit` results sorted by BM25 relevance (highest first).
+   * Returns top-`limit` results sorted by **token-coverage (IDF-weighted) first,
+   * BM25 second**（见 `rankByTokenCoverage`：OR 拼接下 BM25 会让「短文命中高频词」
+   * 压过「长文命中稀有词」，2026-09-25 实测）。
    *
    * @param ftsQuery  A pre-built FTS5 MATCH expression (from `buildFtsQuery()`).
    * @param limit     Maximum number of results to return.
@@ -3024,7 +3099,9 @@ export class VectorStore implements IMemoryStore {
   searchL1Fts(ftsQuery: string, limit = 20, filter?: IsolationFilter): FtsSearchResult[] {
     if (this.degraded || !this.ftsAvailable) return [];
     try {
-      const retrieveLimit = filter ? Math.max(limit * 5, limit) : limit;
+      // 重排需要比 limit 更多的候选（实测正确答案可能在 BM25 第 6 名之后）；
+      // 无隔离过滤时也超额取，有过滤时沿用 5 倍。
+      const retrieveLimit = Math.max(limit * 5, limit, 20);
       const rows = this.stmtL1FtsSearch.all(ftsQuery, retrieveLimit) as Array<{
         record_id: string;
         content: string;
@@ -3045,9 +3122,11 @@ export class VectorStore implements IMemoryStore {
         rank: number;
       }>;
 
-      return rows
+      // IDF 覆盖度重排：先超额取候选再重排，最后截到 limit。
+      // 关键：只在 BM25 前 N 条内重排是不够的——实测「ZCode 怎么备份」的正确答案
+      // 排在 BM25 第 6 名之后，候选集里根本没有它，重排无法把它捞回来。
+      const mappedAll = rows
         .filter((r) => rowMatchesIsolation(r, filter))
-        .slice(0, limit)
         .map((r) => ({
           record_id: r.record_id,
           content: r.content,
@@ -3067,6 +3146,28 @@ export class VectorStore implements IMemoryStore {
           agent_id: r.agent_id ?? "",
           metadata_json: r.metadata_json,
         }));
+
+      const tokens = parseFtsQueryTokens(ftsQuery);
+      let ranked = mappedAll;
+      if (tokens.length > 1 && mappedAll.length > 1) {
+        try {
+          const totalDocs = (this.db.prepare("SELECT COUNT(*) AS c FROM l1_fts").get() as { c: number }).c;
+          const tokenDocIds = new Map<string, Set<string>>();
+          for (const token of tokens) {
+            const perToken = this.stmtL1FtsSearch.all(`"${token.replaceAll('"', "")}"`, TOKEN_SCAN_LIMIT) as Array<{
+              record_id: string;
+            }>;
+            tokenDocIds.set(token, new Set(perToken.map((r) => r.record_id)));
+          }
+          ranked = rankByTokenCoverage(mappedAll, tokenDocIds, totalDocs);
+        } catch (err) {
+          // 重排失败不得影响召回可用性：退回 BM25 原序
+          this.logger?.debug?.(
+            `${TAG} [L1-fts-search] token-coverage rerank skipped: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      return ranked.slice(0, limit);
     } catch (err) {
       this.logger?.warn(
         `${TAG} [L1-fts-search] FAILED (non-fatal, returning empty): ${err instanceof Error ? err.message : String(err)}`,
