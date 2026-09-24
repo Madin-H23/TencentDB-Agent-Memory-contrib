@@ -581,6 +581,7 @@ export function createL1Runner(opts: {
             maxMemoriesPerSession: cfg.extraction.maxMemoriesPerSession,
             model: cfg.extraction.model,
             promptMode: cfg.extraction.promptMode,
+            userIdentityNames: cfg.extraction.userIdentityNames,
             previousSceneName: lastSceneName ?? (runnerState.last_scene_name || undefined),
             vectorStore,
             embeddingService,

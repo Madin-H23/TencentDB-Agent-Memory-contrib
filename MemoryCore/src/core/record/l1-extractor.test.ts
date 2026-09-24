@@ -100,3 +100,32 @@ describe("extractL1Memories：失败 vs 合法空（#1395）", () => {
     expect(infos.some((m) => m.includes("Extraction complete: extracted=0, stored=0"))).toBe(true);
   });
 });
+
+describe("确定性归属护栏（2026-09-24 事故回归）", () => {
+  it("模型把第三方姓名/角色塞进姓名括号 → 入库前归一为「用户」，白名单内保留", async () => {
+    const llm = runnerReturning(
+      JSON.stringify([
+        {
+          scene_name: "我（AI）在协助处理 it-ops 资料库需求",
+          message_ids: ["m1", "m2"],
+          memories: [
+            { content: "用户（王缘林）要求将处理人配置范围扩大到所有一级资料库", type: "instruction", priority: 80, source_message_ids: ["m1"] },
+            { content: "用户（导师）于 2026-09-24 提了四条文档管理需求", type: "episodic", priority: 70, source_message_ids: ["m2"] },
+            { content: "用户（何伟健）坚持先备份再动线上库", type: "instruction", priority: 85, source_message_ids: ["m1"] },
+          ],
+        },
+      ]),
+    );
+    const res = await extractL1Memories({
+      messages: MESSAGES,
+      sessionKey: "attribution-test",
+      baseDir: "D:/Develop/TencentDB-Agent-Memory/e2e-fix/data-strand",
+      config: {},
+      options: { enableDedup: false, promptMode: "chat", llmRunner: llm, userIdentityNames: ["何伟健"] },
+    });
+    const contents = res.records.map((r) => r.content);
+    expect(contents).toContain("用户要求将处理人配置范围扩大到所有一级资料库");
+    expect(contents).toContain("用户于 2026-09-24 提了四条文档管理需求");
+    expect(contents).toContain("用户（何伟健）坚持先备份再动线上库");
+  });
+});
