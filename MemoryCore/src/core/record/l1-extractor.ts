@@ -132,6 +132,15 @@ export async function extractL1Memories(params: {
     enableDedup?: boolean;
     /** Max memories extracted per call */
     maxMemoriesPerSession?: number;
+    /**
+     * 同一批 L0 采样 N 次并取记忆并集（self-consistency，默认 1=关闭）。
+     *
+     * 2026-09-24 隔离回放实测：同批输入跑两次，模型给出的记忆集合不同——
+     * llm-runner 未固定 temperature/seed（走上游默认采样），于是「同输入不同输出」
+     * 成为 L1 漏记的主因之一（金标回测：单次 recall 24~29%，两次并集 35%）。
+     * 调大该值以并集换召回；非法值（非整数 / <1）一律钳到 1 并告警。
+     */
+    samplesPerBatch?: number;
     /** LLM model override */
     model?: string;
     /** Previous scene name for continuity */
@@ -175,6 +184,13 @@ export async function extractL1Memories(params: {
   const maxNewMessages = options.maxMessagesPerExtraction ?? 10;
   const maxBgMessages = options.maxBackgroundMessages ?? 5;
   const enableDedup = options.enableDedup ?? true;
+  // 多采样并集：非整数 / <1 一律钳到 1（单采样=改动前行为），并留告警锚点，
+  // 避免「配错值却静默按 1 跑」这类不可见的降级。
+  const rawSamples = options.samplesPerBatch ?? 1;
+  const samplesPerBatch = Number.isInteger(rawSamples) && rawSamples >= 1 ? rawSamples : 1;
+  if (samplesPerBatch !== rawSamples) {
+    logger?.warn?.(`${TAG} samplesPerBatch=${String(rawSamples)} 非法（非整数或 <1），已钳到 ${samplesPerBatch}`);
+  }
   const maxMemoriesPerSession = options.maxMemoriesPerSession ?? 10;
 
   if (messages.length === 0) {
@@ -214,40 +230,73 @@ export async function extractL1Memories(params: {
   logger?.debug?.(`${TAG} Extracting from ${newMessages.length} new messages (+ ${backgroundMessages.length} background) [${qualifiedMessages.length} qualified from ${messages.length} input]`);
 
   // Step 1: LLM extraction (scene segmentation + memory extraction)
-  let scenes: SceneSegment[];
-  try {
-    scenes = await callLlmExtraction({
-      newMessages,
-      backgroundMessages,
-      previousSceneName: options.previousSceneName,
-      config,
-      logger,
-      model: options.model,
-      promptMode: options.promptMode,
-      traceContext: { teamId, userId, agentId, sessionId },
-      llmRunner: options.llmRunner,
-    });
-    logger?.debug?.(`${TAG} LLM detected ${scenes.length} scene(s)`);
-  } catch (err) {
-    // Parse-side failures are thrown from inside callLlmExtraction and must keep
-    // their own classification (parse_error) instead of being remapped below.
-    if (err instanceof L1ExtractionFailure) {
+  // samplesPerBatch>1 时对同一批跑 N 次并合并：单次采样会漏（未固定 temperature，
+  // 同输入不同输出），并集换召回。部分失败可用其余样本继续；全失败仍抛
+  // L1ExtractionFailure，游标不推进（#1395 语义不因多采样被削弱）。
+  // 串行而非 Promise.all：采样数放大的是同一 key 的并发请求，并行会把限流/5xx
+  // 概率同步放大 N 倍（各样本相互独立，无需按序）；代价是延迟线性增长——实测
+  // 3 采样 23s/批 vs 单采样 6s/批，故默认关闭（samplesPerBatch=1）。
+  const sampleScenes: SceneSegment[][] = [];
+  let firstFailure: L1ExtractionFailure | null = null;
+  let failedSamples = 0;
+
+  for (let sample = 1; sample <= samplesPerBatch; sample++) {
+    try {
+      const sampleScenesResult = await callLlmExtraction({
+        newMessages,
+        backgroundMessages,
+        previousSceneName: options.previousSceneName,
+        config,
+        logger,
+        model: options.model,
+        promptMode: options.promptMode,
+        traceContext: { teamId, userId, agentId, sessionId },
+        llmRunner: options.llmRunner,
+      });
+      sampleScenes.push(sampleScenesResult);
+    } catch (err) {
+      // Parse-side failures keep their own classification (parse_error) instead of
+      // being remapped below (see the original single-sample catch block).
+      const failure =
+        err instanceof L1ExtractionFailure
+          ? err
+          : new L1ExtractionFailure(
+              "llm_error",
+              `L1 extraction failed: ${err instanceof Error ? err.message : String(err)}`,
+            );
+      failedSamples += 1;
+      firstFailure ??= failure;
       logger?.warn?.(
-        `${TAG} l1-deferred reason=${err.reason} sessionKey=${sessionKey} — batch deferred, checkpoint cursor unchanged`,
+        `${TAG} sample ${sample}/${samplesPerBatch} failed reason=${failure.reason} sessionKey=${sessionKey}`,
       );
-      throw err;
     }
-    logger?.error(`${TAG} LLM extraction failed: ${err instanceof Error ? err.message : String(err)}`);
-    // Must NOT be reported as a successful empty run: the batch has to be
-    // retried, so the caller keeps the checkpoint cursor untouched (#1395).
-    logger?.warn?.(
-      `${TAG} l1-deferred reason=llm_error sessionKey=${sessionKey} — batch deferred, checkpoint cursor unchanged`,
+  }
+
+  if (sampleScenes.length === 0) {
+    // 全部采样失败：按 #1395 整批延后，绝不记成「合法空产出」（否则游标照常推进、
+    // 这批 L0 永久静默丢弃）。reason 沿用首个失败样本的分类。
+    logger?.error?.(
+      `${TAG} LLM extraction failed on all ${samplesPerBatch} sample(s): ${firstFailure?.message ?? "unknown"}`,
     );
-    throw new L1ExtractionFailure(
-      "llm_error",
-      `L1 extraction failed: ${err instanceof Error ? err.message : String(err)}`,
+    logger?.warn?.(
+      `${TAG} l1-deferred reason=${firstFailure?.reason ?? "llm_error"} sessionKey=${sessionKey} — batch deferred, checkpoint cursor unchanged`,
+    );
+    throw (
+      firstFailure ??
+      new L1ExtractionFailure("llm_error", "L1 extraction failed: all samples failed")
     );
   }
+  if (failedSamples > 0) {
+    logger?.warn?.(
+      `${TAG} l1 multi-sample partial: ${sampleScenes.length}/${samplesPerBatch} samples ok, ` +
+        `${failedSamples} failed (reason=${firstFailure?.reason ?? "?"}) — continuing with merged output`,
+    );
+  }
+
+  const scenes: SceneSegment[] = sampleScenes.flat();
+  logger?.debug?.(
+    `${TAG} LLM detected ${scenes.length} scene(s) across ${sampleScenes.length}/${samplesPerBatch} sample(s)`,
+  );
 
   // Flatten all memories across scenes
   const allExtracted: ExtractedMemory[] = [];
@@ -287,7 +336,33 @@ export async function extractL1Memories(params: {
     );
   }
 
-  logger?.debug?.(`${TAG} Total extracted memories: ${allExtracted.length} across ${scenes.length} scene(s)`);
+  // 多采样并集去重：同一记忆被 N 次采样各写一遍属于采样噪声（内容相同/仅标点与
+  // 首尾空白差异），入库前折叠为一条。只在 samplesPerBatch>1 时启用——单采样路径
+  // 必须与改动前逐字一致。近似重复（改写型）交由既有 enableDedup/batchDedup 在
+  // 入库侧处理，避免在这里引入第二套相似度判定。
+  const extractedRawCount = allExtracted.length;
+  if (samplesPerBatch > 1 && allExtracted.length > 1) {
+    const seenContent = new Set<string>();
+    const merged: ExtractedMemory[] = [];
+    for (const mem of allExtracted) {
+      const key = normalizeForSampleDedup(mem.content);
+      if (seenContent.has(key)) continue;
+      seenContent.add(key);
+      merged.push(mem);
+    }
+    const beforeDedup = allExtracted.length;
+    allExtracted.length = 0;
+    allExtracted.push(...merged);
+    if (merged.length < beforeDedup) {
+      logger?.debug?.(
+        `${TAG} multi-sample dedup: ${beforeDedup} → ${merged.length} (${samplesPerBatch} samples)`,
+      );
+    }
+  }
+  logger?.debug?.(
+    `${TAG} Total extracted memories: ${allExtracted.length} across ${scenes.length} scene(s)` +
+      (samplesPerBatch > 1 ? ` (union of ${samplesPerBatch} sample(s), pre-dedup ${extractedRawCount})` : ""),
+  );
 
   if (allExtracted.length === 0) {
     // 同上的轮次锚点：模型正常回答但确无可记（合法空产出）——此前该分支直接
@@ -756,4 +831,16 @@ function normalizeType(raw: string): MemoryType | null {
   if (lower === "instruct") return "instruction";
   if (lower === "preference") return "persona"; // fold preference into persona
   return null;
+}
+
+/**
+ * 多采样并集的折叠键：忽略大小写、空白与中英文标点，使「同一记忆的两次采样」
+ * （仅首尾空白/句末句号/全半角差异）折叠为一条。不做语义近似判定——
+ * 改写型近似重复由既有 enableDedup/batchDedup 在入库侧处理。
+ */
+function normalizeForSampleDedup(content: string): string {
+  return content
+    .toLowerCase()
+    .replace(/[\s]/g, "")
+    .replace(/[（）()【】\[\]{}<>《》"'“”‘’,，.。、：:；;！!？?、~—\-_/\\|]/g, "");
 }

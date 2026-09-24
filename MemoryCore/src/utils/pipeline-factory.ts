@@ -579,6 +579,7 @@ export function createL1Runner(opts: {
           options: {
             enableDedup: cfg.extraction.enableDedup,
             maxMemoriesPerSession: cfg.extraction.maxMemoriesPerSession,
+            samplesPerBatch: cfg.extraction.samplesPerBatch,
             model: cfg.extraction.model,
             promptMode: cfg.extraction.promptMode,
             userIdentityNames: cfg.extraction.userIdentityNames,
