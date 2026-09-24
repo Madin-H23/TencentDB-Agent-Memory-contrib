@@ -573,6 +573,9 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       maxMemoriesPerSession: num(extractionGroup, "maxMemoriesPerSession") ?? 20,
       model: optStr(extractionGroup, "model"),
       promptMode: normalizePromptMode(str(extractionGroup, "promptMode"), globalPromptMode),
+      // 用户身份白名单：只有这里的姓名才允许出现在「用户（X）」里（确定性护栏
+      // sanitizeUserAttribution 的输入）；留空 = 任何括号内容都归一为「用户」
+      userIdentityNames: strArray(extractionGroup, "userIdentityNames") ?? [],
     },
     persona: {
       triggerEveryN: num(personaGroup, "triggerEveryN") ?? 50,
