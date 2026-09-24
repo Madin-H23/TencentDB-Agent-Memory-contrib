@@ -17,16 +17,22 @@ import {
 describe("L1 chat extraction prompt — user name source rule", () => {
   it("pins the user name to explicit self-introduction or injected profile", () => {
     expect(EXTRACT_MEMORIES_SYSTEM_PROMPT).toContain("姓名归属");
-    expect(EXTRACT_MEMORIES_SYSTEM_PROMPT).toMatch(/只能来自用户本人的明确自述/);
+    expect(EXTRACT_MEMORIES_SYSTEM_PROMPT).toMatch(/只能是用户本人的明确自述/);
     expect(EXTRACT_MEMORIES_SYSTEM_PROMPT).toMatch(/系统注入的用户资料/);
   });
 
-  it("forbids third-party names from being recorded as the user name", () => {
-    expect(EXTRACT_MEMORIES_SYSTEM_PROMPT).toMatch(/第三方.{0,20}严禁当作用户姓名/s);
+  it("forbids third-party names AND non-name junk from the name slot", () => {
+    // 2026-09-24 事故：模型绕过旧措辞，把角色/路径/状语塞进姓名括号
+    expect(EXTRACT_MEMORIES_SYSTEM_PROMPT).toMatch(/第三方（同事、导师、领导、家人、朋友等）的姓名或称呼/);
+    expect(EXTRACT_MEMORIES_SYSTEM_PROMPT).toMatch(/角色标签/);
+    expect(EXTRACT_MEMORIES_SYSTEM_PROMPT).toMatch(/路径片段/);
+    expect(EXTRACT_MEMORIES_SYSTEM_PROMPT).toMatch(/严禁把以下内容填进姓名括号/);
   });
 
-  it("falls back to a generic 用户 reference instead of guessing", () => {
-    expect(EXTRACT_MEMORIES_SYSTEM_PROMPT).toMatch(/无法确认用户姓名时[^。]*不得猜测/);
+  it("unknown name → omit the bracket entirely (not a guess)", () => {
+    expect(EXTRACT_MEMORIES_SYSTEM_PROMPT).toMatch(/姓名未知时括号直接省略/);
+    // 提取句式本身不再强制填括号
+    expect(EXTRACT_MEMORIES_SYSTEM_PROMPT).toMatch(/否则省略括号/);
   });
 
   it("applies the same constraint to scene naming", () => {

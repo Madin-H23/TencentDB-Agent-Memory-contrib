@@ -27,15 +27,6 @@ llm:
   activeProvider: "opencode-go"
   providers:
     # 新增厂商: 追加条目即可(零代码改动),接入后必须跑一轮蒸馏验收
-    - name: deepseek-official
-      baseUrl: https://api.deepseek.com/v1
-      apiKeyEnv: TDAI_KEY_DEEPSEEK
-      model: deepseek-flash
-      models:
-        - deepseek-flash
-        - deepseek-v4-pro
-      extra:
-        disableThinking: true
     - name: 智谱coding plan
       baseUrl: https://open.bigmodel.cn/api/coding/paas/v4
       apiKeyEnv: TDAI_KEY_ZHIPU
@@ -53,10 +44,19 @@ llm:
         - glm-5.3-flash
       extra:
         disableThinking: false
+    - name: deepseek-official
+      baseUrl: https://api.deepseek.com/v1
+      apiKeyEnv: TDAI_KEY_DEEPSEEK
+      model: deepseek-flash
+      models:
+        - deepseek-flash
+        - deepseek-v4-pro
+      extra:
+        disableThinking: true
     - name: B.AI
       baseUrl: http://127.0.0.1:8789/v1
       apiKeyEnv: TDAI_KEY_B_AI
-      model: glm-5.3-flash
+      model: qwen3.8-flash
       models:
         - minimax-m3
         - minimax-m2.7
@@ -111,7 +111,7 @@ llm:
     - name: opencode-go
       baseUrl: https://opencode.ai/zen/go/v1
       apiKeyEnv: TDAI_KEY_OPENCODE
-      model: deepseek-flash
+      model: deepseek-v4.1-flash
       models:
         - minimax-m3
         - minimax-m2.7
@@ -129,6 +129,7 @@ llm:
         - deepseek-v4-pro
         - deepseek-v4-flash
         - deepseek-flash
+        - deepseek-v4.1-flash
         - deepseek-v4-flash-vision-exp
         - qwen3.7-max
         - qwen3.8-max
@@ -142,6 +143,7 @@ llm:
         - mimo-v2.5
         - hy4-preview
         - hy3
+        - union-alpha
         - hy3-preview
         - gpt-5.6-luna
         - grok-4.5
@@ -160,15 +162,17 @@ llm:
   # 改动任一层后必须实测该层蒸馏(extracted>0 / 场景正常更新)才算生效。
   layers:
     l2:
-      maxTokens: 16384
+      maxTokens: 32768
       disableThinking: false
+      model: deepseek-v4.1-flash
     l3:
-      maxTokens: 16384
+      maxTokens: 32768
       disableThinking: false
-      model: deepseek-flash
+      model: deepseek-v4.1-flash
     l1:
-      maxTokens: 4096
+      maxTokens: 8192
       disableThinking: true
+      model: deepseek-v4.1-flash
 
 # ── Memory 引擎配置 ──
 memory:
@@ -180,6 +184,12 @@ memory:
     enabled: true
     enableDedup: true
     maxMemoriesPerSession: 20
+    # 用户身份白名单：只有这些姓名允许出现在「用户（X）」括号里。
+    # 其余（第三方姓名/角色标签/路径数字/时间状语…）入库前由确定性护栏归一为「用户」。
+    userIdentityNames:
+      - 何伟健
+      - heweijian
+      - Weijian He
 
   persona:
     triggerEveryN: 50
@@ -237,7 +247,7 @@ skill:
   enabled: true
   routing:
     mode: "bm25"
-    searchTopK: 20        # listing 接口最多注入多少条 skill（name+description）
+    searchTopK: 20 # listing 接口最多注入多少条 skill（name+description）
   # extraction:           # 萃取档暂不开（与面板管理页捆绑，观察期结束后一批交付）
   #   enabled: true       # 需要 llm 配置有效
   #   maxIterations: 16
