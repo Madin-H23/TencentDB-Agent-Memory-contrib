@@ -41,6 +41,12 @@ export interface ExtractionConfig {
   enableDedup: boolean;
   /** Max memories per session (default: 20) */
   maxMemoriesPerSession: number;
+  /**
+   * 同一批 L0 采样 N 次并取记忆并集（default: 1 = 单采样，与多采样前行为一致）。
+   * 2026-09-24 实测：未固定 temperature/seed 时同输入不同输出是 L1 漏记主因之一，
+   * 调大该值以并集换召回。非法值（非整数 / <1）在 l1-extractor 内钳到 1 并告警。
+   */
+  samplesPerBatch: number;
   /** LLM model for extraction, format: "provider/model" (falls back to OpenClaw default model when omitted) */
   model?: string;
   /** Prompt family for L1 extraction (default: chat). */
@@ -558,6 +564,9 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       enabled: bool(extractionGroup, "enabled") ?? true,
       enableDedup: bool(extractionGroup, "enableDedup") ?? true,
       maxMemoriesPerSession: num(extractionGroup, "maxMemoriesPerSession") ?? 20,
+      // 同批多采样取并集（self-consistency）：默认 1=单采样=原行为；
+      // 调大以并集换召回，非法值由 l1-extractor 钳到 1 并告警。
+      samplesPerBatch: num(extractionGroup, "samplesPerBatch") ?? 1,
       model: optStr(extractionGroup, "model"),
       promptMode: normalizePromptMode(str(extractionGroup, "promptMode"), globalPromptMode),
       // 用户身份白名单：只有这里的姓名才允许出现在「用户（X）」里（确定性护栏
