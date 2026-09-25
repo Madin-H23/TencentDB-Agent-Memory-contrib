@@ -55,6 +55,20 @@ export interface ExtractionConfig {
   model?: string;
   /** Prompt family for L1 extraction (default: chat). */
   promptMode: MemoryPromptMode;
+  /**
+   * 来源归属护栏模式（2026-09-25）：
+   * - "strict"（默认）：source_message_ids 全为 assistant → 不入库。
+   * - "batch-confirm"：纯 assistant 来源中「用户确认：」句式的记忆放宽为批次级校验
+   *   （本批消息存在 ≥1 条 user 消息才放行）；其余形态仍按 strict。
+   * - "off"：护栏整体关闭，纯 assistant 来源也入库。
+   */
+  attributionGuard?: "strict" | "batch-confirm" | "off";
+  /**
+   * chat 提示词追加「纠正结论例外」条款（上游 #706 / PR #778，默认 false）。
+   * 教模型把「用户纠正后 AI 给出的最终结论」提取为「用户确认：…」episodic 记忆；
+   * 与 attributionGuard="batch-confirm" 配套使用，避免被 strict 误杀。
+   */
+  correctionException?: boolean;
 }
 
 /** Persona (L2/L3) settings — controls scene extraction (L2) and user profile generation (L3). */
@@ -580,6 +594,9 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       // 用户身份白名单：只有这里的姓名才允许出现在「用户（X）」里（确定性护栏
       // sanitizeUserAttribution 的输入）；留空 = 任何括号内容都归一为「用户」
       userIdentityNames: strArray(extractionGroup, "userIdentityNames") ?? [],
+      // 来源归属护栏模式；非法值 fail-fast（拼写错误静默失效比报错更危险）
+      attributionGuard: parseAttributionGuard(extractionGroup, "attributionGuard"),
+      correctionException: bool(extractionGroup, "correctionException") ?? false,
     },
     persona: {
       triggerEveryN: num(personaGroup, "triggerEveryN") ?? 50,
@@ -694,6 +711,18 @@ function str(src: Record<string, unknown>, key: string): string | undefined {
 function normalizePromptMode(value: string | undefined, fallback: MemoryPromptMode = "chat"): MemoryPromptMode {
   if (value === "code" || value === "chat") return value;
   return fallback;
+}
+
+/** extraction.attributionGuard 枚举解析：未配置 → strict（默认）；配置了非法值（含非字符串）→ fail-fast。 */
+function parseAttributionGuard(src: Record<string, unknown>, key: string): "strict" | "batch-confirm" | "off" {
+  const raw = src[key];
+  if (raw === undefined) return "strict";
+  const v = typeof raw === "string" ? raw.trim() : undefined;
+  if (v === "") return "strict";
+  if (v === "strict" || v === "batch-confirm" || v === "off") return v;
+  throw new Error(
+    `[config] extraction.attributionGuard="${String(raw)}" 非法（合法: strict | batch-confirm | off，缺省 strict）`,
+  );
 }
 
 function optStr(src: Record<string, unknown>, key: string): string | undefined {

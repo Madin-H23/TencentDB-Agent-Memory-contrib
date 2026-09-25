@@ -372,8 +372,22 @@ metadata 字段说明：
 
 请严格按上述 JSON 数组格式输出，不要输出任何额外的 Markdown 代码块修饰符（如 \`\`\`json）或解释文本。`;
 
-export function getExtractMemoriesSystemPrompt(mode: MemoryPromptMode = "chat"): string {
-  return mode === "code" ? EXTRACT_WORK_MEMORIES_SYSTEM_PROMPT : EXTRACT_MEMORIES_SYSTEM_PROMPT;
+// 「纠正结论例外」条款（上游 #706 / PR #778）：受 extraction.correctionException 开关控制，
+// 默认不注入——2026-09-25 A/B 实测该条款单独启用无可测收益，且其产出的「用户确认：…」
+// 记忆只挂 assistant 来源时会与来源归属护栏对撞（方案 B：配合 batch-confirm 模式使用）。
+export const CORRECTION_EXCEPTION_CLAUSE = `   - **纠正结论例外（episodic 特别说明）**：当用户指出某个错误认知/偏差后，AI 依据该纠正（或代码证据、双方确认）给出明确的**最终纠正结论**时，该结论应提取为 episodic 记忆——这正是需要长期保留的事实，不能因"AI 输出"被整体过滤。提取句式："用户确认：[纠正后的最终事实]"；\`source_message_ids\` 需同时包含用户的纠正消息与 AI 的确认消息。**只提取被用户纠正/确认锚定的最终事实**；AI 单方面提出的新方案、假设、未经确认的分析，仍按"不应提取"处理。`;
+
+export function getExtractMemoriesSystemPrompt(
+  mode: MemoryPromptMode = "chat",
+  opts?: { correctionException?: boolean },
+): string {
+  const base = mode === "code" ? EXTRACT_WORK_MEMORIES_SYSTEM_PROMPT : EXTRACT_MEMORIES_SYSTEM_PROMPT;
+  if (mode !== "chat" || !opts?.correctionException) return base;
+  // 注入点：episodic 段末尾（「3. 全局指令记忆」之前）；锚点缺失说明模板漂移，返回原文（测试守护）
+  const anchor = "\n3. 全局指令记忆 (type: \"instruction\")";
+  const idx = base.indexOf(anchor);
+  if (idx < 0) return base;
+  return base.slice(0, idx) + "\n" + CORRECTION_EXCEPTION_CLAUSE + base.slice(idx);
 }
 
 // ============================
