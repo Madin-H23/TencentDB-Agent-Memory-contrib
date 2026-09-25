@@ -46,14 +46,24 @@ function scene(memories: Array<{ content: string; src: string[]; type?: string }
   ]);
 }
 
-async function extract(memories: Array<{ content: string; src: string[]; type?: string }>, logger?: Logger) {
+async function extract(
+  memories: Array<{ content: string; src: string[]; type?: string }>,
+  logger?: Logger,
+  opts?: { attributionGuard?: "strict" | "batch-confirm" | "off"; messages?: typeof MESSAGES },
+) {
   return extractL1Memories({
-    messages: MESSAGES,
+    messages: opts?.messages ?? MESSAGES,
     sessionKey: "source-attribution-test",
     baseDir: "/tmp/l1-source-attribution-test",
     config: {},
     logger,
-    options: { enableDedup: false, promptMode: "chat", llmRunner: runnerReturning(scene(memories)), userIdentityNames: ["何伟健"] },
+    options: {
+      enableDedup: false,
+      promptMode: "chat",
+      llmRunner: runnerReturning(scene(memories)),
+      userIdentityNames: ["何伟健"],
+      attributionGuard: opts?.attributionGuard,
+    },
   });
 }
 
@@ -100,5 +110,124 @@ describe("来源归属护栏：纯 assistant 来源的记忆不入库", () => {
     const logger = { info: (m: string) => infos.push(m), warn: () => {}, debug: () => {}, error: () => {} } as unknown as Logger;
     await extract([{ content: "用户修复了某个缺陷。", src: ["a1"] }], logger);
     expect(infos.some((m) => m.includes("source-attribution") && m.includes("a1"))).toBe(true);
+  });
+
+  it("显式 strict 与默认行为一致（纯 assistant 丢弃）", async () => {
+    const res = await extract([{ content: "用户修复了覆盖度重排的边界缺陷。", src: ["a1"] }], undefined, { attributionGuard: "strict" });
+    expect(res.extractedCount).toBe(0);
+  });
+});
+
+describe("attributionGuard=batch-confirm：「用户确认：」句式的批次级校验（2026-09-25 方案 B）", () => {
+  it("「用户确认：」纯 assistant 来源 + 本批有 user 消息 → 放行（例外条款产出不再被误杀）", async () => {
+    const res = await extract(
+      [{ content: "用户确认：覆盖度重排触达扫描上限时应跳过重排，提交 99098df。", src: ["a1"] }],
+      undefined,
+      { attributionGuard: "batch-confirm" },
+    );
+    expect(res.extractedCount).toBe(1);
+    expect(res.records[0].content).toContain("覆盖度重排");
+  });
+
+  it("全角/半角冒号、前导空白都识别为例外句式", async () => {
+    for (const content of ["用户确认：结论甲。", "用户确认:结论甲。", " 用户确认： 结论甲。"]) {
+      const res = await extract([{ content, src: ["a1"] }], undefined, { attributionGuard: "batch-confirm" });
+      expect(res.extractedCount, content).toBe(1);
+    }
+  });
+
+  it("「用户确认过」（无冒号）不算例外句式 → 仍按 strict 丢弃（窄口不放大）", async () => {
+    const res = await extract(
+      [{ content: "用户确认过覆盖度重排的修复方案。", src: ["a1"] }],
+      undefined,
+      { attributionGuard: "batch-confirm" },
+    );
+    expect(res.extractedCount).toBe(0);
+  });
+
+  it("整批无 user 消息（纯 AI 会话）→「用户确认：」也丢弃（编造的确认拦得住）", async () => {
+    const aiOnly = [
+      { id: "a1", role: "assistant" as const, content: "根据分析，结论甲成立。", timestamp: T },
+      { id: "a2", role: "assistant" as const, content: "补充验证：边界值全部通过。", timestamp: T + 1 },
+    ];
+    const sceneAiOnly = JSON.stringify([
+      {
+        scene_name: "我（AI）在做数据分析",
+        message_ids: ["a1", "a2"],
+        memories: [{ content: "用户确认：结论甲成立。", type: "episodic", priority: 70, source_message_ids: ["a1"] }],
+      },
+    ]);
+    const res = await extractL1Memories({
+      messages: aiOnly,
+      sessionKey: "source-attribution-test",
+      baseDir: "/tmp/l1-source-attribution-test",
+      config: {},
+      options: {
+        enableDedup: false,
+        promptMode: "chat",
+        llmRunner: runnerReturning(sceneAiOnly),
+        attributionGuard: "batch-confirm",
+      },
+    });
+    expect(res.extractedCount).toBe(0);
+  });
+
+  it("非「用户确认：」句式的纯 assistant 记忆在 batch-confirm 下仍丢弃（放宽不外溢）", async () => {
+    const res = await extract(
+      [{ content: "用户修复了覆盖度重排的边界缺陷。", src: ["a1"] }],
+      undefined,
+      { attributionGuard: "batch-confirm" },
+    );
+    expect(res.extractedCount).toBe(0);
+  });
+
+  it("batch-confirm 不影响混源/纯用户/空来源的既有放行路径", async () => {
+    const mixed = await extract([{ content: "用户纠正后结论改为覆盖度优先。", src: ["u1", "a1"] }], undefined, { attributionGuard: "batch-confirm" });
+    const pureUser = await extract([{ content: "用户要求以后 handoff 附开场提示词。", src: ["u2"], type: "instruction" }], undefined, { attributionGuard: "batch-confirm" });
+    const noSource = await extract([{ content: "用户偏好简洁的结论先行。", src: [] }], undefined, { attributionGuard: "batch-confirm" });
+    expect(mixed.extractedCount).toBe(1);
+    expect(pureUser.extractedCount).toBe(1);
+    expect(noSource.extractedCount).toBe(1);
+  });
+
+  it("放行与批次级拦截都留 INFO 锚点（batch-confirm 可审计）", async () => {
+    const infos: string[] = [];
+    const logger = { info: (m: string) => infos.push(m), warn: () => {}, debug: () => {}, error: () => {} } as unknown as Logger;
+    await extract([{ content: "用户确认：结论甲成立。", src: ["a1"] }], logger, { attributionGuard: "batch-confirm" });
+    expect(infos.some((m) => m.includes("batch-confirm 放行"))).toBe(true);
+
+    const aiOnly = [
+      { id: "a1", role: "assistant" as const, content: "结论甲成立。", timestamp: T },
+    ];
+    const sceneAiOnly = JSON.stringify([
+      {
+        scene_name: "我（AI）在做数据分析",
+        message_ids: ["a1"],
+        memories: [{ content: "用户确认：结论甲成立。", type: "episodic", priority: 70, source_message_ids: ["a1"] }],
+      },
+    ]);
+    const infos2: string[] = [];
+    const logger2 = { info: (m: string) => infos2.push(m), warn: () => {}, debug: () => {}, error: () => {} } as unknown as Logger;
+    await extractL1Memories({
+      messages: aiOnly,
+      sessionKey: "source-attribution-test",
+      baseDir: "/tmp/l1-source-attribution-test",
+      config: {},
+      logger: logger2,
+      options: {
+        enableDedup: false,
+        promptMode: "chat",
+        llmRunner: runnerReturning(sceneAiOnly),
+        attributionGuard: "batch-confirm",
+      },
+    });
+    expect(infos2.some((m) => m.includes("整批无 user"))).toBe(true);
+  });
+});
+
+describe("attributionGuard=off：护栏整体关闭", () => {
+  it("纯 assistant 来源也入库（实验对照臂用）", async () => {
+    const res = await extract([{ content: "用户修复了覆盖度重排的边界缺陷。", src: ["a1"] }], undefined, { attributionGuard: "off" });
+    expect(res.extractedCount).toBe(1);
   });
 });

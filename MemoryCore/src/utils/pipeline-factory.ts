@@ -584,6 +584,8 @@ export function createL1Runner(opts: {
             dedupTimeoutMs: cfg.extraction.dedupTimeoutMs,
             model: cfg.extraction.model,
             promptMode: cfg.extraction.promptMode,
+            attributionGuard: cfg.extraction.attributionGuard,
+            correctionException: cfg.extraction.correctionException,
             userIdentityNames: cfg.extraction.userIdentityNames,
             previousSceneName: lastSceneName ?? (runnerState.last_scene_name || undefined),
             vectorStore,

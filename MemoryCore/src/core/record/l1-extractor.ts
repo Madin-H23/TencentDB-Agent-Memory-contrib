@@ -147,6 +147,14 @@ export async function extractL1Memories(params: {
     previousSceneName?: string;
     /** Prompt family for L1 extraction (default: chat). */
     promptMode?: MemoryPromptMode;
+    /**
+     * 来源归属护栏模式（缺省 "strict" = 纯 assistant 来源不入库）。
+     * "batch-confirm"：其中「用户确认：」句式放宽为批次级校验（本批有 user 消息即放行）；
+     * "off"：护栏关闭。
+     */
+    attributionGuard?: "strict" | "batch-confirm" | "off";
+    /** chat 提示词注入「纠正结论例外」条款（上游 #706/#778，默认 false）。 */
+    correctionException?: boolean;
     /** L1 抽取调用超时（毫秒），缺省 180_000 = 2026-09-25 前的硬编码值。 */
     timeoutMs?: number;
     /** L1 去重（冲突检测）超时（毫秒），缺省 180_000。 */
@@ -254,6 +262,7 @@ export async function extractL1Memories(params: {
         logger,
         model: options.model,
         promptMode: options.promptMode,
+        correctionException: options.correctionException,
         traceContext: { teamId, userId, agentId, sessionId },
         llmRunner: options.llmRunner,
         timeoutMs: options.timeoutMs,
@@ -324,6 +333,13 @@ export async function extractL1Memories(params: {
   for (const m of [...newMessages, ...backgroundMessages]) {
     if (m.id) messageRoleById.set(m.id, m.role);
   }
+  // 护栏三态（extraction.attributionGuard，缺省 strict = 2026-09-25 行为）：
+  // batch-confirm 只对「用户确认：」句式放宽——提示词例外条款（上游 #706/#778）产出
+  // 的这类记忆常只挂 assistant 来源，消息级判据会把它们整批误杀（实测金标 recall
+  // 41%→12%）；批次级判据 = 本批消息存在 ≥1 条 user 消息（用户在场）才放行，
+  // 整批无用户的纯 AI 会话里编出的「用户确认：」仍然拦下。off = 护栏整体关闭。
+  const guardMode = options.attributionGuard ?? "strict";
+  const batchHasUserMessage = [...newMessages, ...backgroundMessages].some((m) => m.role === "user");
 
   for (const scene of scenes) {
     sceneNames.push(scene.scene_name);
@@ -339,18 +355,30 @@ export async function extractL1Memories(params: {
       const sanitized = sanitizeUserAttribution(mem.content, options.userIdentityNames);
       for (const label of sanitized.dropped) attributionDrops.add(label);
 
-      // 来源归属护栏：全部来源均为 assistant → 不入库（见上方注释）
+      // 来源归属护栏：全部来源均为 assistant → 不入库（三态语义见上方注释）
       const sourceIds = Array.isArray(mem.source_message_ids) ? mem.source_message_ids : [];
-      if (sourceIds.length > 0) {
+      if (guardMode !== "off" && sourceIds.length > 0) {
         const known = sourceIds.map((id) => messageRoleById.get(id));
         const allAssistant =
           known.length > 0 && known.every((role) => role === "assistant");
         if (allAssistant) {
-          logger?.info?.(
-            `${TAG} [source-attribution] 丢弃纯 assistant 来源的记忆（无用户依据）` +
-              ` sources=[${sourceIds.join(",")}] content=${JSON.stringify(sanitized.text.slice(0, 80))}`,
-          );
-          continue;
+          const isConfirmForm = /^\s*用户确认\s*[:：]/.test(sanitized.text);
+          if (guardMode === "batch-confirm" && isConfirmForm && batchHasUserMessage) {
+            logger?.info?.(
+              `${TAG} [source-attribution] batch-confirm 放行「用户确认：」记忆（本批有 user 消息）` +
+                ` sources=[${sourceIds.join(",")}] content=${JSON.stringify(sanitized.text.slice(0, 80))}`,
+            );
+          } else {
+            const reason =
+              guardMode === "batch-confirm" && isConfirmForm
+                ? "整批无 user 消息，确认无用户依据"
+                : "无用户依据";
+            logger?.info?.(
+              `${TAG} [source-attribution] 丢弃纯 assistant 来源的记忆（${reason}）` +
+                ` sources=[${sourceIds.join(",")}] content=${JSON.stringify(sanitized.text.slice(0, 80))}`,
+            );
+            continue;
+          }
         }
       }
 
@@ -586,6 +614,8 @@ async function callLlmExtraction(params: {
   logger?: Logger;
   model?: string;
   promptMode?: MemoryPromptMode;
+  /** chat 提示词注入「纠正结论例外」条款（上游 #706/#778，默认 false）。 */
+  correctionException?: boolean;
   /** Host-neutral LLM runner — when provided, used instead of CleanContextRunner. */
   llmRunner?: LLMRunner;
   /** langfuse 上报身份四元组（team/user/agent/session）。 */
@@ -593,10 +623,10 @@ async function callLlmExtraction(params: {
   /** LLM 调用超时（毫秒）。缺省 180_000 = 2026-09-25 前的硬编码值。 */
   timeoutMs?: number;
 }): Promise<SceneSegment[]> {
-  const { newMessages, backgroundMessages, previousSceneName, config, logger, model, promptMode = "chat", llmRunner, traceContext } = params;
+  const { newMessages, backgroundMessages, previousSceneName, config, logger, model, promptMode = "chat", correctionException, llmRunner, traceContext } = params;
   const llmTimeoutMs = params.timeoutMs ?? 180_000;
 
-  const systemPrompt = getExtractMemoriesSystemPrompt(promptMode);
+  const systemPrompt = getExtractMemoriesSystemPrompt(promptMode, { correctionException });
   const userPrompt = formatExtractionPrompt({
     newMessages,
     backgroundMessages,
