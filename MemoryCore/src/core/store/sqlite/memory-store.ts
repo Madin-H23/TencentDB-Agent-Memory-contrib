@@ -3065,13 +3065,22 @@ export class VectorStore implements IMemoryStore {
         try {
           const totalDocs = (this.db.prepare("SELECT COUNT(*) AS c FROM l1_fts").get() as { c: number }).c;
           const tokenDocIds = new Map<string, Set<string>>();
+          let scanTruncated = false;
           for (const token of tokens) {
             const perToken = this.stmtL1FtsSearch.all(`"${token.replaceAll('"', "")}"`, TOKEN_SCAN_LIMIT) as Array<{
               record_id: string;
             }>;
+            // A truncated per-token scan cannot distinguish "document does not
+            // contain this token" from "document was never scanned": a document
+            // that matches two very common tokens can rank 4th in the combined
+            // search yet fall outside the top-N of each individual scan, and the
+            // coverage gate would then drop a high-ranked hit entirely. When any
+            // scan may be truncated, skip re-ranking rather than rank on partial
+            // membership sets.
+            if (perToken.length >= TOKEN_SCAN_LIMIT) scanTruncated = true;
             tokenDocIds.set(token, new Set(perToken.map((r) => r.record_id)));
           }
-          ranked = rankByTokenCoverage(mapped, tokenDocIds, totalDocs);
+          ranked = scanTruncated ? mapped.slice(0, limit) : rankByTokenCoverage(mapped, tokenDocIds, totalDocs);
         } catch (err) {
           this.logger?.debug?.(
             `${TAG} [L1-fts-search] token-coverage rerank skipped: ${err instanceof Error ? err.message : String(err)}`,
