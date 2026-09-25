@@ -56,11 +56,15 @@ export interface ExtractionConfig {
   /** Prompt family for L1 extraction (default: chat). */
   promptMode: MemoryPromptMode;
   /**
-   * 来源归属护栏模式（2026-09-25）：
-   * - "strict"（默认）：source_message_ids 全为 assistant → 不入库。
-   * - "batch-confirm"：纯 assistant 来源中「用户确认：」句式的记忆放宽为批次级校验
-   *   （本批消息存在 ≥1 条 user 消息才放行）；其余形态仍按 strict。
-   * - "off"：护栏整体关闭，纯 assistant 来源也入库。
+   * 来源归属护栏模式（2026-09-25 撤护栏拍板后默认 off）：
+   * - "off"（默认）：纯 assistant 来源也入库。2026-09-25 大语料实测（23 条丢弃锚点
+   *   逐条判定）消息级判据误杀率 ~60%——分不开「AI 自述行为」与「assistant 转述的
+   *   用户事实」，金标 recall 44%→24%，收益不成立故默认关闭。
+   * - "strict"：source_message_ids 全为 assistant → 不入库（2026-09-25 前的行为，
+   *   仅实验用）。
+   * - "batch-confirm"：纯 assistant 来源中「用户确认：」句式放宽为批次级校验
+   *   （本批消息存在 ≥1 条 user 消息才放行）；其余形态仍按 strict。实测仍无法恢复
+   *   召回（金标 18%），仅保留作实验通道。
    */
   attributionGuard?: "strict" | "batch-confirm" | "off";
   /**
@@ -713,12 +717,12 @@ function normalizePromptMode(value: string | undefined, fallback: MemoryPromptMo
   return fallback;
 }
 
-/** extraction.attributionGuard 枚举解析：未配置 → strict（默认）；配置了非法值（含非字符串）→ fail-fast。 */
+/** extraction.attributionGuard 枚举解析：未配置 → off（2026-09-25 撤护栏拍板）；配置了非法值（含非字符串）→ fail-fast。 */
 function parseAttributionGuard(src: Record<string, unknown>, key: string): "strict" | "batch-confirm" | "off" {
   const raw = src[key];
-  if (raw === undefined) return "strict";
+  if (raw === undefined) return "off";
   const v = typeof raw === "string" ? raw.trim() : undefined;
-  if (v === "") return "strict";
+  if (v === "") return "off";
   if (v === "strict" || v === "batch-confirm" || v === "off") return v;
   throw new Error(
     `[config] extraction.attributionGuard="${String(raw)}" 非法（合法: strict | batch-confirm | off，缺省 strict）`,

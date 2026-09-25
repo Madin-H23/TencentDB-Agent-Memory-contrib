@@ -1,15 +1,15 @@
 // extraction.attributionGuard / correctionException 配置解析测试（2026-09-25 方案 B）
 //
-// attributionGuard 缺省必须是 "strict"（与 00db4ef 引入护栏后的行为逐字一致），
-// 非法值 fail-fast（拼写错误静默失效比报错更危险——与 llm.layers 未知层键同策略）；
-// correctionException 缺省 false（例外条款默认不注入）。
+// attributionGuard 缺省必须是 "off"（2026-09-25 撤护栏拍板：消息级判据实测误杀率
+// ~60%、金标 44%→24%，收益不成立），非法值 fail-fast（拼写错误静默失效比报错更
+// 危险——与 llm.layers 未知层键同策略）；correctionException 缺省 false。
 import { describe, expect, it } from "vitest";
 import { parseConfig } from "./config.js";
 
 describe("extraction.attributionGuard 配置解析", () => {
-  it("未配置 → 默认 strict（护栏保持 2026-09-25 行为）", () => {
+  it("未配置 → 默认 off（撤护栏拍板后的生产行为）", () => {
     const cfg = parseConfig({});
-    expect(cfg.extraction.attributionGuard).toBe("strict");
+    expect(cfg.extraction.attributionGuard).toBe("off");
     expect(cfg.extraction.correctionException).toBe(false);
   });
 
@@ -29,7 +29,7 @@ describe("extraction.attributionGuard 配置解析", () => {
     expect(parseConfig({ extraction: { correctionException: true } }).extraction.correctionException).toBe(true);
   });
 
-  it("空字符串 attributionGuard 视为未配置（走默认 strict）", () => {
-    expect(parseConfig({ extraction: { attributionGuard: "" } }).extraction.attributionGuard).toBe("strict");
+  it("空字符串 attributionGuard 视为未配置（走默认 off）", () => {
+    expect(parseConfig({ extraction: { attributionGuard: "" } }).extraction.attributionGuard).toBe("off");
   });
 });

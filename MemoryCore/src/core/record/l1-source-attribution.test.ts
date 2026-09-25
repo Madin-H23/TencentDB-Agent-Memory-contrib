@@ -67,54 +67,67 @@ async function extract(
   });
 }
 
-describe("来源归属护栏：纯 assistant 来源的记忆不入库", () => {
+// strict 行为用显式 attributionGuard 驱动：2026-09-25 撤护栏拍板后默认已改 off，
+// 本 describe 验证的是「护栏开启时」的语义，不再绑定默认值。
+describe("attributionGuard=strict：纯 assistant 来源的记忆不入库（实验档）", () => {
+  const S = { attributionGuard: "strict" as const };
+
   it("来源全是 assistant → 丢弃（AI 的技术工作不得记成用户事实）", async () => {
-    const res = await extract([{ content: "用户修复了覆盖度重排的边界缺陷，原实现每个词扫 200 条。", src: ["a1"] }]);
+    const res = await extract([{ content: "用户修复了覆盖度重排的边界缺陷，原实现每个词扫 200 条。", src: ["a1"] }], undefined, S);
     expect(res.extractedCount).toBe(0);
     expect(res.records).toHaveLength(0);
   });
 
   it("来源全是 assistant（多条）→ 同样丢弃", async () => {
-    const res = await extract([{ content: "用户要求重启网关进程 PID 6388。", src: ["a1", "a2"] }]);
+    const res = await extract([{ content: "用户要求重启网关进程 PID 6388。", src: ["a1", "a2"] }], undefined, S);
     expect(res.extractedCount).toBe(0);
   });
 
   it("混入用户来源 → 保留（用户纠正后由 assistant 陈述最终结论，属 #706/#778 要救的场景）", async () => {
-    const res = await extract([{ content: "用户纠正了召回排序口径后，结论改为覆盖度优先。", src: ["u1", "a1"] }]);
+    const res = await extract([{ content: "用户纠正了召回排序口径后，结论改为覆盖度优先。", src: ["u1", "a1"] }], undefined, S);
     expect(res.extractedCount).toBe(1);
     expect(res.records[0].content).toContain("覆盖度优先");
   });
 
   it("纯用户来源 → 保留（正常路径不受影响）", async () => {
-    const res = await extract([{ content: "用户要求以后 handoff 附开场提示词。", src: ["u2"], type: "instruction" }]);
+    const res = await extract([{ content: "用户要求以后 handoff 附开场提示词。", src: ["u2"], type: "instruction" }], undefined, S);
     expect(res.extractedCount).toBe(1);
   });
 
   it("无来源标注（source_message_ids 为空）→ 保守保留，不误杀", async () => {
-    const res = await extract([{ content: "用户偏好简洁的结论先行。", src: [] }]);
+    const res = await extract([{ content: "用户偏好简洁的结论先行。", src: [] }], undefined, S);
     expect(res.extractedCount).toBe(1);
   });
 
   it("来源 id 指向不存在的消息 → 保守保留（不因未知而误杀）", async () => {
-    const res = await extract([{ content: "用户提出过某项要求。", src: ["ghost-1"] }]);
+    const res = await extract([{ content: "用户提出过某项要求。", src: ["ghost-1"] }], undefined, S);
     expect(res.extractedCount).toBe(1);
   });
 
   it("部分来源未知、部分为 assistant → 保留（不作纯 assistant 判定）", async () => {
-    const res = await extract([{ content: "用户确认了某项结论。", src: ["ghost-1", "a1"] }]);
+    const res = await extract([{ content: "用户确认了某项结论。", src: ["ghost-1", "a1"] }], undefined, S);
     expect(res.extractedCount).toBe(1);
   });
 
   it("丢弃时留下可审计锚点（知道丢了什么、依据什么判定）", async () => {
     const infos: string[] = [];
     const logger = { info: (m: string) => infos.push(m), warn: () => {}, debug: () => {}, error: () => {} } as unknown as Logger;
-    await extract([{ content: "用户修复了某个缺陷。", src: ["a1"] }], logger);
+    await extract([{ content: "用户修复了某个缺陷。", src: ["a1"] }], logger, S);
     expect(infos.some((m) => m.includes("source-attribution") && m.includes("a1"))).toBe(true);
   });
+});
 
-  it("显式 strict 与默认行为一致（纯 assistant 丢弃）", async () => {
-    const res = await extract([{ content: "用户修复了覆盖度重排的边界缺陷。", src: ["a1"] }], undefined, { attributionGuard: "strict" });
-    expect(res.extractedCount).toBe(0);
+describe("默认（未配置 attributionGuard）= off：撤护栏后的生产行为", () => {
+  it("纯 assistant 来源也入库（2026-09-25 拍板：消息级判据误杀率 ~60%，默认关闭）", async () => {
+    const res = await extract([{ content: "用户修复了覆盖度重排的边界缺陷。", src: ["a1"] }]);
+    expect(res.extractedCount).toBe(1);
+  });
+
+  it("混源/纯用户/空来源路径不受撤护栏影响", async () => {
+    const mixed = await extract([{ content: "用户纠正后结论改为覆盖度优先。", src: ["u1", "a1"] }]);
+    const noSource = await extract([{ content: "用户偏好简洁的结论先行。", src: [] }]);
+    expect(mixed.extractedCount).toBe(1);
+    expect(noSource.extractedCount).toBe(1);
   });
 });
 
