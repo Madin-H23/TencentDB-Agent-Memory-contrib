@@ -333,12 +333,13 @@ export async function extractL1Memories(params: {
   for (const m of [...newMessages, ...backgroundMessages]) {
     if (m.id) messageRoleById.set(m.id, m.role);
   }
-  // 护栏三态（extraction.attributionGuard，缺省 strict = 2026-09-25 行为）：
-  // batch-confirm 只对「用户确认：」句式放宽——提示词例外条款（上游 #706/#778）产出
-  // 的这类记忆常只挂 assistant 来源，消息级判据会把它们整批误杀（实测金标 recall
-  // 41%→12%）；批次级判据 = 本批消息存在 ≥1 条 user 消息（用户在场）才放行，
-  // 整批无用户的纯 AI 会话里编出的「用户确认：」仍然拦下。off = 护栏整体关闭。
-  const guardMode = options.attributionGuard ?? "strict";
+  // 护栏三态（extraction.attributionGuard，缺省 off = 2026-09-25 撤护栏拍板）：
+  // 09-25 大语料实测消息级判据误杀率 ~60%（23 条锚点逐条判定：分不开「AI 自述行为」
+  // 与「assistant 转述的用户事实」，用户环境/指令/确认大量被杀），金标 recall
+  // 44%→24%，默认关闭。strict = 09-25 前行为（仅实验）；batch-confirm 只对
+  // 「用户确认：」句式放宽为批次级判据（本批有 user 消息即放行）——实测金标 18%
+  // 未恢复，保留作实验通道。三态均留 INFO 锚点可审计。
+  const guardMode = options.attributionGuard ?? "off";
   const batchHasUserMessage = [...newMessages, ...backgroundMessages].some((m) => m.role === "user");
 
   for (const scene of scenes) {
