@@ -147,6 +147,10 @@ export async function extractL1Memories(params: {
     previousSceneName?: string;
     /** Prompt family for L1 extraction (default: chat). */
     promptMode?: MemoryPromptMode;
+    /** L1 抽取调用超时（毫秒），缺省 180_000 = 2026-09-25 前的硬编码值。 */
+    timeoutMs?: number;
+    /** L1 去重（冲突检测）超时（毫秒），缺省 180_000。 */
+    dedupTimeoutMs?: number;
     /**
      * 用户身份白名单：只有这些姓名允许出现在「用户（X）」的括号里。
      * 其余（第三方姓名/角色标签/路径数字/时间状语…）入库前一律归一为「用户」。
@@ -252,6 +256,7 @@ export async function extractL1Memories(params: {
         promptMode: options.promptMode,
         traceContext: { teamId, userId, agentId, sessionId },
         llmRunner: options.llmRunner,
+        timeoutMs: options.timeoutMs,
       });
       sampleScenes.push(sampleScenesResult);
     } catch (err) {
@@ -415,6 +420,7 @@ export async function extractL1Memories(params: {
       const decisions = await batchDedup({
         memories: memoriesWithIds,
         config,
+        timeoutMs: options.dedupTimeoutMs,
         logger,
         model: options.model,
         promptMode: options.promptMode,
@@ -552,8 +558,11 @@ async function callLlmExtraction(params: {
   llmRunner?: LLMRunner;
   /** langfuse 上报身份四元组（team/user/agent/session）。 */
   traceContext?: TraceContext;
+  /** LLM 调用超时（毫秒）。缺省 180_000 = 2026-09-25 前的硬编码值。 */
+  timeoutMs?: number;
 }): Promise<SceneSegment[]> {
   const { newMessages, backgroundMessages, previousSceneName, config, logger, model, promptMode = "chat", llmRunner, traceContext } = params;
+  const llmTimeoutMs = params.timeoutMs ?? 180_000;
 
   const systemPrompt = getExtractMemoriesSystemPrompt(promptMode);
   const userPrompt = formatExtractionPrompt({
@@ -579,7 +588,7 @@ async function callLlmExtraction(params: {
       prompt: userPrompt,
       systemPrompt,
       taskId: "l1-extraction",
-      timeoutMs: 180_000,
+      timeoutMs: llmTimeoutMs,
       ...traceParams,
     });
   } else {
@@ -595,7 +604,7 @@ async function callLlmExtraction(params: {
       prompt: userPrompt,
       systemPrompt,
       taskId: "l1-extraction",
-      timeoutMs: 180_000,
+      timeoutMs: llmTimeoutMs,
       ...traceParams,
     });
   }

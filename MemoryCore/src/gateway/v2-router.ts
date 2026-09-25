@@ -17,6 +17,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type http from "node:http";
 import { classifyError } from "./error-handler.js";
+import { KNOWLEDGE_READ_ONLY_PATHS, verifyKnowledgeBearer } from "./knowledge-handlers.js";
 import type { IMemoryStore, L0Record, ProfileSyncRecord } from "../core/store/types.js";
 import type { EmbeddingService } from "../core/store/embedding.js";
 import { createScopedStorageAdapter, type StorageAdapter } from "../core/storage/adapter.js";
@@ -551,6 +552,17 @@ export async function handleV2Route(
   };
 
   const authStart = Date.now();
+  // Knowledge 写/管理面服务键门（回移上游 #1385）：未设置 KNOWLEDGE_SERVICE_KEY 时
+  // 不启用（向后兼容本地部署）；设置后只读白名单外的 /v3/knowledge/* 必须带
+  // `Authorization: Bearer <key>`，否则 401 fail-closed。放在 parseV2Auth 之前，
+  // 因为它守的是「这条路由该不该被处理」而不是调用者身份。
+  if (pathname.startsWith("/v3/knowledge/") && !KNOWLEDGE_READ_ONLY_PATHS.has(pathname)) {
+    const serviceKey = process.env.KNOWLEDGE_SERVICE_KEY ?? "";
+    if (serviceKey && !verifyKnowledgeBearer(req.headers.authorization, serviceKey)) {
+      sendJson(res, 401, errorEnvelope(401, "knowledge service key required", requestId));
+      return true;
+    }
+  }
   const auth = parseV2Auth(req, res, requestId, sendJson);
   if (isSkillPerf) {
     perfMark("parseAuth", `dur=${Date.now() - authStart}ms ok=${auth ? "true" : "false"}`);

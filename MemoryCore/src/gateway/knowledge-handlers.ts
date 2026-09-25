@@ -141,6 +141,35 @@ type RouteHandler = (
   deps: unknown,
 ) => Promise<ApiResponseEnvelope>;
 
+/**
+ * Knowledge 写/管理面服务键校验（回移上游 #1385，2026-09-25）。
+ *
+ * 背景：/v3/knowledge/* 此前完全无鉴权，可被零凭据劫持 LLM 绑定（保留受害者
+ * api_key 的前提下改 base_url）以及触发数据/密钥外泄。
+ *
+ * 语义与上游一致：
+ *   - serviceKey 为空（未设置 KNOWLEDGE_SERVICE_KEY）= 不启用鉴权，向后兼容本地部署；
+ *   - 非空 = 除只读白名单外的端点均要求 `Authorization: Bearer <serviceKey>`，
+ *     缺失/错误一律 401（fail-closed）。
+ */
+export const KNOWLEDGE_READ_ONLY_PATHS = new Set(["/v3/knowledge/get", "/v3/knowledge/list"]);
+
+/** 定时安全比较，避免按字符提前返回泄露前缀。 */
+function safeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+/** 纯函数：校验 Authorization 是否为 `Bearer <serviceKey>`。 */
+export function verifyKnowledgeBearer(authHeader: string | undefined, serviceKey: string): boolean {
+  if (!authHeader) return false;
+  const m = /^Bearer\s+(\S+)\s*$/i.exec(authHeader);
+  if (!m) return false;
+  return safeEqual(m[1], serviceKey);
+}
+
 export function makeKnowledgeRouteTable(): Record<string, RouteHandler> {
   // Mirrors makeSkillRouteTable: /v3/* only, no /v2 dual-registration.
   // Knowledge entity CRUD is team-scoped management-plane; callers are
