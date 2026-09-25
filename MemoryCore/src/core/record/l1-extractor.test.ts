@@ -110,7 +110,10 @@ describe("确定性归属护栏（2026-09-24 事故回归）", () => {
           message_ids: ["m1", "m2"],
           memories: [
             { content: "用户（王缘林）要求将处理人配置范围扩大到所有一级资料库", type: "instruction", priority: 80, source_message_ids: ["m1"] },
-            { content: "用户（导师）于 2026-09-24 提了四条文档管理需求", type: "episodic", priority: 70, source_message_ids: ["m2"] },
+            // 来源用 m1（user）而非 m2：本用例验证的是**姓名归一**，不是来源归属。
+            // 2026-09-25 新增来源归属护栏后，纯 assistant 来源会被正确丢弃——
+            // 那条行为由 l1-source-attribution.test.ts 单独覆盖。
+            { content: "用户（导师）于 2026-09-24 提了四条文档管理需求", type: "episodic", priority: 70, source_message_ids: ["m1"] },
             { content: "用户（何伟健）坚持先备份再动线上库", type: "instruction", priority: 85, source_message_ids: ["m1"] },
           ],
         },
