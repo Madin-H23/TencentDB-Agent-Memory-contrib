@@ -220,6 +220,24 @@ export async function extractL1Memories(params: {
   const allExtracted: ExtractedMemory[] = [];
   const sceneNames: string[] = [];
 
+  // Source-attribution guard: the prompt asks the model not to extract the
+  // assistant's own behaviour/output, but that rule does not stop it from
+  // restating the assistant's work as a user fact. Observed in production, e.g.
+  // "the user restarted gateway process PID 6388" — a PID that had long been
+  // invalid, so recalling it later yields wrong operational guidance. Such a
+  // memory passes a source-traceability check (its words really do come from the
+  // source messages); the missing signal is *whose* statements they were.
+  //
+  // Rule: when **every** id in source_message_ids refers to an assistant message,
+  // the memory has no user grounding and is dropped. Mixed sources are kept —
+  // that is the "user corrected it, assistant stated the final conclusion" case
+  // (#706/#778) and must survive. Empty or unknown ids are kept: the guard acts
+  // only on positively-known assistant-only sourcing and never guesses.
+  const messageRoleById = new Map<string, string>();
+  for (const m of [...newMessages, ...backgroundMessages]) {
+    if (m.id) messageRoleById.set(m.id, m.role);
+  }
+
   for (const scene of scenes) {
     sceneNames.push(scene.scene_name);
     for (const mem of scene.memories) {
@@ -228,11 +246,22 @@ export async function extractL1Memories(params: {
         logger?.warn?.(`${TAG} Skipping memory with invalid type "${mem.type}"`);
         continue;
       }
+      const sourceIds = Array.isArray(mem.source_message_ids) ? mem.source_message_ids : [];
+      if (sourceIds.length > 0) {
+        const roles = sourceIds.map((id) => messageRoleById.get(id));
+        if (roles.length > 0 && roles.every((role) => role === "assistant")) {
+          logger?.info?.(
+            `${TAG} [source-attribution] dropping memory with assistant-only sources ` +
+              `(no user grounding) sources=[${sourceIds.join(",")}] content=${JSON.stringify(mem.content.slice(0, 80))}`,
+          );
+          continue;
+        }
+      }
       allExtracted.push({
         content: mem.content,
         type: memType,
         priority: typeof mem.priority === "number" ? mem.priority : 50,
-        source_message_ids: Array.isArray(mem.source_message_ids) ? mem.source_message_ids : [],
+        source_message_ids: sourceIds,
         metadata: mem.metadata ?? {},
         scene_name: scene.scene_name,
       });
