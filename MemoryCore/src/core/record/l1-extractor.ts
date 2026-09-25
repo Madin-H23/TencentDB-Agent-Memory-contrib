@@ -309,6 +309,22 @@ export async function extractL1Memories(params: {
   const attributionDrops = new Set<string>();
   const sceneNames: string[] = [];
 
+  // ── 来源归属护栏（2026-09-25）──────────────────────────────────────────
+  // 提示词要求「不提取 AI 助手自身的行为或输出」，但实测它拦不住「把 assistant
+  // 写的技术结论记成用户的事实」：生产 L1 里出现过「用户修复了覆盖度重排的边界
+  // 缺陷」「用户要求重启网关进程（PID 6388）」（该 PID 早已失效，仍会误导后续
+  // 操作）这类记忆。它们的内容确实出自源消息，**只是源消息由 assistant 写**，
+  // 所以以「内容可追溯性」为判据的检查（上游 #266）会放它们过关。
+  //
+  // 确定性判据：source_message_ids 里的**每一条**来源都来自 assistant → 该记忆
+  // 没有用户依据，不入库。混有用户来源则保留——那正是上游 #706/#778 要解决的
+  // 「用户纠正后由 assistant 陈述最终结论」，混源即视为有用户依据。
+  // 未知 id、空来源一律保留：护栏只拦「确知纯 assistant 来源」，不猜。
+  const messageRoleById = new Map<string, string>();
+  for (const m of [...newMessages, ...backgroundMessages]) {
+    if (m.id) messageRoleById.set(m.id, m.role);
+  }
+
   for (const scene of scenes) {
     sceneNames.push(scene.scene_name);
     for (const mem of scene.memories) {
@@ -322,11 +338,27 @@ export async function extractL1Memories(params: {
       // 入库前统一归一：仅配置白名单内的姓名可保留，其余归一为「用户」。
       const sanitized = sanitizeUserAttribution(mem.content, options.userIdentityNames);
       for (const label of sanitized.dropped) attributionDrops.add(label);
+
+      // 来源归属护栏：全部来源均为 assistant → 不入库（见上方注释）
+      const sourceIds = Array.isArray(mem.source_message_ids) ? mem.source_message_ids : [];
+      if (sourceIds.length > 0) {
+        const known = sourceIds.map((id) => messageRoleById.get(id));
+        const allAssistant =
+          known.length > 0 && known.every((role) => role === "assistant");
+        if (allAssistant) {
+          logger?.info?.(
+            `${TAG} [source-attribution] 丢弃纯 assistant 来源的记忆（无用户依据）` +
+              ` sources=[${sourceIds.join(",")}] content=${JSON.stringify(sanitized.text.slice(0, 80))}`,
+          );
+          continue;
+        }
+      }
+
       allExtracted.push({
         content: sanitized.text,
         type: memType,
         priority: typeof mem.priority === "number" ? mem.priority : 50,
-        source_message_ids: Array.isArray(mem.source_message_ids) ? mem.source_message_ids : [],
+        source_message_ids: sourceIds,
         metadata: mem.metadata ?? {},
         scene_name: scene.scene_name,
       });
