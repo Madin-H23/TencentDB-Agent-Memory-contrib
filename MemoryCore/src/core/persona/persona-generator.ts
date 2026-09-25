@@ -29,6 +29,8 @@ export class PersonaGenerator {
   private instanceId: string | undefined;
   private storage: StorageAdapter | undefined;
   private traceContext: TraceContext | undefined;
+  /** LLM 调用超时（毫秒，默认 180_000 = 改动前行为）；可由配置覆盖。 */
+  private readonly timeoutMs: number;
 
   constructor(opts: {
     dataDir: string;
@@ -50,6 +52,12 @@ export class PersonaGenerator {
     storage?: StorageAdapter;
     /** langfuse 上报身份四元组（team/user/agent/session），填充 trace 顶级字段。 */
     traceContext?: TraceContext;
+    /**
+     * LLM 调用超时（毫秒）。缺省 180_000 = 改动前的硬编码值。
+     * 上限提醒：Node 内置 fetch(undici) 的 headersTimeout 默认 300s，非流式补全
+     * 只在生成完成后才发响应头，配到 600s 会被静默截到 ~300s。
+     */
+    timeoutMs?: number;
   }) {
     this.dataDir = opts.dataDir;
     this.logger = opts.logger;
@@ -58,6 +66,7 @@ export class PersonaGenerator {
     this.instanceId = opts.instanceId;
     this.storage = opts.storage;
     this.traceContext = opts.traceContext;
+    this.timeoutMs = opts.timeoutMs ?? 180_000;
     // Use injected LLMRunner if available, otherwise fall back to CleanContextRunner
     this.runner = opts.llmRunner ?? new CleanContextRunner({
       config: opts.config,
@@ -197,7 +206,7 @@ export class PersonaGenerator {
         systemPrompt,
         prompt: userPrompt,
         taskId: "persona-generation",
-        timeoutMs: 180_000,
+        timeoutMs: this.timeoutMs,
         // maxTokens omitted → core uses the resolved model's maxTokens from catalog
         workspaceDir: this.dataDir,
         // Service mode: LLM tools read/write via StorageAdapter (COS) instead of local FS

@@ -47,6 +47,10 @@ export interface ExtractionConfig {
    * 调大该值以并集换召回。非法值（非整数 / <1）在 l1-extractor 内钳到 1 并告警。
    */
   samplesPerBatch: number;
+  /** L1 抽取调用超时（毫秒，默认 180_000 = 2026-09-25 前的硬编码值）。 */
+  timeoutMs?: number;
+  /** L1 去重（冲突检测）超时（毫秒，默认 180_000）。第三方实测失败率 31%，66/143 因超时。 */
+  dedupTimeoutMs?: number;
   /** LLM model for extraction, format: "provider/model" (falls back to OpenClaw default model when omitted) */
   model?: string;
   /** Prompt family for L1 extraction (default: chat). */
@@ -64,6 +68,8 @@ export interface PersonaConfig {
   /** Scene blocks backup count (default: 10) */
   sceneBackupCount: number;
   /** LLM model for persona generation, format: "provider/model" (falls back to OpenClaw default model when omitted) */
+  /** L3 persona 生成调用超时（毫秒，默认 180_000 = 2026-09-25 前的硬编码值）。 */
+  timeoutMs?: number;
   model?: string;
   /** Prompt family for L2/L3 prompts (default: chat; code prompts will be wired as they are added). */
   promptMode: MemoryPromptMode;
@@ -567,6 +573,8 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       // 同批多采样取并集（self-consistency）：默认 1=单采样=原行为；
       // 调大以并集换召回，非法值由 l1-extractor 钳到 1 并告警。
       samplesPerBatch: num(extractionGroup, "samplesPerBatch") ?? 1,
+      timeoutMs: num(extractionGroup, "timeoutMs"),
+      dedupTimeoutMs: num(extractionGroup, "dedupTimeoutMs"),
       model: optStr(extractionGroup, "model"),
       promptMode: normalizePromptMode(str(extractionGroup, "promptMode"), globalPromptMode),
       // 用户身份白名单：只有这里的姓名才允许出现在「用户（X）」里（确定性护栏
@@ -579,6 +587,7 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       backupCount: num(personaGroup, "backupCount") ?? 3,
       sceneBackupCount: num(personaGroup, "sceneBackupCount") ?? 10,
       model: optStr(personaGroup, "model"),
+      timeoutMs: num(personaGroup, "timeoutMs"),
       promptMode: normalizePromptMode(str(personaGroup, "promptMode"), globalPromptMode),
     },
     pipeline: {

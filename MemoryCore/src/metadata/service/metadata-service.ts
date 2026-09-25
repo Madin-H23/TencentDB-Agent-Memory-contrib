@@ -942,6 +942,62 @@ export class MetadataService {
     return result;
   }
 
+  /**
+   * asset/get 的调用者视角读（回移上游 #1464，水平越权修复）：
+   *   - system_admin：管理面全量；
+   *   - owner 短路：本人资产直接可见，无需查 ACL；
+   *   - 其余走 checkAssetPermission（visibility → ACL）判定，不可见按 not-found 返回，
+   *     不向调用者泄露「资产存在但无权读」这一事实。
+   */
+  async getAssetForCaller(assetId: string, ctx: V3AuthContext): Promise<AssetEntity | null> {
+    const asset = await this.getAssetById(assetId);
+    if (!asset) return null;
+    if (ctx.isSystemAdmin) return asset;
+    if (!ctx.userId) return null;
+    if (asset.owner_user_id === ctx.userId) return asset;
+    const perm = await this.checkAssetPermission({ user_id: ctx.userId, asset_id: assetId, action: "read" });
+    return perm.allowed ? asset : null;
+  }
+
+  /**
+   * asset/list 的调用者视角读（回移上游 #1464）：
+   *   - system_admin：原 listAssetsByTeam 语义保留；
+   *   - 团队成员：owner 资产恒可见，其余逐条 checkAssetPermission；
+   *   - 非成员 / 未解析调用者：空页（不报错，避免泄露 team 信息）。
+   * 权限过滤在分页前完成，保证 total 准确。
+   */
+  async listAssetsForCaller(
+    params: { team_id: string } & AssetFilter & { limit?: number; offset?: number },
+    ctx: V3AuthContext,
+  ): Promise<PaginatedResult<AssetEntity>> {
+    const pagination = this.pag(params);
+    const { team_id, limit: _limit, offset: _offset, ...filter } = params;
+    if (ctx.isSystemAdmin) {
+      return this.listAssetsByTeam(team_id, pagination, filter);
+    }
+    if (!ctx.userId) return paginateArray([], pagination);
+    const member = await this.store.getTeamMember(team_id, ctx.userId);
+    if (!member || member.status !== "active") return paginateArray([], pagination);
+
+    const result: AssetEntity[] = [];
+    let offset = 0;
+    const limit = 100;
+    for (;;) {
+      const page = await this.store.listAssetsByTeam(team_id, { limit, offset }, filter);
+      for (const asset of page.items) {
+        if (asset.owner_user_id === ctx.userId) {
+          result.push(asset);
+          continue;
+        }
+        const perm = await this.checkAssetPermission({ user_id: ctx.userId, asset_id: asset.asset_id, action: "read" });
+        if (perm.allowed) result.push(asset);
+      }
+      if (offset + page.items.length >= page.total) break;
+      offset += limit;
+    }
+    return paginateArray(result, pagination);
+  }
+
   async listAssetsByTeam(
     teamId: string,
     pagination: PaginationParams = DEFAULT_PAGINATION,

@@ -580,6 +580,8 @@ export function createL1Runner(opts: {
             enableDedup: cfg.extraction.enableDedup,
             maxMemoriesPerSession: cfg.extraction.maxMemoriesPerSession,
             samplesPerBatch: cfg.extraction.samplesPerBatch,
+            timeoutMs: cfg.extraction.timeoutMs,
+            dedupTimeoutMs: cfg.extraction.dedupTimeoutMs,
             model: cfg.extraction.model,
             promptMode: cfg.extraction.promptMode,
             userIdentityNames: cfg.extraction.userIdentityNames,
@@ -893,6 +895,7 @@ export function createL3Runner(opts: {
       // 反解 scope 拿回 teamId/userId/agentId/sessionId 给 langfuse trace 用
       const scopeIsolation = parseProfileIsolationScope(scope);
       const generator = new PersonaGenerator({
+        timeoutMs: cfg.persona.timeoutMs,
         dataDir: scopedDir,
         config: openclawConfig,
         model: cfg.persona.model,

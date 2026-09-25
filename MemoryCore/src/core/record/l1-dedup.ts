@@ -65,6 +65,12 @@ export async function batchDedup(params: {
   conflictRecallTopK?: number;
   /** Override embedding timeout for capture-path calls (milliseconds) */
   embeddingTimeoutMs?: number;
+  /** LLM 调用超时（毫秒，默认 180_000 = 改动前行为）。
+   *  2026-09-25 改为可配置：第三方生产实测 L1 去重 14 天失败 143/464（31%），
+   *  其中 66 次即因 180s 超时（issue #1403）。
+   *  上限提醒：Node 内置 fetch(undici) 的 headersTimeout 默认 300s，非流式补全
+   *  只在生成完成后才发响应头，配到 600s 会被静默截到 ~300s。 */
+  timeoutMs?: number;
   /** Host-neutral LLM runner — when provided, used instead of CleanContextRunner. */
   llmRunner?: LLMRunner;
   /** Isolation filter applied to candidate recall so dedup never crosses tenants. */
@@ -73,6 +79,10 @@ export async function batchDedup(params: {
   traceContext?: TraceContext;
 }): Promise<DedupDecision[]> {
   const { memories, config, logger, model, promptMode = "chat", vectorStore, embeddingService, llmRunner, filter, traceContext } = params;
+  // 保持与改动前一致：未显式配置时仍是 180_000。
+  // 注意上限：Node 内置 fetch(undici) 的 headersTimeout 默认 300s，非流式补全只在生成完后发头，
+  // 配到 600s 会被静默截到 ~300s（见 issue #1403 的第三方补充说明）。
+  const timeoutMs = params.timeoutMs ?? 180_000;
   const topK = params.conflictRecallTopK ?? 5;
 
   if (memories.length === 0) {
@@ -160,7 +170,7 @@ async function runLlmJudgment(
         prompt: userPrompt,
         systemPrompt,
         taskId: "l1-conflict-detection",
-        timeoutMs: 180_000,
+        timeoutMs,
         ...traceParams,
       });
     } else {
@@ -176,7 +186,7 @@ async function runLlmJudgment(
         prompt: userPrompt,
         systemPrompt,
         taskId: "l1-conflict-detection",
-        timeoutMs: 180_000,
+        timeoutMs,
         ...traceParams,
       });
     }
