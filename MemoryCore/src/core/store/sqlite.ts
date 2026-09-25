@@ -3169,13 +3169,20 @@ export class VectorStore implements IMemoryStore {
         try {
           const totalDocs = (this.db.prepare("SELECT COUNT(*) AS c FROM l1_fts").get() as { c: number }).c;
           const tokenDocIds = new Map<string, Set<string>>();
+          let scanTruncated = false;
           for (const token of tokens) {
             const perToken = this.stmtL1FtsSearch.all(`"${token.replaceAll('"', "")}"`, TOKEN_SCAN_LIMIT) as Array<{
               record_id: string;
             }>;
+            // 截断的单词扫描无法区分「该文档不含此词」与「该文档根本没被扫到」：
+            // 一篇同时命中两个高频词的文档，可能在合并 OR 查询里排第 4，却在各自的
+            // 单词扫描里掉出前 N——此时覆盖度被算成 0，门槛会把这条高排名命中整条删掉
+            // （上游 #1506 review 由 kvnloo 以 604 行真实 FTS5 夹具复现）。任一扫描
+            // 触达上限即视为成员集不完整，跳过重排、按 BM25 原序返回。
+            if (perToken.length >= TOKEN_SCAN_LIMIT) scanTruncated = true;
             tokenDocIds.set(token, new Set(perToken.map((r) => r.record_id)));
           }
-          ranked = rankByTokenCoverage(mappedAll, tokenDocIds, totalDocs);
+          ranked = scanTruncated ? mappedAll.slice(0, limit) : rankByTokenCoverage(mappedAll, tokenDocIds, totalDocs);
         } catch (err) {
           // 重排失败不得影响召回可用性：退回 BM25 原序
           this.logger?.debug?.(
