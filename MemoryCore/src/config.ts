@@ -45,6 +45,12 @@ export interface ExtractionConfig {
   model?: string;
   /** Prompt family for L1 extraction (default: chat). */
   promptMode: MemoryPromptMode;
+  /**
+   * User identity allowlist: only these names may appear in "user (name)" brackets
+   * (input of the deterministic guard sanitizeUserAttribution). Empty = normalize
+   * every bracketed label to plain "user".
+   */
+  userIdentityNames?: string[];
 }
 
 /** Persona (L2/L3) settings — controls scene extraction (L2) and user profile generation (L3). */
