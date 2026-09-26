@@ -3076,8 +3076,13 @@ export class VectorStore implements IMemoryStore {
             // search yet fall outside the top-N of each individual scan, and the
             // coverage gate would then drop a high-ranked hit entirely. When any
             // scan may be truncated, skip re-ranking rather than rank on partial
-            // membership sets.
-            if (perToken.length >= TOKEN_SCAN_LIMIT) scanTruncated = true;
+            // membership sets — and stop scanning: once scanTruncated is set the
+            // final branch returns the existing BM25 order, so every later scan
+            // and membership set is dead work.
+            if (perToken.length >= TOKEN_SCAN_LIMIT) {
+              scanTruncated = true;
+              break;
+            }
             tokenDocIds.set(token, new Set(perToken.map((r) => r.record_id)));
           }
           ranked = scanTruncated ? mapped.slice(0, limit) : rankByTokenCoverage(mapped, tokenDocIds, totalDocs);
