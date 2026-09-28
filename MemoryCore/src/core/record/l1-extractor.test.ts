@@ -113,4 +113,27 @@ describe("extractL1Memories: failure vs. genuine empty (#1395)", () => {
       reason: "normalized_all_dropped",
     });
   });
+
+  it("retry pass over the SAME L0 rows succeeds after a parse-side defer (#1395 review)", async () => {
+    // The deferral story in three passes over one identical batch: pass 1 gets a
+    // truncated response and must throw (cursor stays put upstream), pass 2 — the
+    // natural retry, same rows — returns valid memories and must store them, pass
+    // 3 is the already-covered genuine-empty case. This pins that a defer leaves
+    // no residue that would poison the retry.
+    const truncated = '[{"scene_name":"用户与AI讨论Aurora-7项目","message_ids":["m1","m2"';
+    await expect(extract(runnerReturning(truncated))).rejects.toMatchObject({ reason: "no_json" });
+
+    const valid = JSON.stringify([
+      {
+        scene_name: "用户在设计项目方案",
+        message_ids: ["m1", "m2"],
+        memories: [
+          { type: "episodic", content: "用户决定项目采用事件溯源架构", priority: 70 },
+        ],
+      },
+    ]);
+    const res = await extract(runnerReturning(valid));
+    expect(res.success).toBe(true);
+    expect(res.extractedCount).toBeGreaterThan(0);
+  });
 });
