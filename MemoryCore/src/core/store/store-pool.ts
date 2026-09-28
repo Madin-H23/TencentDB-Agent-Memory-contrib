@@ -252,6 +252,26 @@ export class StorePool {
       throw e instanceof Error ? e : new Error(String(e));
     }
 
+    // A resolved init() is not proof of a usable store: TcvdbMemoryStore.init()
+    // catches its _initAsync() failure, sets degraded=true and RESOLVES normally,
+    // and SQLite behaves the same way in degraded mode. Such an entry would be
+    // served forever by the cache-hit path, so "resolved but degraded" is treated
+    // exactly like a thrown init failure (#1433 follow-up review).
+    if (pooledStore.store.isDegraded()) {
+      this.logger.error(
+        `${TAG} Store init for ${instanceId} RESOLVED in a degraded state — discarding the entry so the next getStore() retries`,
+      );
+      this.pool.delete(instanceId);
+      try {
+        pooledStore.store.close();
+      } catch (closeErr) {
+        this.logger.warn(`${TAG} Closing the degraded store also failed: ${closeErr instanceof Error ? closeErr.message : String(closeErr)}`);
+      }
+      throw new Error(
+        `Store for ${instanceId} initialized in a degraded state (unusable): backend reported degraded=true after init()`,
+      );
+    }
+
     return pooledStore;
   }
 

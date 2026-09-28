@@ -47,6 +47,7 @@ describe("StorePool.getStore — failed init must not be cached (#1433)", () => 
           throw new Error("connection refused");
         }),
         close: vi.fn(),
+        isDegraded: () => false,
       };
       (pool as unknown as Record<string, unknown>).createSqliteStore = () => ({
         store,
@@ -70,6 +71,7 @@ describe("StorePool.getStore — failed init must not be cached (#1433)", () => 
           throw new Error("connection refused");
         }),
         close: vi.fn(),
+        isDegraded: () => false,
       };
       (pool as unknown as Record<string, unknown>).createSqliteStore = () => ({
         store,
@@ -78,6 +80,33 @@ describe("StorePool.getStore — failed init must not be cached (#1433)", () => 
 
       await expect(pool.getStore("inst-1")).rejects.toThrow("connection refused");
       await expect(pool.getStore("inst-1")).rejects.toThrow("connection refused");
+      expect(store.init).toHaveBeenCalledTimes(2);
+    } finally {
+      cleanupPool(pool);
+    }
+  });
+
+  it("discards an entry whose init RESOLVED into a degraded state, then retries (#1437 review)", async () => {
+    // TCVDB (and SQLite's degraded mode) catch _initAsync() failures internally,
+    // set degraded=true and RESOLVE normally — so a throw-only eviction misses the
+    // real backend contract and the unusable store stays cached forever.
+    const logger = makeLogger();
+    const pool = makePool(logger);
+    try {
+      const store = { init: vi.fn(), close: vi.fn(), isDegraded: vi.fn(() => true) };
+      (pool as unknown as Record<string, unknown>).createSqliteStore = () => ({
+        store,
+        embedding: new NoopEmbeddingService(),
+      });
+
+      await expect(pool.getStore("inst-1")).rejects.toThrow(/degraded/i);
+      expect(store.close, "the degraded store must be closed").toHaveBeenCalled();
+      expect((pool as unknown as { pool: Map<string, unknown> }).pool.size).toBe(0);
+
+      // next getStore must re-create/re-init rather than serve the degraded entry
+      store.isDegraded.mockReturnValue(false);
+      const ok = await pool.getStore("inst-1");
+      expect(ok.store).toBe(store);
       expect(store.init).toHaveBeenCalledTimes(2);
     } finally {
       cleanupPool(pool);
