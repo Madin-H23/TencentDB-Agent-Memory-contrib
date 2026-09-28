@@ -17,8 +17,9 @@
  * These tests pin: three-state precedence, `true` shorthand, per-dialect body
  * rewrites, and the non-chat-request passthrough.
  */
-import { describe, expect, it, vi } from "vitest";
-import { resolveDisableThinking } from "./llm-runner.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { resolveDisableThinking, StandaloneLLMRunner } from "./llm-runner.js";
+import { parseConfig } from "../../config.js";
 import {
   createNoThinkFetch,
   normalizeDisableThinking,
@@ -157,5 +158,101 @@ describe("非 chat 请求不动（embeddings 等）", () => {
       spy.mockRestore();
     }
     expect(seen).toBe("not-json");
+  });
+});
+
+/**
+ * Composition regression (review on #1406, kvnloo): the unit tests above pin the
+ * pieces, but the advertised contract — "explicit config wins, otherwise
+ * TDAI_DISABLE_THINKING=true falls back to vllm" — did not hold end to end:
+ *
+ *   1. parseConfig() normalized an absent value to `false`, so
+ *      resolveDisableThinking() saw an explicit value and never consulted env.
+ *   2. The runner built its no-think fetch in the constructor from the config
+ *      value, while the env-aware strategy was only resolved inside run() — the
+ *      two could disagree, and the fetch wrapper could be missing entirely.
+ *
+ * These go through the real parseConfig → resolveDisableThinking → run() chain.
+ */
+describe("组合回归：parseConfig → resolve → run() 注入（#1406 review）", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete process.env.TDAI_DISABLE_THINKING;
+  });
+
+  it("parseConfig 缺省键保持 undefined（不压成 false），env 回落可达", () => {
+    const cfg = parseConfig({ llm: {} } as Record<string, unknown>);
+    expect(cfg.llm.disableThinking).toBeUndefined();
+    expect(resolveDisableThinking(cfg.llm, "true")).toBe("vllm");
+  });
+
+  it("显式 false 仍是 false：运维可以压过 env=true", () => {
+    const cfg = parseConfig({ llm: { disableThinking: false } } as Record<string, unknown>);
+    expect(cfg.llm.disableThinking).toBe(false);
+    expect(resolveDisableThinking(cfg.llm, "true")).toBe(false);
+  });
+
+  it("显式 true 归一为 vllm（与 #228 一致）", () => {
+    const cfg = parseConfig({ llm: { disableThinking: true } } as Record<string, unknown>);
+    expect(cfg.llm.disableThinking).toBe("vllm");
+  });
+
+  it("env=true 且配置缺省时，run() 真正改写请求 body（fetch 与 resolved strategy 同源）", async () => {
+    process.env.TDAI_DISABLE_THINKING = "true";
+    const cfg = parseConfig({
+      llm: { baseUrl: "https://example.invalid/v1", apiKey: "test", model: "test-model" },
+    } as Record<string, unknown>);
+    const runner = new StandaloneLLMRunner({ config: cfg.llm });
+
+    let seen: Record<string, unknown> | undefined;
+    const spy = vi.spyOn(globalThis, "fetch").mockImplementation((async (_u: unknown, init?: RequestInit) => {
+      seen = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(
+        JSON.stringify({
+          id: "1",
+          object: "chat.completion",
+          choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as unknown as typeof fetch);
+    try {
+      await runner.run({ prompt: "hi", taskId: "compose-regression" });
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect((seen?.chat_template_kwargs as Record<string, unknown> | undefined)?.enable_thinking).toBe(false);
+  });
+
+  it("env 未设且配置缺省时不做任何注入（零改写）", async () => {
+    delete process.env.TDAI_DISABLE_THINKING;
+    const cfg = parseConfig({
+      llm: { baseUrl: "https://example.invalid/v1", apiKey: "test", model: "test-model" },
+    } as Record<string, unknown>);
+    const runner = new StandaloneLLMRunner({ config: cfg.llm });
+
+    let seen: Record<string, unknown> | undefined;
+    const spy = vi.spyOn(globalThis, "fetch").mockImplementation((async (_u: unknown, init?: RequestInit) => {
+      seen = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(
+        JSON.stringify({
+          id: "1",
+          object: "chat.completion",
+          choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as unknown as typeof fetch);
+    try {
+      await runner.run({ prompt: "hi", taskId: "compose-regression" });
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(seen?.chat_template_kwargs).toBeUndefined();
+    expect(seen?.enable_thinking).toBeUndefined();
   });
 });

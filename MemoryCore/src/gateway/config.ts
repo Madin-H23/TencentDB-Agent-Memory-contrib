@@ -604,9 +604,11 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
     })(),
     // 关思考开关(可选):仅透传 yaml 显式值;env TDAI_DISABLE_THINKING 的
     // 三态回落统一在 runner 侧判定,避免两处逻辑漂移。
-    disableThinking: normalizeDisableThinking(
-      llmConfig.disableThinking === true ? true : llmConfig.disableThinking === false ? false : (llmConfig.disableThinking as string | undefined),
-    ),
+    // 缺省保持 undefined,让 runner 的 env 回落真正可达(同 config.ts)。
+    disableThinking: (() => {
+      const raw = llmConfig.disableThinking === true ? true : llmConfig.disableThinking === false ? false : (llmConfig.disableThinking as string | undefined);
+      return raw === undefined ? undefined : normalizeDisableThinking(raw);
+    })(),
   };
 
   // Memory config (reuse the plugin's parseConfig for full compatibility)

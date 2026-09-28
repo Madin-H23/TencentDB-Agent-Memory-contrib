@@ -664,9 +664,12 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
         provider,
         stream: bool(llmGroup, "stream") ?? false,
         // 三态:undefined=未配置(回落 env 判定);显式 true/false 压过 env。
-        disableThinking: normalizeDisableThinking(
-          llmGroup.disableThinking === true ? true : llmGroup.disableThinking === false ? false : (llmGroup.disableThinking as string | undefined),
-        ),
+        // 缺省必须保持 undefined——normalizeDisableThinking(undefined) 会归一为
+        // false,而 resolveDisableThinking 只在「字段为 undefined」时才查 env。
+        disableThinking: (() => {
+          const raw = llmGroup.disableThinking === true ? true : llmGroup.disableThinking === false ? false : (llmGroup.disableThinking as string | undefined);
+          return raw === undefined ? undefined : normalizeDisableThinking(raw);
+        })(),
         proxy: {
           // 默认 true：走 proxy 时用 memory 系统用户 key 作为 Authorization。
           useMemorySystemUserKey: bool(proxyGroup, "useMemorySystemUserKey") ?? true,

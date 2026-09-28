@@ -296,7 +296,6 @@ export class StandaloneLLMRunner implements LLMRunner {
   private enableTools: boolean;
   private stream: boolean;
   private logger?: Logger;
-  private readonly customFetch?: typeof globalThis.fetch;
 
   /**
    * Side-channel: 最近一次 run() 调用的 token usage。
@@ -315,9 +314,6 @@ export class StandaloneLLMRunner implements LLMRunner {
     this.config = opts.config;
     this.model = opts.model ?? opts.config.model;
     this.enableTools = opts.enableTools ?? false;
-    this.customFetch = opts.config.disableThinking
-      ? createNoThinkFetch(opts.config.disableThinking)
-      : undefined;
     this.stream = opts.stream ?? opts.config.stream ?? false;
     this.logger = opts.logger;
   }
@@ -353,7 +349,7 @@ export class StandaloneLLMRunner implements LLMRunner {
       compatibility: "compatible",
       // 关思考开关(config 或 env 命中):在 fetch 层改写 JSON body。
       // 未命中时不传 fetch —— 行为与改动前逐字节一致。
-      ...(thinkingStrategy ? { fetch: this.customFetch } : {}),
+      ...(thinkingStrategy ? { fetch: createNoThinkFetch(thinkingStrategy) } : {}),
     });
 
     // Select tools based on mode + storage
