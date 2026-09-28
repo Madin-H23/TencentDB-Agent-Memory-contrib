@@ -119,21 +119,37 @@ export type ConversationAddRequest = z.infer<typeof conversationAddRequestSchema
 // Count endpoints (sdk-v3.yaml)
 // ============================
 
+/**
+ * 时间过滤参数校验（#1492 review）：此前接受任意字符串，垃圾输入（如
+ * "not-a-date" 或裸毫秒数字）在 handler 里变成 `new Date(x).getTime()` → NaN，
+ * 与每一行比较都为 false，接口静默返回空集而不报 400。
+ *
+ * 判据取「可被 Date 解析」而非严格 ISO datetime：既有调用方确实会传日期-only
+ * 串（"2026-09-01"），而 OpenAPI 生成物里的 z.iso.datetime() 会把它们全部拒掉
+ * ——收紧既有行为不在本 PR 范围。垃圾进 → 400 出；原有合法输入继续可用。
+ */
+const timeFilterString = z
+  .string()
+  .refine((s) => !Number.isNaN(Date.parse(s)), {
+    message: "must be a parseable date/time string (e.g. ISO 8601)",
+  })
+  .optional();
+
 export interface CountData {
   total: number;
 }
 
 export const conversationCountRequestSchema = z.object({
   session_id: z.string().min(1).optional(),
-  time_start: z.string().optional(),
-  time_end: z.string().optional(),
+  time_start: timeFilterString,
+  time_end: timeFilterString,
 });
 export type ConversationCountRequest = z.infer<typeof conversationCountRequestSchema>;
 
 export const atomicCountRequestSchema = z.object({
   type: z.string().optional(),
-  time_start: z.string().optional(),
-  time_end: z.string().optional(),
+  time_start: timeFilterString,
+  time_end: timeFilterString,
 });
 export type AtomicCountRequest = z.infer<typeof atomicCountRequestSchema>;
 
@@ -163,8 +179,8 @@ export interface ConversationSessionItem {
 
 export const conversationSessionsRequestSchema = z.object({
   session_id: z.string().min(1).optional(),
-  time_start: z.string().optional(),
-  time_end: z.string().optional(),
+  time_start: timeFilterString,
+  time_end: timeFilterString,
   limit: z.number().int().min(1).max(200).default(50),
 });
 export type ConversationSessionsRequest = z.infer<typeof conversationSessionsRequestSchema>;
