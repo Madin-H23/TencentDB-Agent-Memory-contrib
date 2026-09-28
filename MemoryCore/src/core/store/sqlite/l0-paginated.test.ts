@@ -96,4 +96,61 @@ describe("queryL0Paginated（分页/过滤/排序语义 + 驱动索引）", () =
       .get("idx_l0_user_agent_ts");
     expect(idx).toBeTruthy();
   });
+
+  it("机制级断言：分页计划真的走 idx_l0_user_agent_ts，且不再重建排序（#1491 review）", () => {
+    // 索引“存在”不等于“被用”：EXPLAIN QUERY PLAN 才能证明机制。
+    // queryL0Paginated 的分页 SQL 形状（user/agent 等值过滤 + ORDER BY
+    // timestamp DESC + LIMIT/OFFSET）正是该索引 (user_id, agent_id, timestamp
+    // DESC) 能直接满足的形状——planner 应选它，且因为索引自带顺序而不必
+    // 重建 TEMP B-TREE。
+    for (let i = 0; i < 300; i++) {
+      store.upsertL0(
+        rec(`p${i}`, "sess-P", 1_700_000_000_000 + i, { userId: "default", agentId: "default" }),
+        undefined,
+      );
+    }
+    const db = (
+      store as unknown as {
+        db: { prepare: (s: string) => { all: (...a: unknown[]) => Array<{ detail: string }> } };
+      }
+    ).db;
+
+    const plan = db
+      .prepare(
+        `EXPLAIN QUERY PLAN SELECT record_id FROM l0_conversations WHERE user_id = ? AND agent_id = ? ORDER BY timestamp DESC LIMIT ? OFFSET ?`,
+      )
+      .all("default", "default", 50, 0)
+      .map((r) => r.detail)
+      .join(" | ");
+
+    expect(plan, `分页计划未使用驱动索引：${plan}`).toContain("idx_l0_user_agent_ts");
+    expect(plan, `分页计划仍在重建排序：${plan}`).not.toContain("TEMP B-TREE");
+  });
+
+  it("反向对照：不匹配索引形状的查询不会命中该索引（断言非恒真）", () => {
+    // session 过滤是 (session_key=? OR session_id=?) 的 OR 形状，索引前两列
+    // （user_id, agent_id）对不上——planner 不应选该索引。锁住这一点，上一条
+    // 断言才真的在验证机制而不是碰巧恒真。
+    for (let i = 0; i < 300; i++) {
+      store.upsertL0(
+        rec(`q${i}`, "sess-Q", 1_700_000_000_000 + i, { userId: "default", agentId: "default" }),
+        undefined,
+      );
+    }
+    const db = (
+      store as unknown as {
+        db: { prepare: (s: string) => { all: (...a: unknown[]) => Array<{ detail: string }> } };
+      }
+    ).db;
+
+    const plan = db
+      .prepare(
+        `EXPLAIN QUERY PLAN SELECT record_id FROM l0_conversations WHERE (session_key = ? OR session_id = ?) ORDER BY timestamp DESC LIMIT ?`,
+      )
+      .all("sess-Q", "sess-Q", 50)
+      .map((r) => r.detail)
+      .join(" | ");
+
+    expect(plan, `OR 形状查询不该声称走了该索引：${plan}`).not.toContain("idx_l0_user_agent_ts");
+  });
 });
