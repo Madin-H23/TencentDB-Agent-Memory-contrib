@@ -118,6 +118,15 @@ export async function batchDedup(params: {
     // === Tier 1: Vector recall mode ===
     logger?.debug?.(`${TAG} Using vector recall mode (topK=${topK})`);
     matches = await findCandidatesByVector(memories, vectorStore!, embeddingService, topK, logger, params.embeddingTimeoutMs, filter);
+    // Tier 1 候选全空时降级 Tier 2 FTS 重召一次。countL1() 统计的是 l1_records
+    // 而非 l1_vec：embedding.provider=none 的部署向量表恒为空，向量召回必返回
+    // 0 候选，若就此判「无相似记录」会把 FTS 路径整个短路（生产实证：vector
+    // recall 446 次 / FTS recall 0 次，update/merge/skip 恒为 0，去重失效六周）。
+    // 向量表有数据的部署中 Tier 1 空即真无相似，此处多查一次 FTS 属无害兜底。
+    if (!matches.some((m) => m.candidates.length > 0) && hasFts) {
+      logger?.debug?.(`${TAG} Vector recall returned no candidates, falling back to FTS keyword recall`);
+      matches = await findCandidatesByFts(memories, vectorStore!, logger, filter);
+    }
   } else if (hasFts) {
     // === Tier 2: FTS keyword recall ===
     logger?.debug?.(`${TAG} Using FTS keyword recall mode (no embedding service or no vector data)`);
@@ -137,7 +146,7 @@ export async function batchDedup(params: {
   }
 
   // Phase 2: Batch LLM judgment
-  return runLlmJudgment(matches, memories, config, logger, model, promptMode, llmRunner, traceContext);
+  return runLlmJudgment(matches, memories, config, logger, model, promptMode, llmRunner, traceContext, timeoutMs);
 }
 
 /**
@@ -152,7 +161,13 @@ async function runLlmJudgment(
   promptMode: MemoryPromptMode,
   llmRunner?: LLMRunner,
   traceContext?: TraceContext,
+  /** LLM 调用超时（毫秒）。由 batchDedup 传入（缺省 180_000）。
+   *  2026-09-29 修复：此前该值未透传，函数体内引用未定义变量，凡走到
+   *  LLM 判定的调用全部 ReferenceError → fallback storeAll——去重判定
+   *  形同虚设。旧短路 bug 使这条路径六周未被执行，修复降级后才暴露。 */
+  timeoutMs?: number,
 ): Promise<DedupDecision[]> {
+  const llmTimeoutMs = timeoutMs ?? 180_000;
   logger?.debug?.(`${TAG} Running batch conflict detection for ${memories.length} memories (promptMode=${promptMode})`);
 
   try {
@@ -170,7 +185,7 @@ async function runLlmJudgment(
         prompt: userPrompt,
         systemPrompt,
         taskId: "l1-conflict-detection",
-        timeoutMs,
+        timeoutMs: llmTimeoutMs,
         ...traceParams,
       });
     } else {
@@ -186,7 +201,7 @@ async function runLlmJudgment(
         prompt: userPrompt,
         systemPrompt,
         taskId: "l1-conflict-detection",
-        timeoutMs,
+        timeoutMs: llmTimeoutMs,
         ...traceParams,
       });
     }
