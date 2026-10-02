@@ -539,7 +539,9 @@ class MemoryTencentdbProvider(MemoryProvider):
         self._session_id = session_id
         self._user_id = kwargs.get("user_id", _DEFAULT_USER_ID)
         self._team_id = kwargs.get("team_id", _DEFAULT_TEAM_ID)
-        self._agent_id = kwargs.get("agent_id", _DEFAULT_AGENT_ID)
+        # agent_identity is the alternate spelling callers send in the wild (#1545);
+        # an explicit-but-empty agent_id also falls back instead of passing through.
+        self._agent_id = kwargs.get("agent_id") or kwargs.get("agent_identity") or _DEFAULT_AGENT_ID;
 
         host = _resolve_gateway_host()
         port = _resolve_gateway_port()
