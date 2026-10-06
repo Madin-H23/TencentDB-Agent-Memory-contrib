@@ -17,6 +17,7 @@
 import type { IStateBackend, TaskPayload } from "../core/state/types.js";
 import { serializeTraceContext } from "../core/report/trace-propagation.js";
 import { obsLogger } from "../core/report/obs-logger.js";
+import { computeWorkerRetryDelayMs, isRateLimitError } from "../utils/rate-limit-backoff.js";
 
 // ============================
 // Types
@@ -67,6 +68,8 @@ export interface PipelineWorkerConfig {
   maxRetries?: number;
   /** 重试基础延迟 ms (default: 5000, 指数退避) */
   retryBaseDelayMs?: number;
+  /** 限流(429/速率限制)错误的长退避基数 ms (default: 120000, 线性递增 2/4/6min) */
+  rateLimitRetryDelayMs?: number;
   /** Pending 消息回收间隔 ms (default: 30000) */
   pendingRecoveryIntervalMs?: number;
   /** Pending 消息超时判定 ms (default: 300000 = 5min, 必须 > lockTtlMs) */
@@ -170,6 +173,7 @@ export class PipelineWorker {
       lockRenewIntervalMs: config?.lockRenewIntervalMs ?? 30000,
       maxRetries: config?.maxRetries ?? 3,
       retryBaseDelayMs: config?.retryBaseDelayMs ?? 5000,
+      rateLimitRetryDelayMs: config?.rateLimitRetryDelayMs ?? 120000,
       pendingRecoveryIntervalMs: config?.pendingRecoveryIntervalMs ?? 30000,
       pendingStaleMs: config?.pendingStaleMs ?? 300000,
       onDeadLetter: config?.onDeadLetter,
@@ -302,8 +306,12 @@ export class PipelineWorker {
         this.metrics.tasksFailed++;
 
         if (retryCount < this.config.maxRetries) {
-          const delay = this.config.retryBaseDelayMs * Math.pow(3, retryCount);
-          this.logger.warn(`${TAG} Task failed (lock-free, retry ${retryCount + 1}/${this.config.maxRetries}, delay=${delay}ms): ${errMsg}`);
+          const delay = computeWorkerRetryDelayMs(retryCount, errMsg, {
+            baseMs: this.config.retryBaseDelayMs,
+            rateLimitBaseMs: this.config.rateLimitRetryDelayMs,
+          });
+          const rlHint = isRateLimitError(errMsg) ? " [rate-limit backoff]" : "";
+          this.logger.warn(`${TAG} Task failed (lock-free, retry ${retryCount + 1}/${this.config.maxRetries}, delay=${delay}ms${rlHint}): ${errMsg}`);
           const msgId = (task as any)._msgId;
           if (msgId) { try { await this.backend.ackTask(msgId); } catch { /* best effort */ } }
           await this.sleep(delay);
@@ -466,11 +474,15 @@ export class PipelineWorker {
 
       this.metrics.tasksFailed++;
 
-      // 指数退避重试
+      // 指数退避重试（限流错误走更长的线性退避，见 computeWorkerRetryDelayMs）
       if (retryCount < this.config.maxRetries) {
-        const delay = this.config.retryBaseDelayMs * Math.pow(3, retryCount); // 5s, 15s, 45s
+        const delay = computeWorkerRetryDelayMs(retryCount, errMsg, {
+          baseMs: this.config.retryBaseDelayMs,
+          rateLimitBaseMs: this.config.rateLimitRetryDelayMs,
+        });
+        const rlHint = isRateLimitError(errMsg) ? " [rate-limit backoff]" : "";
         this.logger.warn(
-          `${TAG} Task failed (retry ${retryCount + 1}/${this.config.maxRetries}, delay=${delay}ms): ${errMsg}`,
+          `${TAG} Task failed (retry ${retryCount + 1}/${this.config.maxRetries}, delay=${delay}ms${rlHint}): ${errMsg}`,
         );
         // CR-1 fix: ACK the original message before re-enqueue. Otherwise the original
         // msgId stays in XPENDING and gets re-claimed by stale recovery in parallel
