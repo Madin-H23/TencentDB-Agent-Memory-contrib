@@ -29,11 +29,18 @@ import type {
   Logger,
 } from "../../core/types.js";
 import type { LLMUsage } from "../../core/report/metric-tracking-runner.js";
+import { computeRateLimitDelayMs, isRateLimitError, abortableSleep } from "../../utils/rate-limit-backoff.js";
 
 const TAG = "[memory-tdai] [standalone-runner]";
 
 // Max iterations in the tool-call loop to prevent infinite loops
 const MAX_TOOL_ITERATIONS = 20;
+
+// 限流退避的最大额外尝试次数（总尝试 = 1 + MAX，间隔 20s/40s/80s/160s 指数递增）。
+// 背景：智谱免费档在自动化蒸馏负载下持续 429/账户级限流，AI SDK 内置 3 连发 (~8s)
+// 全部撞死；改为长退避后，单次 run() 内部即可穿越短时限流窗口，
+// 长时限流则由 pipeline-worker 的 rateLimitRetryDelayMs（2/4/6min）兜底。
+const RATE_LIMIT_MAX_RETRIES = 3;
 
 // ============================
 // experimental_telemetry.metadata 组装
@@ -265,6 +272,35 @@ export class StandaloneLLMRunner implements LLMRunner {
    */
   lastUsage?: LLMUsage;
 
+  /**
+   * 限流感知的 generateText 包装：
+   * - AI SDK 以 maxRetries:0 调用（内置 3 连发 ~8s 对限流无意义，已在外层关闭）
+   * - 命中限流错误（429/速率限制/访问量过大）→ 20s/40s/80s/160s 指数退避后重试
+   * - 非限流错误立即抛出（配置/网络类错误由 worker 层的退避重试处理）
+   * - 退避期间 abort（worker 锁丢失/任务取消）立即中止，不吞信号
+   */
+  private async callGenerateTextWithRateLimitRetry(
+    generate: () => Promise<unknown>,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await generate();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (attempt < RATE_LIMIT_MAX_RETRIES && isRateLimitError(msg)) {
+          const delay = computeRateLimitDelayMs(attempt);
+          this.logger?.warn?.(
+            `${TAG} rate-limited (attempt ${attempt + 1}/${RATE_LIMIT_MAX_RETRIES + 1}), backing off ${delay}ms: ${msg.slice(0, 120)}`,
+          );
+          await abortableSleep(delay, signal);
+          continue;
+        }
+        throw err;
+      }
+    }
+  }
+
   constructor(opts: {
     config: StandaloneLLMConfig;
     model?: string;
@@ -353,31 +389,34 @@ export class StandaloneLLMRunner implements LLMRunner {
     }
 
     try {
-      // H-11 Step 2: combine internal timeout with caller-provided abortSignal
-      // (e.g. pipeline-worker lost its lock and wants the LLM call to bail out).
+      // H-11 Step 2: timeout 每次尝试独立起算（限流重试时重置，不吞掉总预算）。
       // AbortSignal.any (Node 20+) aborts when ANY of the listed signals abort.
-      const timeoutSignal = AbortSignal.timeout(timeoutMs);
-      const combinedSignal = params.abortSignal
-        ? AbortSignal.any([timeoutSignal, params.abortSignal])
-        : timeoutSignal;
-
-      const result = await generateText({
-        model: provider.chat(this.model),
-        system: params.systemPrompt,
-        prompt: params.prompt,
-        // Only attach tools when actually enabled — passing an empty object
-        // (or even a tools-only-with-`read`) makes some OpenAI-compatible
-        // backends emit spurious tool calls on pure-text tasks.
-        ...(tools && Object.keys(tools).length > 0
-          ? { tools, stopWhen: stepCountIs(maxIterations) }
-          : {}),
-        maxOutputTokens: maxTokens,
-        abortSignal: combinedSignal,
-        experimental_telemetry: {
-          isEnabled: true,
-          functionId: params.taskId,
-          metadata: buildTelemetryMetadata(params),
-        },
+      // maxRetries:0 = 关闭 AI SDK 内置快速重试（默认 3 连发 ~8s，对限流毫无意义），
+      // 改由 callGenerateTextWithRateLimitRetry 做限流感知的长退避（20s/40s/80s）。
+      const result = await this.callGenerateTextWithRateLimitRetry(() => {
+        const timeoutSignal = AbortSignal.timeout(timeoutMs);
+        const combinedSignal = params.abortSignal
+          ? AbortSignal.any([timeoutSignal, params.abortSignal])
+          : timeoutSignal;
+        return generateText({
+          model: provider.chat(this.model),
+          system: params.systemPrompt,
+          prompt: params.prompt,
+          // Only attach tools when actually enabled — passing an empty object
+          // (or even a tools-only-with-`read`) makes some OpenAI-compatible
+          // backends emit spurious tool calls on pure-text tasks.
+          ...(tools && Object.keys(tools).length > 0
+            ? { tools, stopWhen: stepCountIs(maxIterations) }
+            : {}),
+          maxOutputTokens: maxTokens,
+          abortSignal: combinedSignal,
+          maxRetries: 0,
+          experimental_telemetry: {
+            isEnabled: true,
+            functionId: params.taskId,
+            metadata: buildTelemetryMetadata(params),
+          },
+        });
       });
 
       const text = (result.text ?? "").trim();
