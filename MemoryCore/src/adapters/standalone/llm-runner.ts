@@ -29,18 +29,21 @@ import type {
   Logger,
 } from "../../core/types.js";
 import type { LLMUsage } from "../../core/report/metric-tracking-runner.js";
-import { computeRateLimitDelayMs, isRateLimitError, abortableSleep } from "../../utils/rate-limit-backoff.js";
+import { runWithRateLimitRetry } from "../../utils/rate-limit-backoff.js";
 
 const TAG = "[memory-tdai] [standalone-runner]";
 
 // Max iterations in the tool-call loop to prevent infinite loops
 const MAX_TOOL_ITERATIONS = 20;
 
-// 限流退避的最大额外尝试次数（总尝试 = 1 + MAX，间隔 20s/40s/80s/160s 指数递增）。
-// 背景：智谱免费档在自动化蒸馏负载下持续 429/账户级限流，AI SDK 内置 3 连发 (~8s)
-// 全部撞死；改为长退避后，单次 run() 内部即可穿越短时限流窗口，
-// 长时限流则由 pipeline-worker 的 rateLimitRetryDelayMs（2/4/6min）兜底。
-const RATE_LIMIT_MAX_RETRIES = 3;
+// 限流重试策略（2026-10-09 教训修订）：仅 1 次快速重试（20s），整调用硬期限 180s。
+// 此前 4 次重试（最长 160s 等待）在**持会话锁**状态下执行，上游挂起时任务锁被占
+// 4.5 小时、后续任务全部被 worker 以锁冲突丢弃（管线停摆）。现在：runner 层快速
+// 失败 → l1-deferred（游标不动，数据零丢失）→ worker 层以 2/4/6min 退避重试——
+// 尝试之间锁是释放的，不会堵其他任务。
+const RATE_LIMIT_MAX_RETRIES = 1;
+const RATE_LIMIT_BASE_MS = 20_000;
+const RATE_LIMIT_DEADLINE_MS = 180_000;
 
 // ============================
 // experimental_telemetry.metadata 组装
@@ -273,32 +276,21 @@ export class StandaloneLLMRunner implements LLMRunner {
   lastUsage?: LLMUsage;
 
   /**
-   * 限流感知的 generateText 包装：
-   * - AI SDK 以 maxRetries:0 调用（内置 3 连发 ~8s 对限流无意义，已在外层关闭）
-   * - 命中限流错误（429/速率限制/访问量过大）→ 20s/40s/80s/160s 指数退避后重试
-   * - 非限流错误立即抛出（配置/网络类错误由 worker 层的退避重试处理）
-   * - 退避期间 abort（worker 锁丢失/任务取消）立即中止，不吞信号
+   * 限流感知的执行包装（实现委托 utils/rate-limit-backoff.runWithRateLimitRetry）：
+   * - AI SDK 以 maxRetries:0 调用（内置 3 连发 ~8s 对限流无意义）
+   * - 限流错误 → 1 次 20s 退避后重试；非限流错误立即抛出
+   * - 整调用 180s 硬期限：上游挂起（连接不响应且 abort 未生效）时必然返回，
+   *   不会重现 2026-10-09 的持锁 4.5h 停摆
    */
   private async callGenerateTextWithRateLimitRetry(
     generate: () => Promise<unknown>,
     signal?: AbortSignal,
   ): Promise<unknown> {
-    for (let attempt = 0; ; attempt++) {
-      try {
-        return await generate();
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        if (attempt < RATE_LIMIT_MAX_RETRIES && isRateLimitError(msg)) {
-          const delay = computeRateLimitDelayMs(attempt);
-          this.logger?.warn?.(
-            `${TAG} rate-limited (attempt ${attempt + 1}/${RATE_LIMIT_MAX_RETRIES + 1}), backing off ${delay}ms: ${msg.slice(0, 120)}`,
-          );
-          await abortableSleep(delay, signal);
-          continue;
-        }
-        throw err;
-      }
-    }
+    return runWithRateLimitRetry(generate, {
+      maxRetries: RATE_LIMIT_MAX_RETRIES,
+      baseMs: RATE_LIMIT_BASE_MS,
+      deadlineMs: RATE_LIMIT_DEADLINE_MS,
+    }, signal);
   }
 
   constructor(opts: {
