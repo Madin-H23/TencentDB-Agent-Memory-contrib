@@ -49,6 +49,15 @@ export interface RunnerSessionState {
   last_l1_cursor: number;
   /** Last scene name from the most recent L1 extraction (for cross-batch continuity) */
   last_scene_name: string;
+  /**
+   * Per-sessionId last scene name (multi-thread continuity, 2026-10-09).
+   * 同一 sessionKey 并发多个 ZCode 会话时，单键 last_scene_name 会被最后蒸馏的
+   * 线程占据、【上一个情境】hint 跨线程互串；各线程的连续性改读本映射，缺 sid
+   * 时回退 last_scene_name（旧 checkpoint 无此字段=兼容）。**注意：per-sid 隔离
+   * 只允许加字段，绝不允许改 runner_states 的键格式**——tdai-core / 面板 / acceptance
+   * 三处按 runner_states[sessionKey].last_l1_cursor 读游标。
+   */
+  last_scene_names?: Record<string, string>;
 }
 
 /**
@@ -428,12 +437,16 @@ export class CheckpointManager {
    *
    * @param cursorRecordedAtMs - The max recorded_at epoch ms of processed L0 messages.
    *   This becomes the new `last_l1_cursor` value (recorded_at semantics, not conversation timestamp).
+   * @param lastSceneName - 兼容单键（最后蒸馏组的场景），旧读者仍可读。
+   * @param lastSceneNames - per-sessionId 场景映射（多线程各自延续自己的连续性）；
+   *   与既有条目合并而非覆盖。写入时新建对象，防 defaults 浅展开共享引用。
    */
   async markL1ExtractionComplete(
     sessionKey: string,
     memoriesExtracted: number,
     cursorRecordedAtMs?: number,
     lastSceneName?: string,
+    lastSceneNames?: Record<string, string>,
   ): Promise<void> {
     await this.mutate((cp) => {
       const state = this.getRunnerState(cp, sessionKey);
@@ -443,13 +456,17 @@ export class CheckpointManager {
       if (lastSceneName !== undefined) {
         state.last_scene_name = lastSceneName;
       }
+      if (lastSceneNames && Object.keys(lastSceneNames).length > 0) {
+        state.last_scene_names = { ...(state.last_scene_names ?? {}), ...lastSceneNames };
+      }
       cp.total_memories_extracted += memoriesExtracted;
       cp.memories_since_last_persona += memoriesExtracted;
     });
     this.logger.info(
       `[checkpoint] markL1ExtractionComplete session=${sessionKey}: ` +
       `extracted=${memoriesExtracted}, cursor=${cursorRecordedAtMs ?? "(unchanged)"}, ` +
-      `lastScene="${lastSceneName ?? "(unchanged)"}"`,
+      `lastScene="${lastSceneName ?? "(unchanged)"}"` +
+      `${lastSceneNames ? `, perSid={${Object.keys(lastSceneNames).join(",")}}` : ""}`,
     );
   }
 
