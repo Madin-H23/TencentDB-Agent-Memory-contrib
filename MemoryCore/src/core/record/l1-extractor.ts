@@ -491,7 +491,11 @@ export async function extractL1Memories(params: {
         embeddingTimeoutMs: options.embeddingTimeoutMs,
         llmRunner: options.llmRunner,
         traceContext: { teamId, userId, agentId, sessionId },
-        ...(teamId || userId || agentId || sessionId || taskId ? { filter: { teamId, userId, agentId, sessionId, taskId } } : {}),
+        // sessionId 不进 filter（2026-10-09 多线程治理）：hook 转发真实 sid 后，
+        // 各线程只在「自己的桶」查重会让两线程产出的同一事实双入库。跨线程去重
+        // 语义以 team/user/agent/task 为界，与改造前（全行同落 default 桶、无
+        // filter=全库查重）精确一致。
+        ...(teamId || userId || agentId || taskId ? { filter: { teamId, userId, agentId, taskId } } : {}),
       });
       dedupLatencyMs = Date.now() - dedupStartMs;
 
