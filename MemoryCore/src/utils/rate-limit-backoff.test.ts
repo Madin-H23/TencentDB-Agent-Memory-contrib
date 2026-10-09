@@ -3,6 +3,7 @@ import {
   isRateLimitError,
   computeRateLimitDelayMs,
   computeWorkerRetryDelayMs,
+  runWithRateLimitRetry,
 } from "./rate-limit-backoff.js";
 
 describe("isRateLimitError", () => {
@@ -65,4 +66,56 @@ describe("computeWorkerRetryDelayMs", () => {
     expect(computeWorkerRetryDelayMs(0, "ECONNRESET")).toBe(5_000);
     expect(computeWorkerRetryDelayMs(2, "ECONNRESET")).toBe(45_000);
   });
+});
+
+describe("runWithRateLimitRetry", () => {
+  it("限流一次后重试成功", async () => {
+    let calls = 0;
+    const result = await runWithRateLimitRetry(
+      () => { calls++; return calls === 1 ? Promise.reject(new Error("429 too many requests")) : Promise.resolve("ok"); },
+      { maxRetries: 1, baseMs: 1, deadlineMs: 5_000 },
+    );
+    expect(result).toBe("ok");
+    expect(calls).toBe(2);
+  });
+
+  it("非限流错误立即抛出不重试", async () => {
+    let calls = 0;
+    await expect(
+      runWithRateLimitRetry(
+        () => { calls++; return Promise.reject(new Error("ECONNRESET")); },
+        { maxRetries: 1, baseMs: 1, deadlineMs: 5_000 },
+      ),
+    ).rejects.toThrow("ECONNRESET");
+    expect(calls).toBe(1);
+  });
+
+  it("重试次数耗尽抛最后限流错误", async () => {
+    let calls = 0;
+    await expect(
+      runWithRateLimitRetry(
+        () => { calls++; return Promise.reject(new Error("该模型当前访问量过大")); },
+        { maxRetries: 1, baseMs: 1, deadlineMs: 5_000 },
+      ),
+    ).rejects.toThrow("访问量过大");
+    expect(calls).toBe(2);
+  });
+
+  it("generate 永久挂起时硬期限必然返回（事故 10-09 的回归测试）", async () => {
+    const hung = () => new Promise(() => { /* never settles, ignores signal */ });
+    await expect(
+      runWithRateLimitRetry(hung, { maxRetries: 1, baseMs: 1, deadlineMs: 60 }),
+    ).rejects.toThrow(/deadline/i);
+  }, 5_000);
+
+  it("限流退避中 abort 立即中止", async () => {
+    const ac = new AbortController();
+    const p = runWithRateLimitRetry(
+      () => Promise.reject(new Error("速率限制")),
+      { maxRetries: 3, baseMs: 60_000, deadlineMs: 600_000 },
+      ac.signal,
+    );
+    setTimeout(() => ac.abort(), 30);
+    await expect(p).rejects.toThrow(/abort/i);
+  }, 5_000);
 });
