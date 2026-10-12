@@ -227,7 +227,7 @@ export async function extractL1Memories(params: {
     // 空产出轮必须留 INFO 锚点：面板「最近蒸馏」按本格式定位轮次，只打 debug
     // 会让该轮在面板完全隐形（2026-09-20 实测：用户看到 L0 有记录、未蒸馏无积压、
     // 最近蒸馏无该轮，误以为数据丢失）。
-    logger?.info?.(`${TAG} Extraction complete: extracted=0, stored=0 (all ${messages.length} message(s) filtered by L1 quality gate)`);
+    logger?.info?.(`${TAG} Extraction complete: extracted=0, stored=0, session=${sessionKey}, sid=${sessionId ?? "default"} (all ${messages.length} message(s) filtered by L1 quality gate)`);
     logger?.debug?.(`${TAG} All messages filtered out by L1 quality gate`);
     return { success: true, extractedCount: 0, storedCount: 0, records: [], sceneNames: [] };
   }
@@ -434,7 +434,7 @@ export async function extractL1Memories(params: {
     // 同上的轮次锚点：模型正常回答但确无可记（合法空产出）——此前该分支直接
     // return，跳过下方的 "Extraction complete" 日志，面板「最近蒸馏」因此看不到
     // 任何一个空产出轮（实测历史 156 次）。
-    logger?.info?.(`${TAG} Extraction complete: extracted=0, stored=0 (no memories returned: ${messages.length} message(s) → ${scenes.length} scene segment(s))`);
+    logger?.info?.(`${TAG} Extraction complete: extracted=0, stored=0, session=${sessionKey}, sid=${sessionId ?? "default"} (no memories returned: ${messages.length} message(s) → ${scenes.length} scene segment(s))`);
     // ── 评测指标：L1 提取率（提取为空的情况） ──
     if (metricInstanceId) {
       try {
@@ -541,7 +541,7 @@ export async function extractL1Memories(params: {
     storedRecords = await storeAllDirectly(memoriesWithIds, baseDir, sessionKey, sessionId, taskId, teamId, userId, agentId, logger, options.vectorStore, options.embeddingService, storage);
   }
 
-  logger?.info(`${TAG} Extraction complete: extracted=${extracted.length}, stored=${storedRecords.length}`);
+  logger?.info(`${TAG} Extraction complete: extracted=${extracted.length}, stored=${storedRecords.length}, session=${sessionKey}, sid=${sessionId ?? "default"}`);
 
   // ── l1_extraction metric ──
   if (metricInstanceId && logger) {
