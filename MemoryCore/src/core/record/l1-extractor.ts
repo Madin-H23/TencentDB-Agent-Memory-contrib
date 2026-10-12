@@ -90,9 +90,9 @@ export interface L1ExtractionResult {
  * (`success: true, extractedCount: 0`) so the cursor may advance.
  */
 export class L1ExtractionFailure extends Error {
-  readonly reason: "llm_error" | "parse_error";
+  readonly reason: "llm_error" | "parse_error" | "dedup_failed";
 
-  constructor(reason: "llm_error" | "parse_error", message: string) {
+  constructor(reason: "llm_error" | "parse_error" | "dedup_failed", message: string) {
     super(message);
     this.name = "L1ExtractionFailure";
     this.reason = reason;
@@ -159,6 +159,8 @@ export async function extractL1Memories(params: {
     timeoutMs?: number;
     /** L1 去重（冲突检测）超时（毫秒），缺省 180_000。 */
     dedupTimeoutMs?: number;
+    /** 查重失败 fail-closed（S1）：true=查重失败整批延后（上抛），不再免检 store */
+    dedupFailFast?: boolean;
     /**
      * 用户身份白名单：只有这些姓名允许出现在「用户（X）」的括号里。
      * 其余（第三方姓名/角色标签/路径数字/时间状语…）入库前一律归一为「用户」。
@@ -482,6 +484,7 @@ export async function extractL1Memories(params: {
         memories: memoriesWithIds,
         config,
         timeoutMs: options.dedupTimeoutMs,
+        dedupFailFast: options.dedupFailFast,
         logger,
         model: options.model,
         promptMode: options.promptMode,
@@ -534,8 +537,13 @@ export async function extractL1Memories(params: {
       });
 
     } catch (err) {
-      logger?.warn?.(`${TAG} Batch dedup failed, storing all as new: ${err instanceof Error ? err.message : String(err)}`);
-      storedRecords = await storeAllDirectly(memoriesWithIds, baseDir, sessionKey, sessionId, taskId, teamId, userId, agentId, logger, options.vectorStore, options.embeddingService, storage);
+      // fail-closed（S1）：查重失败≠免检入库——免检入库是 L1 重复内容的主要新增源
+      // （10-08 起 5 天 53 次）。整批延后：游标不动、数据不丢，dedup 恢复后重试时
+      // 已入库副本会进候选召回被 merge/skip。message 保留原文（限流文案须能被
+      // isRateLimitError 命中→worker 2/4/6min 退避）。
+      const msg = err instanceof Error ? err.message : String(err);
+      logger?.warn?.(`${TAG} l1-deferred reason=dedup_failed sessionKey=${sessionKey} — batch deferred, checkpoint cursor unchanged (${msg})`);
+      throw new L1ExtractionFailure("dedup_failed", `L1 dedup failed: ${msg}`);
     }
   } else {
     storedRecords = await storeAllDirectly(memoriesWithIds, baseDir, sessionKey, sessionId, taskId, teamId, userId, agentId, logger, options.vectorStore, options.embeddingService, storage);
