@@ -384,6 +384,11 @@ export function createL1Runner(opts: {
   const { pluginDataDir, cfg, openclawConfig, vectorStore, embeddingService, logger, getInstanceId, llmRunner, storage } = opts;
   const config = openclawConfig as Record<string, unknown> | undefined;
 
+  // 启动锚点（S1 二审要求）：开关/超时生效值一行可见——不用等 48h 自然失败来验证
+  logger.info?.(
+    `${TAG} [l1] dedupFailFast=${cfg.extraction.dedupFailFast ? "on" : "off"}, dedupTimeoutMs=${cfg.extraction.dedupTimeoutMs ?? 180000}ms`,
+  );
+
   return async ({ sessionKey }) => {
     if (!config && !llmRunner) {
       logger.debug?.(`${TAG} [l1] No OpenClaw config and no LLM runner, skipping L1 extraction`);
@@ -594,6 +599,7 @@ export function createL1Runner(opts: {
               samplesPerBatch: cfg.extraction.samplesPerBatch,
               timeoutMs: cfg.extraction.timeoutMs,
               dedupTimeoutMs: cfg.extraction.dedupTimeoutMs,
+              dedupFailFast: cfg.extraction.dedupFailFast,
               model: cfg.extraction.model,
               promptMode: cfg.extraction.promptMode,
               attributionGuard: cfg.extraction.attributionGuard,

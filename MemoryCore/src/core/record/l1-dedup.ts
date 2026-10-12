@@ -75,10 +75,13 @@ export async function batchDedup(params: {
   llmRunner?: LLMRunner;
   /** Isolation filter applied to candidate recall so dedup never crosses tenants. */
   filter?: IsolationFilter;
+  /** 查重失败 fail-closed（2026-10-12 S1）：true=LLM 判定失败整批上抛（延后重试，
+   *  游标不动、数据不丢）；false/缺省=既有降级「免检全 store」（重复入库风险）。 */
+  dedupFailFast?: boolean;
   /** langfuse 上报身份四元组（team/user/agent/session），透传给 llmRunner。 */
   traceContext?: TraceContext;
 }): Promise<DedupDecision[]> {
-  const { memories, config, logger, model, promptMode = "chat", vectorStore, embeddingService, llmRunner, filter, traceContext } = params;
+  const { memories, config, logger, model, promptMode = "chat", vectorStore, embeddingService, llmRunner, filter, traceContext, dedupFailFast } = params;
   // 保持与改动前一致：未显式配置时仍是 180_000。
   // 注意上限：Node 内置 fetch(undici) 的 headersTimeout 默认 300s，非流式补全只在生成完后发头，
   // 配到 600s 会被静默截到 ~300s（见 issue #1403 的第三方补充说明）。
@@ -146,7 +149,7 @@ export async function batchDedup(params: {
   }
 
   // Phase 2: Batch LLM judgment
-  return runLlmJudgment(matches, memories, config, logger, model, promptMode, llmRunner, traceContext, timeoutMs);
+  return runLlmJudgment(matches, memories, config, logger, model, promptMode, llmRunner, traceContext, timeoutMs, dedupFailFast);
 }
 
 /**
@@ -166,6 +169,8 @@ async function runLlmJudgment(
    *  LLM 判定的调用全部 ReferenceError → fallback storeAll——去重判定
    *  形同虚设。旧短路 bug 使这条路径六周未被执行，修复降级后才暴露。 */
   timeoutMs?: number,
+  /** fail-closed 开关（S1）：true=判定失败上抛给调用方走延后；false=既有降级全 store */
+  dedupFailFast?: boolean,
 ): Promise<DedupDecision[]> {
   const llmTimeoutMs = timeoutMs ?? 180_000;
   logger?.debug?.(`${TAG} Running batch conflict detection for ${memories.length} memories (promptMode=${promptMode})`);
@@ -209,8 +214,16 @@ async function runLlmJudgment(
     const decisions = parseBatchResult(result, memories, logger);
     return decisions;
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (dedupFailFast) {
+      // fail-closed（S1）：查重失败≠免检入库——整批上抛走延后重试（游标不动、
+      // 数据不丢）。注意：不得打 "defaulting all to store" 字样（那是面板
+      // kill-switch 指标，出现即代表 fail-closed 未生效）。
+      logger?.warn?.(`${TAG} Batch conflict detection failed (fail-fast, batch deferred): ${msg}`);
+      throw err instanceof Error ? err : new Error(msg);
+    }
     logger?.warn?.(
-      `${TAG} Batch conflict detection failed, defaulting all to store: ${err instanceof Error ? err.message : String(err)}`,
+      `${TAG} Batch conflict detection failed, defaulting all to store: ${msg}`,
     );
     return memories.map((m) => ({
       record_id: m.record_id,

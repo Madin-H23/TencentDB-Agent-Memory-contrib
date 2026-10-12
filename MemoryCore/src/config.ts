@@ -51,6 +51,8 @@ export interface ExtractionConfig {
   timeoutMs?: number;
   /** L1 去重（冲突检测）超时（毫秒，默认 180_000）。第三方实测失败率 31%，66/143 因超时。 */
   dedupTimeoutMs?: number;
+  /** 查重失败 fail-closed（S1）：true=查重失败整批延后重试；false=既有降级免检入库（默认） */
+  dedupFailFast?: boolean;
   /** LLM model for extraction, format: "provider/model" (falls back to OpenClaw default model when omitted) */
   model?: string;
   /** Prompt family for L1 extraction (default: chat). */
@@ -593,6 +595,7 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       samplesPerBatch: num(extractionGroup, "samplesPerBatch") ?? 1,
       timeoutMs: num(extractionGroup, "timeoutMs"),
       dedupTimeoutMs: num(extractionGroup, "dedupTimeoutMs"),
+      dedupFailFast: bool(extractionGroup, "dedupFailFast") ?? false,
       model: optStr(extractionGroup, "model"),
       promptMode: normalizePromptMode(str(extractionGroup, "promptMode"), globalPromptMode),
       // 用户身份白名单：只有这里的姓名才允许出现在「用户（X）」里（确定性护栏

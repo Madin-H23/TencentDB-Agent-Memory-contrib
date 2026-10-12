@@ -4,7 +4,7 @@
 // profileScopes 每组一键。走真实 JSONL 读取路径（vectorStore 缺省回退），
 // llmRunner 桩按消息标记返回不同场景并捕获 prompt 断言【上一个情境】。
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createL1Runner } from "./pipeline-factory.js";
@@ -143,6 +143,73 @@ describe("L1 runner：多 sid 分组的 continuity 隔离", () => {
         "sess-A": "场景甲",
         "sess-B": "场景乙",
       });
+    } finally {
+      rmSync(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  it("并行片一组 dedup 失败：整片延后（runner reject、游标不动、已入库副本保留）", async () => {
+    const baseDir = mkdtempSync(join(tmpdir(), "l1runner-e-"));
+    try {
+      // 各组：抽取成功，但 dedup 判定阶段（taskId=l1-conflict-detection）抛错。
+      // 注意 dedup 判定要真实执行必须有候选——vectorStore 桩提供 FTS 召回行
+      // （vectorStore: undefined 时 Phase 1 无候选直接 storeAll，判定不跑）。
+      let sawConflictTask = false;
+      const fake: LLMRunner = {
+        run: async (p: { prompt: string; taskId?: string }) => {
+          if (p.taskId === "l1-conflict-detection") {
+            sawConflictTask = true;
+            throw new Error("The operation was aborted due to timeout");
+          }
+          if (p.prompt.includes("标记甲内容")) {
+            return JSON.stringify([
+              { scene_name: "场景甲", message_ids: ["a1"], memories: [{ type: "episodic", content: "甲线事实", priority: 50 }] },
+            ]);
+          }
+          return JSON.stringify([
+            { scene_name: "场景乙", message_ids: ["b1"], memories: [{ type: "episodic", content: "乙线事实", priority: 50 }] },
+          ]);
+        },
+      } as unknown as LLMRunner;
+      const noopEmbedding = { embedBatch: async () => [[0.1, 0.2]] } as never;
+      const ftsRow = { record_id: "old-1", content: "旧记忆：标记甲内容相关历史", type: "episodic", priority: 50, scene_name: "s", metadata_json: "", timestamp_str: "2026-09-01T00:00:00Z", session_key: SESSION_KEY, session_id: "sess-old" };
+      const ftsStore = {
+        countL1: async () => 5,
+        isDegraded: () => false,
+        isFtsAvailable: () => true,
+        searchL1Vector: async () => [],
+        searchL1Fts: async () => [ftsRow],
+        // runner 读 L0 走 DB 路径（isDegraded=false）：直接返回两个 sid 组
+        queryL0GroupedBySessionId: async () => [
+          { sessionId: "sess-A", userId: "", agentId: "", messages: [{ id: "a1", role: "user", content: "标记甲内容：dedup 失败甲", timestamp: T0 + 111, recordedAtMs: T0 + 111 }] },
+          { sessionId: "sess-B", userId: "", agentId: "", messages: [{ id: "b1", role: "user", content: "标记乙内容：dedup 失败乙", timestamp: T0 + 333, recordedAtMs: T0 + 333 }] },
+        ],
+      } as never;
+      const runner = createL1Runner({
+        pluginDataDir: baseDir,
+        cfg: {
+          extraction: { enableDedup: true, dedupFailFast: true, samplesPerBatch: 1, maxMemoriesPerSession: 10 },
+          embedding: {},
+        } as never,
+        openclawConfig: undefined,
+        vectorStore: ftsStore,
+        embeddingService: noopEmbedding,
+        logger: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} } as unknown as Logger,
+        llmRunner: fake,
+      });
+      // 甲组 dedup 抛错 → 整片 reject（L1ExtractionFailure 从 extractor 传播）
+      let caught: unknown = null;
+      await runner({ sessionKey: SESSION_KEY }).catch((e) => { caught = e; });
+      expect(String(caught)).toContain("L1 dedup failed"); // 失败原因=dedup 链而非其他
+      // 游标未推进（延后语义：数据不丢，下轮整片重试）；整批失败时 checkpoint
+      // 可能从未落盘（无任何成功 mark）——缺文件本身就是「未处理」的证明
+      const cpPath = join(baseDir, ".metadata", "recall_checkpoint.json");
+      const cursor = existsSync(cpPath)
+        ? (JSON.parse(readFileSync(cpPath, "utf-8")) as { runner_states?: Record<string, { last_l1_cursor?: number }> }).runner_states?.[SESSION_KEY]?.last_l1_cursor ?? 0
+        : 0;
+      expect(cursor).toBeLessThan(T0 + 111);
+      expect(caught).toBeInstanceOf(Error);
+      expect(sawConflictTask).toBe(true);
     } finally {
       rmSync(baseDir, { recursive: true, force: true });
     }
