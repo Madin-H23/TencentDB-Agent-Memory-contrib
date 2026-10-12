@@ -568,45 +568,54 @@ export function createL1Runner(opts: {
       let lastSceneName: string | undefined;
       const profileScopes = new Set<string>();
 
-      for (const group of groups) {
-        logger.debug?.(
-          `${TAG} [l1] Group sessionId=${group.sessionId || "(empty)"}: ${group.messages.length} messages`,
-        );
+      // 组间并行（2026-10-10）：每组一次独立 LLM 调用，串行时切片耗时 = 各组之和
+      // （4 组 × 慢端点 1-2min ≈ 7.5min/片，积压排干被拉长数倍）。改并发后切片
+      // 耗时 ≈ 最慢单组。聚合在 Promise.all 之后按 groups 原序（= 时间序）归并，
+      // lastSceneName/lastSceneNames/游标语义与串行版逐字一致；任一组失败仍整批
+      // 抛出（#1395 语义：游标不动、延后重试，绝不静默丢数据）。
+      const results = await Promise.all(
+        groups.map(async (group) => {
+          logger.debug?.(
+            `${TAG} [l1] Group sessionId=${group.sessionId || "(empty)"}: ${group.messages.length} messages`,
+          );
+          const l1Result = await extractL1Memories({
+            messages: group.messages,
+            sessionKey,
+            sessionId: group.sessionId,
+            taskId: group.taskId,
+            teamId: group.teamId,
+            userId: group.userId,
+            agentId: group.agentId,
+            baseDir: pluginDataDir,
+            config,
+            options: {
+              enableDedup: cfg.extraction.enableDedup,
+              maxMemoriesPerSession: cfg.extraction.maxMemoriesPerSession,
+              samplesPerBatch: cfg.extraction.samplesPerBatch,
+              timeoutMs: cfg.extraction.timeoutMs,
+              dedupTimeoutMs: cfg.extraction.dedupTimeoutMs,
+              model: cfg.extraction.model,
+              promptMode: cfg.extraction.promptMode,
+              attributionGuard: cfg.extraction.attributionGuard,
+              correctionException: cfg.extraction.correctionException,
+              userIdentityNames: cfg.extraction.userIdentityNames,
+              previousSceneName:
+                runnerState.last_scene_names?.[group.sessionId] ?? (runnerState.last_scene_name || undefined),
+              vectorStore,
+              embeddingService,
+              conflictRecallTopK: cfg.embedding.conflictRecallTopK,
+              embeddingTimeoutMs: cfg.embedding.captureTimeoutMs ?? cfg.embedding.timeoutMs,
+              llmRunner,
+            },
+            logger,
+            instanceId: getInstanceId?.(),
+            storage,
+          });
+          return { group, l1Result };
+        }),
+      );
 
-        const l1Result = await extractL1Memories({
-          messages: group.messages,
-          sessionKey,
-          sessionId: group.sessionId,
-          taskId: group.taskId,
-          teamId: group.teamId,
-          userId: group.userId,
-          agentId: group.agentId,
-          baseDir: pluginDataDir,
-          config,
-          options: {
-            enableDedup: cfg.extraction.enableDedup,
-            maxMemoriesPerSession: cfg.extraction.maxMemoriesPerSession,
-            samplesPerBatch: cfg.extraction.samplesPerBatch,
-            timeoutMs: cfg.extraction.timeoutMs,
-            dedupTimeoutMs: cfg.extraction.dedupTimeoutMs,
-            model: cfg.extraction.model,
-            promptMode: cfg.extraction.promptMode,
-            attributionGuard: cfg.extraction.attributionGuard,
-            correctionException: cfg.extraction.correctionException,
-            userIdentityNames: cfg.extraction.userIdentityNames,
-            previousSceneName:
-              runnerState.last_scene_names?.[group.sessionId] ?? (runnerState.last_scene_name || undefined),
-            vectorStore,
-            embeddingService,
-            conflictRecallTopK: cfg.embedding.conflictRecallTopK,
-            embeddingTimeoutMs: cfg.embedding.captureTimeoutMs ?? cfg.embedding.timeoutMs,
-            llmRunner,
-          },
-          logger,
-          instanceId: getInstanceId?.(),
-          storage,
-        });
-
+      for (const { group, l1Result } of results) {
         totalExtracted += l1Result.extractedCount;
         totalStored += l1Result.storedCount;
         if (l1Result.storedCount > 0) {

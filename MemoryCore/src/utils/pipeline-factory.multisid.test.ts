@@ -147,4 +147,48 @@ describe("L1 runner：多 sid 分组的 continuity 隔离", () => {
       rmSync(baseDir, { recursive: true, force: true });
     }
   });
+
+  it("组间并行：两组的抽取调用必须同时在途（屏障桩；串行实现屏障超时即红）", async () => {
+    const baseDir = mkdtempSync(join(tmpdir(), "l1runner-d-"));
+    try {
+      let inFlight = 0;
+      let peak = 0;
+      // 门闩式屏障（边沿触发）：第二个调用到达时开门，双方等同一扇门——
+      // 电平轮询版有「先到者错过后来者已离开」的竞态
+      let openGate: () => void = () => {};
+      const gate = new Promise<void>((resolve) => { openGate = resolve; });
+      const fake: LLMRunner = {
+        run: async (p: { prompt: string }) => {
+          inFlight += 1;
+          peak = Math.max(peak, inFlight);
+          if (inFlight >= 2) openGate();
+          await gate;
+          inFlight -= 1;
+          if (p.prompt.includes("标记甲内容")) {
+            return JSON.stringify([
+              { scene_name: "场景甲", message_ids: ["a1"], memories: [{ type: "episodic", content: "甲线事实", priority: 50 }] },
+            ]);
+          }
+          return JSON.stringify([
+            { scene_name: "场景乙", message_ids: ["b1"], memories: [{ type: "episodic", content: "乙线事实", priority: 50 }] },
+          ]);
+        },
+      } as unknown as LLMRunner;
+      appendL0(baseDir, "sess-A", [msg("a1", "user", "标记甲内容：并发验证甲", T0)], T0 + 111);
+      appendL0(baseDir, "sess-B", [msg("b1", "user", "标记乙内容：并发验证乙", T0)], T0 + 333);
+      const r = await createL1Runner({
+        pluginDataDir: baseDir,
+        cfg: { extraction: { enableDedup: false, samplesPerBatch: 1, maxMemoriesPerSession: 10 }, embedding: {} } as never,
+        openclawConfig: undefined,
+        vectorStore: undefined,
+        embeddingService: undefined,
+        logger: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} } as unknown as Logger,
+        llmRunner: fake,
+      })({ sessionKey: SESSION_KEY });
+      expect(peak).toBe(2); // 并发峰值=组数
+      expect(r.storedCount).toBe(2); // 聚合语义不变
+    } finally {
+      rmSync(baseDir, { recursive: true, force: true });
+    }
+  });
 });
