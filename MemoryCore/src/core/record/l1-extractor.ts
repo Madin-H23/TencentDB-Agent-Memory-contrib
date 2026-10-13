@@ -701,8 +701,13 @@ async function callLlmExtraction(params: {
  */
 function parseExtractionResult(raw: string, logger?: Logger): SceneSegment[] {
   try {
+    // think 内联剥离（P0 2026-10-13，与 l1-dedup 双侧对齐，参照上游 extractor 同款）：
+    // think 散文里的 `[scene_x]` 引用会锚定下方贪婪数组匹配致抽取 parse 失败。
+    // 非贪婪 + 显式闭合标签：截断的 think 原样透传，不吞其余响应。
+    const stripped = raw.replace(/<think>[\s\S]*?<\/think>\s*/g, "");
+
     // Strip markdown code block wrappers if present
-    let cleaned = raw.trim();
+    let cleaned = stripped.trim();
     if (cleaned.startsWith("```")) {
       cleaned = cleaned.replace(/^```(?:json)?\s*\n?/, "").replace(/\n?```\s*$/, "");
     }

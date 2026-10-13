@@ -361,8 +361,14 @@ function parseBatchResult(
   logger?: Logger,
 ): DedupDecision[] {
   try {
+    // think 内联剥离（P0 2026-10-13，对齐上游 l1-dedup.ts:316-339）：think 类模型
+    // （step-5「永远推理」/ GLM thinking / R1 系）把推理内联进 content，其散文里的
+    // `[rec_x]` 候选引用会锚定下方贪婪数组匹配，令判定 parse 失败→静默全 store。
+    // 非贪婪 + 显式闭合标签：截断的 think（max_tokens 打满）原样透传，不吞其余响应。
+    const stripped = raw.replace(/<think>[\s\S]*?<\/think>\s*/g, "");
+
     // Strip markdown code block wrappers
-    let cleaned = raw.trim();
+    let cleaned = stripped.trim();
     if (cleaned.startsWith("```")) {
       cleaned = cleaned.replace(/^```(?:json)?\s*\n?/, "").replace(/\n?```\s*$/, "");
     }
@@ -371,7 +377,7 @@ function parseBatchResult(
     const arrayMatch = cleaned.match(/\[[\s\S]*\]/);
     if (!arrayMatch) {
       logger?.warn?.(`${TAG} No JSON array found in conflict detection response`);
-      return fallbackStoreAll(memories);
+      return fallbackStoreAll(memories, "no_json_array", logger);
     }
 
     // Sanitize control characters inside JSON string literals that LLM may produce
@@ -380,7 +386,7 @@ function parseBatchResult(
 
     if (!Array.isArray(parsed)) {
       logger?.warn?.(`${TAG} Conflict detection response is not an array`);
-      return fallbackStoreAll(memories);
+      return fallbackStoreAll(memories, "not_array", logger);
     }
 
     // Build decisions from LLM output
@@ -430,14 +436,26 @@ function parseBatchResult(
     return decisions;
   } catch (err) {
     logger?.warn?.(`${TAG} Failed to parse conflict detection result: ${err instanceof Error ? err.message : String(err)}`);
-    return fallbackStoreAll(memories);
+    return fallbackStoreAll(memories, "parse_error", logger);
   }
 }
 
 /**
  * Fallback: store all memories when parsing fails.
+ *
+ * reason 三值对应 parseBatchResult 的三条路径。WARN 锚点（S1 评审修正 4，
+ * 2026-10-13 M1 前置）：此前只 warn 条件本身，「全 store」这个动作无独立日志，
+ * 指标上不可观测——parse 失败静默免检入库是 L1 重复的历史新增源，切回 think 类
+ * 厂商时重复暴涨会被误记为其它原因。此锚点即 kill-switch：出现即该轮查重空转。
  */
-function fallbackStoreAll(memories: Array<ExtractedMemory & { record_id: string }>): DedupDecision[] {
+function fallbackStoreAll(
+  memories: Array<ExtractedMemory & { record_id: string }>,
+  reason: "no_json_array" | "not_array" | "parse_error",
+  logger?: Logger,
+): DedupDecision[] {
+  logger?.warn?.(
+    `${TAG} l1-dedup-fallback-silent reason=${reason} — ${memories.length} memory(ies) stored without dedup judgment`,
+  );
   return memories.map((m) => ({
     record_id: m.record_id,
     action: "store" as const,
