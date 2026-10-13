@@ -268,6 +268,8 @@ export interface StandaloneLLMOverrideConfig {
     l2?: { model?: string; maxTokens?: number; timeoutMs?: number; disableThinking?: boolean };
     l3?: { model?: string; maxTokens?: number; timeoutMs?: number; disableThinking?: boolean };
   };
+  /** 进程级厂商并发上限（可选，≤0/缺省不限）。经 gateway 折叠与 resolveRuntimeLlm 透传至 runner 闸门。 */
+  maxConcurrency?: number;
 }
 
 /** Context Offload settings — controls multi-layer context compression. */
@@ -688,6 +690,7 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
           // 默认 true：走 proxy 时用 memory 系统用户 key 作为 Authorization。
           useMemorySystemUserKey: bool(proxyGroup, "useMemorySystemUserKey") ?? true,
         },
+        maxConcurrency: num(llmGroup, "maxConcurrency"),
       };
     })(),
     offload,

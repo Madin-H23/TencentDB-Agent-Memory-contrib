@@ -600,6 +600,8 @@ export function loadGatewayConfig(overrides?: Partial<GatewayConfig>): GatewayCo
       ...(llm.headers ? { headers: llm.headers } : {}),
       ...(llm.disableThinking ? { disableThinking: llm.disableThinking } : {}),
       ...(llm.layers ? { layers: llm.layers } : {}),
+      // 并发闸门透传（2026-10-13）：逐字段重建会丢新字段，漏掉即 runner 闸门静默失效
+      ...(llm.maxConcurrency !== undefined ? { maxConcurrency: llm.maxConcurrency } : {}),
     };
   }
 

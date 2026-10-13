@@ -651,6 +651,7 @@ export class TdaiCore {
     timeoutMs: number;
     headers?: Record<string, string>;
     disableThinking?: boolean;
+    maxConcurrency?: number;
   } {
     const resolved = resolveStandaloneLlmForRuntime(this.cfg.llm, this.instanceId);
     const base = {
@@ -661,6 +662,8 @@ export class TdaiCore {
       timeoutMs: resolved.timeoutMs ?? 120_000,
       ...(resolved.headers ? { headers: resolved.headers } : {}),
       ...(resolved.disableThinking ? { disableThinking: resolved.disableThinking } : {}),
+      // 并发闸门必须透传：本方法逐字段重建 config，漏掉即闸门静默失效（2026-10-13）
+      ...(resolved.maxConcurrency !== undefined ? { maxConcurrency: resolved.maxConcurrency } : {}),
     };
     const ov = layer ? this.cfg.llm.layers?.[layer] : undefined;
     if (!ov) return base;

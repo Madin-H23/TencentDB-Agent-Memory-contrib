@@ -235,3 +235,57 @@ llm:
     }
   });
 });
+
+describe("loadGatewayConfig llm.maxConcurrency 端到端透传", () => {
+  // 回归钉子（2026-10-13 事故）：闸门字段经 折叠→memory.llm splice→resolveRuntimeLlm
+  // 三跳逐字段重建，任一跳丢字段闸门即静默失效。逐跳各有单测仍会漏，必须在出口钉。
+  function withFixture(yaml: string, fn: () => void): void {
+    const p = path.join(tmpDir, "fixture-maxconc-e2e.yaml");
+    fs.writeFileSync(p, yaml, "utf-8");
+    const prev = process.env.TDAI_GATEWAY_CONFIG;
+    process.env.TDAI_GATEWAY_CONFIG = p;
+    try {
+      fn();
+    } finally {
+      if (prev === undefined) delete process.env.TDAI_GATEWAY_CONFIG;
+      else process.env.TDAI_GATEWAY_CONFIG = prev;
+    }
+  }
+
+  const E2E_YAML = `
+llm:
+  activeProvider: "vendor-a"
+  maxConcurrency: 4
+  providers:
+    - name: vendor-a
+      baseUrl: "https://vendor-a.example/v1"
+      apiKeyEnv: "TDAI_TEST_KEY_A"
+      model: "model-a1"
+`;
+
+  it("yaml maxConcurrency 抵达 memory.llm（splice 不丢字段）", () => {
+    const prev = process.env.TDAI_LLM_MAX_CONCURRENCY;
+    delete process.env.TDAI_LLM_MAX_CONCURRENCY;
+    try {
+      withFixture(E2E_YAML, () => {
+        const cfg = loadGatewayConfig();
+        expect(cfg.llm.maxConcurrency).toBe(4);
+        expect(cfg.memory.llm.maxConcurrency).toBe(4);
+      });
+    } finally {
+      if (prev !== undefined) process.env.TDAI_LLM_MAX_CONCURRENCY = prev;
+    }
+  });
+
+  it("未配置时 memory.llm.maxConcurrency 为 undefined（不限流，行为不变）", () => {
+    const prev = process.env.TDAI_LLM_MAX_CONCURRENCY;
+    delete process.env.TDAI_LLM_MAX_CONCURRENCY;
+    try {
+      withFixture(E2E_YAML.replace("  maxConcurrency: 4\n", ""), () => {
+        expect(loadGatewayConfig().memory.llm.maxConcurrency).toBeUndefined();
+      });
+    } finally {
+      if (prev !== undefined) process.env.TDAI_LLM_MAX_CONCURRENCY = prev;
+    }
+  });
+});
