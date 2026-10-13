@@ -391,3 +391,49 @@ llm:
     });
   });
 });
+
+describe("loadGatewayConfig memory.extraction.dedupPromptVersion（D1 提示词版本开关）", () => {
+  function withFixture(yaml: string, fn: () => void): void {
+    const p = path.join(tmpDir, "fixture-promptver.yaml");
+    fs.writeFileSync(p, yaml, "utf-8");
+    const prev = process.env.TDAI_GATEWAY_CONFIG;
+    process.env.TDAI_GATEWAY_CONFIG = p;
+    try {
+      fn();
+    } finally {
+      if (prev === undefined) delete process.env.TDAI_GATEWAY_CONFIG;
+      else process.env.TDAI_GATEWAY_CONFIG = prev;
+    }
+  }
+
+  const BASE = `
+llm:
+  activeProvider: "vendor-a"
+  providers:
+    - name: vendor-a
+      baseUrl: "https://vendor-a.example/v1"
+      apiKeyEnv: "TDAI_TEST_KEY_A"
+      model: "model-a1"
+memory:
+  extraction:
+    enableDedup: true
+`;
+
+  it("缺省 → v1（生产默认行为不变）", () => {
+    withFixture(BASE, () => {
+      expect(loadGatewayConfig().memory.extraction.dedupPromptVersion).toBe("v1");
+    });
+  });
+
+  it("yaml v2 → cfg.memory.extraction.dedupPromptVersion=v2（出口钉）", () => {
+    withFixture(BASE + "    dedupPromptVersion: v2\n", () => {
+      expect(loadGatewayConfig().memory.extraction.dedupPromptVersion).toBe("v2");
+    });
+  });
+
+  it("非法值 fail-fast（拼写错误静默失效比报错更危险）", () => {
+    withFixture(BASE + "    dedupPromptVersion: v3\n", () => {
+      expect(() => loadGatewayConfig()).toThrow(/dedupPromptVersion/);
+    });
+  });
+});

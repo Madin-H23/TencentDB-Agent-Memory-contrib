@@ -394,7 +394,8 @@ export function createL1Runner(opts: {
   logger.info?.(
     `${TAG} [l1] dedupFailFast=${cfg.extraction.dedupFailFast ? "on" : "off"}, dedupTimeoutMs=${cfg.extraction.dedupTimeoutMs ?? 180000}ms, ` +
     `provider=${cfg.llm?.providerLabel ?? "unknown"}, model=${cfg.extraction.model ?? cfg.llm?.layers?.l1?.model ?? cfg.llm?.model ?? "unknown"}, ` +
-    `maxConcurrency=${cfg.llm?.maxConcurrency ?? 0}, callDeadlineMs=${cfg.llm?.callDeadlineMs ?? 180000}ms`,
+    `maxConcurrency=${cfg.llm?.maxConcurrency ?? 0}, callDeadlineMs=${cfg.llm?.callDeadlineMs ?? 180000}ms, ` +
+    `dedupPromptVersion=${cfg.extraction.dedupPromptVersion ?? "v1"}`,
   );
 
   return async ({ sessionKey }) => {
@@ -621,6 +622,7 @@ export function createL1Runner(opts: {
             timeoutMs: cfg.extraction.timeoutMs,
             dedupTimeoutMs: cfg.extraction.dedupTimeoutMs,
             dedupFailFast: cfg.extraction.dedupFailFast,
+            dedupPromptVersion: cfg.extraction.dedupPromptVersion,
             model: l1Model,
             providerLabel: l1Provider,
             promptMode: cfg.extraction.promptMode,

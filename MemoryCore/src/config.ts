@@ -53,6 +53,8 @@ export interface ExtractionConfig {
   dedupTimeoutMs?: number;
   /** 查重失败 fail-closed（S1）：true=查重失败整批延后重试；false=既有降级免检入库（默认） */
   dedupFailFast?: boolean;
+  /** 查重判定提示词版本（D1：v2 含三条款；缺省 v1；非法值 fail-fast） */
+  dedupPromptVersion?: "v1" | "v2";
   /** LLM model for extraction, format: "provider/model" (falls back to OpenClaw default model when omitted) */
   model?: string;
   /** Prompt family for L1 extraction (default: chat). */
@@ -602,6 +604,12 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       timeoutMs: num(extractionGroup, "timeoutMs"),
       dedupTimeoutMs: num(extractionGroup, "dedupTimeoutMs"),
       dedupFailFast: bool(extractionGroup, "dedupFailFast") ?? false,
+      dedupPromptVersion: (() => {
+        const raw = str(extractionGroup, "dedupPromptVersion");
+        if (raw === undefined) return "v1";
+        if (raw === "v1" || raw === "v2") return raw;
+        throw new Error(`[config] extraction.dedupPromptVersion="${raw}" 非法（合法: v1|v2）`);
+      })(),
       model: optStr(extractionGroup, "model"),
       promptMode: normalizePromptMode(str(extractionGroup, "promptMode"), globalPromptMode),
       // 用户身份白名单：只有这里的姓名才允许出现在「用户（X）」里（确定性护栏

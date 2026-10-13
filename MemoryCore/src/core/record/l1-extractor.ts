@@ -15,6 +15,7 @@
 import type { ConversationMessage } from "../conversation/l0-recorder.js";
 import { formatExtractionPrompt, getExtractMemoriesSystemPrompt, type MemoryPromptMode } from "../prompts/l1-extraction.js";
 import { batchDedup } from "./l1-dedup.js";
+import type { DedupPromptVersion } from "../prompts/l1-dedup.js";
 import { writeMemory, generateMemoryId } from "./l1-writer.js";
 import type { ExtractedMemory, MemoryRecord, MemoryType, DedupDecision } from "./l1-writer.js";
 import { CleanContextRunner } from "../../utils/clean-context-runner.js";
@@ -163,6 +164,8 @@ export async function extractL1Memories(params: {
     dedupTimeoutMs?: number;
     /** 查重失败 fail-closed（S1）：true=查重失败整批延后（上抛），不再免检 store */
     dedupFailFast?: boolean;
+    /** 查重判定提示词版本（D1：v2 含三条款，默认 v1） */
+    dedupPromptVersion?: DedupPromptVersion;
     /**
      * 用户身份白名单：只有这些姓名允许出现在「用户（X）」的括号里。
      * 其余（第三方姓名/角色标签/路径数字/时间状语…）入库前一律归一为「用户」。
@@ -491,6 +494,7 @@ export async function extractL1Memories(params: {
         config,
         timeoutMs: options.dedupTimeoutMs,
         dedupFailFast: options.dedupFailFast,
+        dedupPromptVersion: options.dedupPromptVersion,
         logger,
         model: options.model,
         promptMode: options.promptMode,

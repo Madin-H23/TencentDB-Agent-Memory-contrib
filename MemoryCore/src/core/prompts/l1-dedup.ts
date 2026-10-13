@@ -133,8 +133,44 @@ export const WORK_CONFLICT_DETECTION_SYSTEM_PROMPT = `你是团队工作记忆�
 - merged_priority：merge/update 后的新优先级（0-100 整数，merge/update 时必填）。合并后信息更完整、更确定，通常应**酌情提升** priority。参考标准：80-100（关键事实/重要任务/核心方法/重要资产），60-79（一般工作信息），<60（次要信息）。
 - merged_timestamps：合并后的时间戳数组。收集新记忆 + 所有被合并旧记忆的时间戳，去重排序。`;
 
-export function getConflictDetectionSystemPrompt(mode: MemoryPromptMode = "chat"): string {
-  return mode === "code" ? WORK_CONFLICT_DETECTION_SYSTEM_PROMPT : CONFLICT_DETECTION_SYSTEM_PROMPT;
+/** 查重判定提示词版本（D1 2026-10-13：v2 经小金标 A/B 验证后才灰度）。 */
+export type DedupPromptVersion = "v1" | "v2";
+
+/**
+ * v2 增补条款——**追加在 v1 全文之后**，v1 内容零删改（回退 = 版本号改回 v1）。
+ * 三条款对应归因实验主缺陷（69% 该合未合：LLM 看见了候选仍判 store）：
+ *   ① 同事实不同措辞/互补阶段必须 merge/skip，不得 store；
+ *   ② store 必须填单个 store_diff 字段（一句话差异点），无内容不得 store
+ *      （单字段化：逐候选输出会随候选数线性放大 token）；
+ *   ③ 新增防误合告诫（同主题不同事实/对象/时间点必须 store 并给出区分依据）——
+ *      与②制衡，防「为去重放任误合」。
+ */
+const CONFLICT_DETECTION_V2_ADDENDUM = `
+
+## 补充规则（v2 · 2026-10-13）
+
+### 1. 同一事实的不同措辞必须合并
+同一事实/规则/偏好/事件的**不同措辞**，或同一事件的**互补阶段**（前后段合起来才完整）——必须判 merge 或 skip，**不得判 store**。判 store 前逐一自问：候选池里有没有在用不同的话说同一件事？有 → merge/skip。
+
+### 2. store 必须给出差异点（单字段）
+判 store 时必须在输出中附加一个字段：
+- store_diff：一句话说明这条新记忆与候选池整体为何**不是**同一事实（不同对象 / 不同时间点的独立事项 / 真正新增的独立信息）。无差异点内容不得判 store。
+
+### 3. 防误合告诫
+同主题但**不同事实、不同对象、不同时间点的独立事件**必须 store，并在 store_diff 给出区分依据（work_task 族的「同项目不同工单」尤然）。互补阶段（同一事件线的前后段）才判 merge。拿不准时问自己：合并后会丢失可独立检索的信息吗？会 → store。
+
+### 输出格式补充
+JSON 数组元素在原有字段基础上：action 为 "store" 时**必须**附 "store_diff"（字符串，一句话）；action 为 merge/update/skip 时省略该字段。`;
+
+export function getConflictDetectionSystemPrompt(
+  mode: MemoryPromptMode = "chat",
+  version: DedupPromptVersion = "v1",
+): string {
+  if (version !== "v1" && version !== "v2") {
+    throw new Error(`[prompts] dedupPromptVersion 非法: ${String(version)}（合法: v1|v2）`);
+  }
+  const base = mode === "code" ? WORK_CONFLICT_DETECTION_SYSTEM_PROMPT : CONFLICT_DETECTION_SYSTEM_PROMPT;
+  return version === "v2" ? base + CONFLICT_DETECTION_V2_ADDENDUM : base;
 }
 
 // ============================
