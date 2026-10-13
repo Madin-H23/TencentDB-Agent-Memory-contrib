@@ -13,7 +13,7 @@
 
 import type { MemoryPromptMode } from "../../config.js";
 import type { ExtractedMemory, MemoryRecord, DedupDecision, MemoryType } from "./l1-writer.js";
-import { formatBatchConflictPrompt, getConflictDetectionSystemPrompt } from "../prompts/l1-dedup.js";
+import { formatBatchConflictPrompt, getConflictDetectionSystemPrompt, type DedupPromptVersion } from "../prompts/l1-dedup.js";
 import type { CandidateMatch } from "../prompts/l1-dedup.js";
 import { CleanContextRunner } from "../../utils/clean-context-runner.js";
 import { sanitizeJsonForParse } from "../../utils/sanitize.js";
@@ -81,7 +81,7 @@ export async function batchDedup(params: {
   /** langfuse 上报身份四元组（team/user/agent/session），透传给 llmRunner。 */
   traceContext?: TraceContext;
 }): Promise<DedupDecision[]> {
-  const { memories, config, logger, model, promptMode = "chat", vectorStore, embeddingService, llmRunner, filter, traceContext, dedupFailFast } = params;
+  const { memories, config, logger, model, promptMode = "chat", vectorStore, embeddingService, llmRunner, filter, traceContext, dedupFailFast, dedupPromptVersion = "v1" } = params;
   // 保持与改动前一致：未显式配置时仍是 180_000。
   // 注意上限：Node 内置 fetch(undici) 的 headersTimeout 默认 300s，非流式补全只在生成完后发头，
   // 配到 600s 会被静默截到 ~300s（见 issue #1403 的第三方补充说明）。
@@ -149,7 +149,7 @@ export async function batchDedup(params: {
   }
 
   // Phase 2: Batch LLM judgment
-  return runLlmJudgment(matches, memories, config, logger, model, promptMode, llmRunner, traceContext, timeoutMs, dedupFailFast);
+  return runLlmJudgment(matches, memories, config, logger, model, promptMode, llmRunner, traceContext, timeoutMs, dedupFailFast, dedupPromptVersion);
 }
 
 /**
@@ -171,13 +171,15 @@ async function runLlmJudgment(
   timeoutMs?: number,
   /** fail-closed 开关（S1）：true=判定失败上抛给调用方走延后；false=既有降级全 store */
   dedupFailFast?: boolean,
+  /** 提示词版本（D1）：透传至 getConflictDetectionSystemPrompt */
+  dedupPromptVersion?: DedupPromptVersion,
 ): Promise<DedupDecision[]> {
   const llmTimeoutMs = timeoutMs ?? 180_000;
   logger?.debug?.(`${TAG} Running batch conflict detection for ${memories.length} memories (promptMode=${promptMode})`);
 
   try {
     const userPrompt = formatBatchConflictPrompt(matches);
-    const systemPrompt = getConflictDetectionSystemPrompt(promptMode);
+    const systemPrompt = getConflictDetectionSystemPrompt(promptMode, dedupPromptVersion ?? "v1");
     let result: string;
 
     // langfuse trace 语义：见 l1-extractor.ts 里的说明。dedup 是 L1 的子步骤，
