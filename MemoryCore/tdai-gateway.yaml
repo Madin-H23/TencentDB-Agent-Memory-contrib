@@ -25,6 +25,11 @@ data:
 #   实测一轮蒸馏(extracted>0)才算接入成功
 llm:
   activeProvider: "阶跃星辰"
+  # 进程级厂商并发闸门(2026-10-13):step-5 端点并发限额 5。L1 抽取池(3)+L1 去重+
+  # L2 场景定时任务+L3 画像各自发调用,无统一闸门时慢端点挂起的调用叠加新调用会被
+  # 厂商 concurrency reached 秒拒(current:6/limit:5 死信 10 条)。压到 4 留 1 余量,
+  # 挂起占位时新调用排队而非继续施压。0/缺省=不限。
+  maxConcurrency: 4
   providers:
     # 新增厂商: 追加条目即可(零代码改动),接入后必须跑一轮蒸馏验收
     - name: 智谱coding plan
@@ -226,8 +231,10 @@ memory:
     # 查重失败 fail-closed（S1，2026-10-12）：查重失败整批延后重试（游标不动、
     # 数据不丢），不再免检入库——免检是 L1 重复内容的主要新增源（5 天 53 次）。
     dedupFailFast: true
-    # 去重 LLM 判定超时：120s 起步（首版审核建议；undici headersTimeout 上限 300s）
-    dedupTimeoutMs: 120000
+    # 去重 LLM 判定超时：首版 120s 实测不足（dedup prompt 含候选+新记忆，step-5
+    # 判定常 >120s 而抽取 60-90s 能过——48h 观察窗提前产出的数据点），调至 240s
+    # （undici headersTimeout 上限 300s 之内）
+    dedupTimeoutMs: 240000
 
   persona:
     triggerEveryN: 50
