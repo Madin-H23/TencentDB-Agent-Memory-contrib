@@ -148,6 +148,44 @@ describe("L1 runner：多 sid 分组的 continuity 隔离", () => {
     }
   });
 
+  it("组间并发封顶：4 组时峰值并发=3（L1_GROUP_PARALLELISM），全部处理完", async () => {
+    const baseDir = mkdtempSync(join(tmpdir(), "l1runner-f-"));
+    try {
+      let inFlight = 0;
+      let peak = 0;
+      const fake: LLMRunner = {
+        run: async (p: { prompt: string }) => {
+          inFlight += 1;
+          peak = Math.max(peak, inFlight);
+          await new Promise((r) => setTimeout(r, 60)); // 拉长在途窗口让并发可观测
+          inFlight -= 1;
+          const marker = p.prompt.includes("标记零") ? "零" : p.prompt.includes("标记一") ? "一" : p.prompt.includes("标记二") ? "二" : "三";
+          const id = p.prompt.includes("标记零") ? "g0" : p.prompt.includes("标记一") ? "g1" : p.prompt.includes("标记二") ? "g2" : "g3";
+          return JSON.stringify([
+            { scene_name: `场景${marker}`, message_ids: [id], memories: [{ type: "episodic", content: `${marker}线事实`, priority: 50 }] },
+          ]);
+        },
+      } as unknown as LLMRunner;
+      for (const [i, sid] of (["sess-0", "sess-1", "sess-2", "sess-3"] as const).entries()) {
+        appendL0(baseDir, sid, [msg(`g${i}`, "user", `标记${["零", "一", "二", "三"][i]}内容：并发封顶 ${i}`, T0 + i * 100)], T0 + 500 + i * 100);
+      }
+      const r = await createL1Runner({
+        pluginDataDir: baseDir,
+        cfg: { extraction: { enableDedup: false, samplesPerBatch: 1, maxMemoriesPerSession: 10 }, embedding: {} } as never,
+        openclawConfig: undefined,
+        vectorStore: undefined,
+        embeddingService: undefined,
+        logger: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} } as unknown as Logger,
+        llmRunner: fake,
+      })({ sessionKey: SESSION_KEY });
+      expect(r.storedCount).toBe(4); // 4 组全部处理
+      expect(peak).toBeLessThanOrEqual(3); // 并发封顶生效（无界=4）
+      expect(peak).toBeGreaterThanOrEqual(2); // 且确实并行（非串行）
+    } finally {
+      rmSync(baseDir, { recursive: true, force: true });
+    }
+  });
+
   it("并行片一组 dedup 失败：整片延后（runner reject、游标不动、已入库副本保留）", async () => {
     const baseDir = mkdtempSync(join(tmpdir(), "l1runner-e-"));
     try {
