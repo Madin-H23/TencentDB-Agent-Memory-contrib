@@ -289,3 +289,72 @@ llm:
     }
   });
 });
+
+describe("loadGatewayConfig llm.callDeadlineMs 整调用硬期限", () => {
+  function withFixture(yaml: string, fn: () => void): void {
+    const p = path.join(tmpDir, "fixture-deadline.yaml");
+    fs.writeFileSync(p, yaml, "utf-8");
+    const prevCfg = process.env.TDAI_GATEWAY_CONFIG;
+    const prev = process.env.TDAI_LLM_CALL_DEADLINE_MS;
+    process.env.TDAI_GATEWAY_CONFIG = p;
+    if (prev !== undefined) process.env.TDAI_LLM_CALL_DEADLINE_MS = "";
+    else delete process.env.TDAI_LLM_CALL_DEADLINE_MS;
+    try {
+      fn();
+    } finally {
+      if (prevCfg === undefined) delete process.env.TDAI_GATEWAY_CONFIG;
+      else process.env.TDAI_GATEWAY_CONFIG = prevCfg;
+      if (prev !== undefined) process.env.TDAI_LLM_CALL_DEADLINE_MS = prev;
+      else delete process.env.TDAI_LLM_CALL_DEADLINE_MS;
+    }
+  }
+
+  const BASE_YAML = `
+llm:
+  activeProvider: "vendor-a"
+  providers:
+    - name: vendor-a
+      baseUrl: "https://vendor-a.example/v1"
+      apiKeyEnv: "TDAI_TEST_KEY_A"
+      model: "model-a1"
+`;
+
+  it("未配置 → undefined（runner 用内置 180s 默认，上游行为不变）", () => {
+    withFixture(BASE_YAML, () => {
+      const cfg = loadGatewayConfig();
+      expect(cfg.llm.callDeadlineMs).toBeUndefined();
+      expect(cfg.memory.llm.callDeadlineMs).toBeUndefined();
+    });
+  });
+
+  it("yaml 全局值抵达 memory.llm，分层覆盖抵达 memory.llm.layers（端到端出口钉）", () => {
+    withFixture(
+      BASE_YAML +
+        "  callDeadlineMs: 360000\n" +
+        "  layers:\n    l2:\n      callDeadlineMs: 660000\n",
+      () => {
+        const cfg = loadGatewayConfig();
+        expect(cfg.llm.callDeadlineMs).toBe(360_000);
+        expect(cfg.memory.llm.callDeadlineMs).toBe(360_000);
+        expect(cfg.llm.layers?.l2?.callDeadlineMs).toBe(660_000);
+      },
+    );
+  });
+
+  it("env TDAI_LLM_CALL_DEADLINE_MS 压过 yaml 全局值", () => {
+    const p = path.join(tmpDir, "fixture-deadline-env.yaml");
+    fs.writeFileSync(p, BASE_YAML + "  callDeadlineMs: 360000\n", "utf-8");
+    const prev = process.env.TDAI_GATEWAY_CONFIG;
+    const prevEnv = process.env.TDAI_LLM_CALL_DEADLINE_MS;
+    process.env.TDAI_GATEWAY_CONFIG = p;
+    process.env.TDAI_LLM_CALL_DEADLINE_MS = "420000";
+    try {
+      expect(loadGatewayConfig().llm.callDeadlineMs).toBe(420_000);
+    } finally {
+      if (prev === undefined) delete process.env.TDAI_GATEWAY_CONFIG;
+      else process.env.TDAI_GATEWAY_CONFIG = prev;
+      if (prevEnv === undefined) delete process.env.TDAI_LLM_CALL_DEADLINE_MS;
+      else process.env.TDAI_LLM_CALL_DEADLINE_MS = prevEnv;
+    }
+  });
+});

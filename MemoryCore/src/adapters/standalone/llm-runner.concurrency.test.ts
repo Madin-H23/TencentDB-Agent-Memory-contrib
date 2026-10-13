@@ -141,3 +141,35 @@ describe("StandaloneLLMRunner maxConcurrency 闸门", () => {
     }
   });
 });
+
+describe("StandaloneLLMRunner callDeadlineMs 整调用硬期限", () => {
+  it("期限 < per-attempt 超时时，期限先到并按配置值报错（180s 内置默认不再写死）", async () => {
+    // 永不响应的桩：per-attempt timeoutMs=5s，但 callDeadlineMs=300ms 应先触发
+    const server = createServer(() => {
+      /* 故意不响应 */
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("stub listen failed");
+    try {
+      const runner = new StandaloneLLMRunner({
+        config: {
+          baseUrl: `http://127.0.0.1:${addr.port}/v1`,
+          apiKey: "stub-key",
+          model: "stub-model",
+          timeoutMs: 5_000,
+          callDeadlineMs: 300,
+        },
+        model: "stub-model",
+        enableTools: false,
+      });
+      const t0 = Date.now();
+      await expect(runner.run({ systemPrompt: "s", prompt: "p", taskId: "t" })).rejects.toThrow(
+        /exceeded overall deadline \(300ms\)/,
+      );
+      expect(Date.now() - t0).toBeLessThan(3_000);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
