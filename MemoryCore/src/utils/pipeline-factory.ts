@@ -354,6 +354,10 @@ async function _doInitStores(
  * Reads L0 messages (from VectorStore DB or JSONL fallback), groups by sessionId,
  * runs extractL1Memories for each group, and updates the checkpoint cursor.
  */
+/** 组间抽取并发上限：慢端点有并发配额（step-5 实测 limit 5），留余量给
+ *  L2/dedup 重叠调用；也是「不把端点打狠」的自我约束。 */
+const L1_GROUP_PARALLELISM = 3;
+
 export function createL1Runner(opts: {
   pluginDataDir: string;
   cfg: MemoryTdaiConfig;
@@ -578,46 +582,61 @@ export function createL1Runner(opts: {
       // 耗时 ≈ 最慢单组。聚合在 Promise.all 之后按 groups 原序（= 时间序）归并，
       // lastSceneName/lastSceneNames/游标语义与串行版逐字一致；任一组失败仍整批
       // 抛出（#1395 语义：游标不动、延后重试，绝不静默丢数据）。
-      const results = await Promise.all(
-        groups.map(async (group) => {
-          logger.debug?.(
-            `${TAG} [l1] Group sessionId=${group.sessionId || "(empty)"}: ${group.messages.length} messages`,
-          );
-          const l1Result = await extractL1Memories({
-            messages: group.messages,
-            sessionKey,
-            sessionId: group.sessionId,
-            taskId: group.taskId,
-            teamId: group.teamId,
-            userId: group.userId,
-            agentId: group.agentId,
-            baseDir: pluginDataDir,
-            config,
-            options: {
-              enableDedup: cfg.extraction.enableDedup,
-              maxMemoriesPerSession: cfg.extraction.maxMemoriesPerSession,
-              samplesPerBatch: cfg.extraction.samplesPerBatch,
-              timeoutMs: cfg.extraction.timeoutMs,
-              dedupTimeoutMs: cfg.extraction.dedupTimeoutMs,
-              dedupFailFast: cfg.extraction.dedupFailFast,
-              model: cfg.extraction.model,
-              promptMode: cfg.extraction.promptMode,
-              attributionGuard: cfg.extraction.attributionGuard,
-              correctionException: cfg.extraction.correctionException,
-              userIdentityNames: cfg.extraction.userIdentityNames,
-              previousSceneName:
-                runnerState.last_scene_names?.[group.sessionId] ?? (runnerState.last_scene_name || undefined),
-              vectorStore,
-              embeddingService,
-              conflictRecallTopK: cfg.embedding.conflictRecallTopK,
-              embeddingTimeoutMs: cfg.embedding.captureTimeoutMs ?? cfg.embedding.timeoutMs,
-              llmRunner,
-            },
-            logger,
-            instanceId: getInstanceId?.(),
-            storage,
-          });
-          return { group, l1Result };
+      // 有界并行（2026-10-13）：无界 Promise.all 会在慢端点上触发并发上限
+      // （step-5 实测 "concurrency reached, current: 6, limit: 5"——4 组并行 +
+      // L2/dedup 重叠即触顶），整片 reject 反复延后。用工作池把组间并发压到
+      // L1_GROUP_PARALLELISM：耗时 ≈ ceil(M/并发) × 单组时长，仍远优于串行之和；
+      // 任一组失败仍整批抛出（#1395 语义不变）。
+      const results: Array<{ group: (typeof groups)[number]; l1Result: Awaited<ReturnType<typeof extractL1Memories>> }> = new Array(groups.length);
+      let nextGroupIdx = 0;
+      const runOne = async (group: (typeof groups)[number], slot: number) => {
+        logger.debug?.(
+          `${TAG} [l1] Group sessionId=${group.sessionId || "(empty)"}: ${group.messages.length} messages`,
+        );
+        const l1Result = await extractL1Memories({
+          messages: group.messages,
+          sessionKey,
+          sessionId: group.sessionId,
+          taskId: group.taskId,
+          teamId: group.teamId,
+          userId: group.userId,
+          agentId: group.agentId,
+          baseDir: pluginDataDir,
+          config,
+          options: {
+            enableDedup: cfg.extraction.enableDedup,
+            maxMemoriesPerSession: cfg.extraction.maxMemoriesPerSession,
+            samplesPerBatch: cfg.extraction.samplesPerBatch,
+            timeoutMs: cfg.extraction.timeoutMs,
+            dedupTimeoutMs: cfg.extraction.dedupTimeoutMs,
+            dedupFailFast: cfg.extraction.dedupFailFast,
+            model: cfg.extraction.model,
+            promptMode: cfg.extraction.promptMode,
+            attributionGuard: cfg.extraction.attributionGuard,
+            correctionException: cfg.extraction.correctionException,
+            userIdentityNames: cfg.extraction.userIdentityNames,
+            previousSceneName:
+              runnerState.last_scene_names?.[group.sessionId] ?? (runnerState.last_scene_name || undefined),
+            vectorStore,
+            embeddingService,
+            conflictRecallTopK: cfg.embedding.conflictRecallTopK,
+            embeddingTimeoutMs: cfg.embedding.captureTimeoutMs ?? cfg.embedding.timeoutMs,
+            llmRunner,
+          },
+          logger,
+          instanceId: getInstanceId?.(),
+          storage,
+        });
+        results[slot] = { group, l1Result };
+      };
+      const workerCount = Math.min(L1_GROUP_PARALLELISM, groups.length);
+      await Promise.all(
+        Array.from({ length: workerCount }, async () => {
+          while (true) {
+            const i = nextGroupIdx++;
+            if (i >= groups.length) return;
+            await runOne(groups[i]!, i);
+          }
         }),
       );
 
