@@ -9,9 +9,19 @@
  * 本模块提供统一的「判定 + 延迟计算」纯函数，供 runner 层与 worker 层共用。
  */
 
-/** 判定错误信息是否为限流类（429 / rate limit / 速率限制 / 访问量过大）。 */
+/**
+ * 判定错误信息是否为限流类（429 / rate limit / 速率限制 / 访问量过大 / 并发限额拒绝）。
+ *
+ * 并发限额拒绝（2026-10-13 阶跃 step_plan 端点实测）：我方超时中止的挂起调用在
+ * 服务端仍在推理（客户端断开对非流式请求不可见），占着厂商并发计数（"幽灵请求"）
+ * 数分钟；窗口期内新调用被 `concurrency reached, current: N, limit: M` 百毫秒级
+ * 秒拒。这类错误的正确响应与限流相同——退避等幽灵消散后重试，而非 5s×3 打满
+ * 三次进死信。
+ */
 export function isRateLimitError(msg: string): boolean {
-  return /rate.?limit|429|too many requests|速率限制|访问量过大|请求频率/i.test(String(msg ?? ""));
+  return /rate.?limit|429|too many requests|速率限制|访问量过大|请求频率|concurrency reached|concurrency limit/i.test(
+    String(msg ?? ""),
+  );
 }
 
 /**
