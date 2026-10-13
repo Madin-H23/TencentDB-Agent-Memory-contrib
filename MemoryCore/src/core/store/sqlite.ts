@@ -387,8 +387,9 @@ export function rankByTokenCoverage<T extends { record_id: string }>(
   return sorted;
 }
 
-/** 从 buildFtsQuery 产出的表达式反解 token（`"a" OR "b"` → [a, b]）。 */
-function parseFtsQueryTokens(ftsQuery: string): string[] {
+/** 从 buildFtsQuery 产出的表达式反解 token（`"a" OR "b"` → [a, b]）。
+ *  导出供金标生成器等只读工具复刻 searchL1Fts 口径（纯函数，无副作用）。 */
+export function parseFtsQueryTokens(ftsQuery: string): string[] {
   return ftsQuery
     .split(" OR ")
     .map((t) => t.trim().replace(/^"|"$/g, ""))
