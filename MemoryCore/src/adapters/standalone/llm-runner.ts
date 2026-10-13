@@ -30,8 +30,12 @@ import type {
 } from "../../core/types.js";
 import type { LLMUsage } from "../../core/report/metric-tracking-runner.js";
 import { runWithRateLimitRetry } from "../../utils/rate-limit-backoff.js";
+import { withSharedLlmLimit } from "../../utils/llm-concurrency.js";
 
 const TAG = "[memory-tdai] [standalone-runner]";
+
+// 已打过闸门生效日志的 key（每进程每厂商端点只打一次 INFO，避免刷屏）
+const gateLoggedKeys = new Set<string>();
 
 // Max iterations in the tool-call loop to prevent infinite loops
 const MAX_TOOL_ITERATIONS = 20;
@@ -116,6 +120,13 @@ export interface StandaloneLLMConfig {
   disableThinking?: boolean;
   /** 分层覆盖（可选）：按蒸馏层（l1|l2|l3）覆盖标量字段，未列出的层用全局折叠结果。 */
   layers?: Record<"l1" | "l2" | "l3", LlmLayerOverride>;
+  /**
+   * 进程级厂商并发上限（可选，env TDAI_LLM_MAX_CONCURRENCY / yaml llm.maxConcurrency）。
+   * 按 baseUrl 分桶，L1 抽取/去重、L2 场景、L3 画像全部共享一桶 —— 慢端点挂起的
+   * 调用会占住槽位，新调用排队而非继续施压，避免被厂商 concurrency reached 秒拒。
+   * 未配置或 ≤0 = 不限（上游默认行为）。
+   */
+  maxConcurrency?: number;
 }
 
 /** llm.layers.<层> 可覆盖的标量字段。不支持按层换 baseUrl/apiKeyEnv（换厂商仍走 activeProvider）。 */
@@ -385,30 +396,46 @@ export class StandaloneLLMRunner implements LLMRunner {
       // AbortSignal.any (Node 20+) aborts when ANY of the listed signals abort.
       // maxRetries:0 = 关闭 AI SDK 内置快速重试（默认 3 连发 ~8s，对限流毫无意义），
       // 改由 callGenerateTextWithRateLimitRetry 做限流感知的长退避（20s/40s/80s）。
+      // 闸门包在 generate 闭包内（而非 retry 外层）：退避等待期间不占并发槽位，
+      // 每次尝试独立取号。慢端点挂起的调用占住槽位时，新调用在此排队而非继续
+      // 施压 —— 避免厂商侧并发叠加到 limit 之上被秒拒（2026-10-13 死信事故）。
       const result = await this.callGenerateTextWithRateLimitRetry(() => {
         const timeoutSignal = AbortSignal.timeout(timeoutMs);
         const combinedSignal = params.abortSignal
           ? AbortSignal.any([timeoutSignal, params.abortSignal])
           : timeoutSignal;
-        return generateText({
-          model: provider.chat(this.model),
-          system: params.systemPrompt,
-          prompt: params.prompt,
-          // Only attach tools when actually enabled — passing an empty object
-          // (or even a tools-only-with-`read`) makes some OpenAI-compatible
-          // backends emit spurious tool calls on pure-text tasks.
-          ...(tools && Object.keys(tools).length > 0
-            ? { tools, stopWhen: stepCountIs(maxIterations) }
-            : {}),
-          maxOutputTokens: maxTokens,
-          abortSignal: combinedSignal,
-          maxRetries: 0,
-          experimental_telemetry: {
-            isEnabled: true,
-            functionId: params.taskId,
-            metadata: buildTelemetryMetadata(params),
-          },
-        });
+        const invoke = () =>
+          generateText({
+            model: provider.chat(this.model),
+            system: params.systemPrompt,
+            prompt: params.prompt,
+            // Only attach tools when actually enabled — passing an empty object
+            // (or even a tools-only-with-`read`) makes some OpenAI-compatible
+            // backends emit spurious tool calls on pure-text tasks.
+            ...(tools && Object.keys(tools).length > 0
+              ? { tools, stopWhen: stepCountIs(maxIterations) }
+              : {}),
+            maxOutputTokens: maxTokens,
+            abortSignal: combinedSignal,
+            maxRetries: 0,
+            experimental_telemetry: {
+              isEnabled: true,
+              functionId: params.taskId,
+              metadata: buildTelemetryMetadata(params),
+            },
+          });
+        const limit = this.config.maxConcurrency ?? 0;
+        if (limit >= 1) {
+          const gateKey = `llm:${this.config.baseUrl}`;
+          if (!gateLoggedKeys.has(gateKey)) {
+            gateLoggedKeys.add(gateKey);
+            this.logger?.info?.(
+              `${TAG} [llm-concurrency] 厂商调用并发闸门生效 key=${gateKey} limit=${limit}`,
+            );
+          }
+          return withSharedLlmLimit(gateKey, limit, invoke);
+        }
+        return invoke();
       });
 
       const text = (result.text ?? "").trim();

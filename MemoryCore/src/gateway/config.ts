@@ -554,6 +554,8 @@ export function loadGatewayConfig(overrides?: Partial<GatewayConfig>): GatewayCo
     model: env("TDAI_LLM_MODEL") ?? entryModel ?? "gpt-4o",
     maxTokens: envInt("TDAI_LLM_MAX_TOKENS") ?? entryMaxTokens ?? num(llmConfig, "maxTokens") ?? 4096,
     timeoutMs: envInt("TDAI_LLM_TIMEOUT_MS") ?? entryTimeoutMs ?? num(llmConfig, "timeoutMs") ?? 120_000,
+    maxConcurrency:
+      envInt("TDAI_LLM_MAX_CONCURRENCY") ?? num(llmConfig, "maxConcurrency"),
     provider: llmProvider,
     proxy: {
       useMemorySystemUserKey: bool(llmProxyConfig, "useMemorySystemUserKey") ?? true,

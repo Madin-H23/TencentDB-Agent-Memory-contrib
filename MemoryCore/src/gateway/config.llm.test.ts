@@ -172,3 +172,66 @@ llm:
     });
   });
 });
+
+describe("loadGatewayConfig llm.maxConcurrency 并发闸门配置", () => {
+  // 沿用模块级 tmpDir 与 TDAI_TEST_KEY_A（beforeAll 已就绪）
+  function withFixture(yaml: string, fn: () => void): void {
+    const p = path.join(tmpDir, "fixture-maxconc.yaml");
+    fs.writeFileSync(p, yaml, "utf-8");
+    const prev = process.env.TDAI_GATEWAY_CONFIG;
+    process.env.TDAI_GATEWAY_CONFIG = p;
+    try {
+      fn();
+    } finally {
+      if (prev === undefined) delete process.env.TDAI_GATEWAY_CONFIG;
+      else process.env.TDAI_GATEWAY_CONFIG = prev;
+    }
+  }
+
+  const BASE_YAML = `
+llm:
+  activeProvider: "vendor-a"
+  providers:
+    - name: vendor-a
+      baseUrl: "https://vendor-a.example/v1"
+      apiKeyEnv: "TDAI_TEST_KEY_A"
+      model: "model-a1"
+`;
+
+  it("未配置 → undefined（不限流，上游默认行为不变）", () => {
+    const prev = process.env.TDAI_LLM_MAX_CONCURRENCY;
+    delete process.env.TDAI_LLM_MAX_CONCURRENCY;
+    try {
+      withFixture(BASE_YAML, () => {
+        expect(loadGatewayConfig().llm.maxConcurrency).toBeUndefined();
+      });
+    } finally {
+      if (prev !== undefined) process.env.TDAI_LLM_MAX_CONCURRENCY = prev;
+    }
+  });
+
+  it("yaml llm.maxConcurrency 折叠进配置", () => {
+    const prev = process.env.TDAI_LLM_MAX_CONCURRENCY;
+    delete process.env.TDAI_LLM_MAX_CONCURRENCY;
+    try {
+      withFixture(BASE_YAML + "  maxConcurrency: 4\n", () => {
+        expect(loadGatewayConfig().llm.maxConcurrency).toBe(4);
+      });
+    } finally {
+      if (prev !== undefined) process.env.TDAI_LLM_MAX_CONCURRENCY = prev;
+    }
+  });
+
+  it("env TDAI_LLM_MAX_CONCURRENCY 压过 yaml 值", () => {
+    const prev = process.env.TDAI_LLM_MAX_CONCURRENCY;
+    process.env.TDAI_LLM_MAX_CONCURRENCY = "2";
+    try {
+      withFixture(BASE_YAML + "  maxConcurrency: 4\n", () => {
+        expect(loadGatewayConfig().llm.maxConcurrency).toBe(2);
+      });
+    } finally {
+      if (prev === undefined) delete process.env.TDAI_LLM_MAX_CONCURRENCY;
+      else process.env.TDAI_LLM_MAX_CONCURRENCY = prev;
+    }
+  });
+});
