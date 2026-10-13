@@ -560,6 +560,8 @@ export function loadGatewayConfig(overrides?: Partial<GatewayConfig>): GatewayCo
       envInt("TDAI_LLM_MAX_CONCURRENCY") ?? num(llmConfig, "maxConcurrency"),
     callDeadlineMs:
       envInt("TDAI_LLM_CALL_DEADLINE_MS") ?? num(llmConfig, "callDeadlineMs"),
+    // 厂商显示名（activeProvider 原样带入）：日志归属与面板「厂商: 模型」展示用
+    providerLabel: activeProviderName,
     provider: llmProvider,
     proxy: {
       useMemorySystemUserKey: bool(llmProxyConfig, "useMemorySystemUserKey") ?? true,
@@ -607,6 +609,7 @@ export function loadGatewayConfig(overrides?: Partial<GatewayConfig>): GatewayCo
       // 并发闸门透传（2026-10-13）：逐字段重建会丢新字段，漏掉即 runner 闸门静默失效
       ...(llm.maxConcurrency !== undefined ? { maxConcurrency: llm.maxConcurrency } : {}),
       ...(llm.callDeadlineMs !== undefined ? { callDeadlineMs: llm.callDeadlineMs } : {}),
+      ...(llm.providerLabel !== undefined ? { providerLabel: llm.providerLabel } : {}),
     };
   }
 

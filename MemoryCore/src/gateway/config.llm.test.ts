@@ -358,3 +358,36 @@ llm:
     }
   });
 });
+
+describe("loadGatewayConfig llm.providerLabel 厂商显示名", () => {
+  function withFixture(yaml: string, fn: () => void): void {
+    const p = path.join(tmpDir, "fixture-provlabel.yaml");
+    fs.writeFileSync(p, yaml, "utf-8");
+    const prev = process.env.TDAI_GATEWAY_CONFIG;
+    process.env.TDAI_GATEWAY_CONFIG = p;
+    try {
+      fn();
+    } finally {
+      if (prev === undefined) delete process.env.TDAI_GATEWAY_CONFIG;
+      else process.env.TDAI_GATEWAY_CONFIG = prev;
+    }
+  }
+
+  const BASE_YAML = `
+llm:
+  activeProvider: "vendor-a"
+  providers:
+    - name: vendor-a
+      baseUrl: "https://vendor-a.example/v1"
+      apiKeyEnv: "TDAI_TEST_KEY_A"
+      model: "model-a1"
+`;
+
+  it("activeProvider 原样带入 llm.providerLabel 并抵达 memory.llm（端到端出口钉）", () => {
+    withFixture(BASE_YAML, () => {
+      const cfg = loadGatewayConfig();
+      expect(cfg.llm.providerLabel).toBe("vendor-a");
+      expect(cfg.memory.llm.providerLabel).toBe("vendor-a");
+    });
+  });
+});

@@ -136,6 +136,8 @@ export interface StandaloneLLMConfig {
    * 全部压死。未配置 = 180s（上游行为不变）。
    */
   callDeadlineMs?: number;
+  /** 厂商显示名（yaml llm.activeProvider 原样，如 "opencode-go"）：日志归属用。 */
+  providerLabel?: string;
 }
 
 /** llm.layers.<层> 可覆盖的标量字段。不支持按层换 baseUrl/apiKeyEnv（换厂商仍走 activeProvider）。 */
