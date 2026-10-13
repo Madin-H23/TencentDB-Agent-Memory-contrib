@@ -388,9 +388,13 @@ export function createL1Runner(opts: {
   const { pluginDataDir, cfg, openclawConfig, vectorStore, embeddingService, logger, getInstanceId, llmRunner, storage } = opts;
   const config = openclawConfig as Record<string, unknown> | undefined;
 
-  // 启动锚点（S1 二审要求）：开关/超时生效值一行可见——不用等 48h 自然失败来验证
+  // 启动锚点（S1 二审要求）：开关/超时生效值一行可见——不用等 48h 自然失败来验证。
+  // 2026-10-13 增补厂商/模型/闸门/期限：切厂商或改限流配置后，锚点是确认「实际生效
+  // 的是哪家哪个模型、并发与期限压在哪」的唯一快速通道（曾发生配置漏带重启后才知）。
   logger.info?.(
-    `${TAG} [l1] dedupFailFast=${cfg.extraction.dedupFailFast ? "on" : "off"}, dedupTimeoutMs=${cfg.extraction.dedupTimeoutMs ?? 180000}ms`,
+    `${TAG} [l1] dedupFailFast=${cfg.extraction.dedupFailFast ? "on" : "off"}, dedupTimeoutMs=${cfg.extraction.dedupTimeoutMs ?? 180000}ms, ` +
+    `provider=${cfg.llm?.providerLabel ?? "unknown"}, model=${cfg.extraction.model ?? cfg.llm?.layers?.l1?.model ?? cfg.llm?.model ?? "unknown"}, ` +
+    `maxConcurrency=${cfg.llm?.maxConcurrency ?? 0}, callDeadlineMs=${cfg.llm?.callDeadlineMs ?? 180000}ms`,
   );
 
   return async ({ sessionKey }) => {
@@ -567,6 +571,13 @@ export function createL1Runner(opts: {
 
       let totalExtracted = 0;
       let totalStored = 0;
+      // 厂商/模型归属（2026-10-13）：完成/失败日志带 provider+model，面板蒸馏记录两卡
+      // 据此显示「(厂商: 模型)」定位调用方。模型优先级与 tdai-core resolveRuntimeLlm
+      // ("l1") 一致：llm.layers.l1.model > llm.model；extraction.model 显式设置时优先
+      // （它同时是 OpenClaw 回退路径的 modelRef）。
+      const l1Model = cfg.extraction.model ?? cfg.llm?.layers?.l1?.model ?? cfg.llm?.model;
+      const l1Provider = cfg.llm?.providerLabel;
+      const l1PmTag = `model=${l1Model ?? "unknown"}, provider=${l1Provider ?? "unknown"}`;
       // 多线程 continuity（2026-10-09）：per-sid 场景映射。同 sessionKey 并发多个
       // ZCode 会话时，共享单键 last_scene_name 会被「本轮恰好后蒸馏的线程」覆盖，
       // 其他线程下一轮的【上一个情境】就串成别人的场景（实测：乙线拿到甲线场景）。
@@ -610,7 +621,8 @@ export function createL1Runner(opts: {
             timeoutMs: cfg.extraction.timeoutMs,
             dedupTimeoutMs: cfg.extraction.dedupTimeoutMs,
             dedupFailFast: cfg.extraction.dedupFailFast,
-            model: cfg.extraction.model,
+            model: l1Model,
+            providerLabel: l1Provider,
             promptMode: cfg.extraction.promptMode,
             attributionGuard: cfg.extraction.attributionGuard,
             correctionException: cfg.extraction.correctionException,
@@ -666,7 +678,7 @@ export function createL1Runner(opts: {
       // skip same-ms siblings on the next round.
       await checkpoint.markL1ExtractionComplete(sessionKey, totalStored, maxRecordedAtMs || undefined, lastSceneName, lastSceneNames);
       logger.info(
-        `${TAG} [l1] L1 complete: extracted=${totalExtracted}, stored=${totalStored} (${groups.length} group(s))`,
+        `${TAG} [l1] L1 complete: extracted=${totalExtracted}, stored=${totalStored} (${groups.length} group(s)), ${l1PmTag}`,
       );
 
       return { processedCount: totalMessages, storedCount: totalStored, hasMore, hasFullBacklog, profileScopes: Array.from(profileScopes) };

@@ -143,6 +143,8 @@ export async function extractL1Memories(params: {
     samplesPerBatch?: number;
     /** LLM model override */
     model?: string;
+    /** 厂商显示名（activeProvider，如 opencode-go）：完成/失败日志带厂商+模型，面板蒸馏记录可定位调用方 */
+    providerLabel?: string;
     /** Previous scene name for continuity */
     previousSceneName?: string;
     /** Prompt family for L1 extraction (default: chat). */
@@ -195,6 +197,10 @@ export async function extractL1Memories(params: {
 }): Promise<L1ExtractionResult> {
   const { messages, sessionKey, sessionId, taskId, teamId, userId, agentId, baseDir, config, logger, instanceId: metricInstanceId, storage } = params;
   const options = params.options ?? {};
+  // 厂商/模型归属标签（2026-10-13）：完成/延后/失败三类日志与失败消息统一带
+  // provider+model——面板蒸馏记录两卡据此显示「(厂商: 模型)」，排查时可直接
+  // 定位是哪家厂商的哪个模型出的错；缺省 unknown 保持行格式稳定。
+  const pmTag = () => `model=${options.model ?? "unknown"}, provider=${options.providerLabel ?? "unknown"}`;
   const maxNewMessages = options.maxMessagesPerExtraction ?? 10;
   const maxBgMessages = options.maxBackgroundMessages ?? 5;
   const enableDedup = options.enableDedup ?? true;
@@ -229,7 +235,7 @@ export async function extractL1Memories(params: {
     // 空产出轮必须留 INFO 锚点：面板「最近蒸馏」按本格式定位轮次，只打 debug
     // 会让该轮在面板完全隐形（2026-09-20 实测：用户看到 L0 有记录、未蒸馏无积压、
     // 最近蒸馏无该轮，误以为数据丢失）。
-    logger?.info?.(`${TAG} Extraction complete: extracted=0, stored=0, session=${sessionKey}, sid=${sessionId ?? "default"} (all ${messages.length} message(s) filtered by L1 quality gate)`);
+    logger?.info?.(`${TAG} Extraction complete: extracted=0, stored=0, session=${sessionKey}, sid=${sessionId ?? "default"}, ${pmTag()} (all ${messages.length} message(s) filtered by L1 quality gate)`);
     logger?.debug?.(`${TAG} All messages filtered out by L1 quality gate`);
     return { success: true, extractedCount: 0, storedCount: 0, records: [], sceneNames: [] };
   }
@@ -278,12 +284,12 @@ export async function extractL1Memories(params: {
           ? err
           : new L1ExtractionFailure(
               "llm_error",
-              `L1 extraction failed: ${err instanceof Error ? err.message : String(err)}`,
+              `L1 extraction failed: ${err instanceof Error ? err.message : String(err)} (${pmTag()})`,
             );
       failedSamples += 1;
       firstFailure ??= failure;
       logger?.warn?.(
-        `${TAG} sample ${sample}/${samplesPerBatch} failed reason=${failure.reason} sessionKey=${sessionKey}`,
+        `${TAG} sample ${sample}/${samplesPerBatch} failed reason=${failure.reason} sessionKey=${sessionKey}, ${pmTag()}`,
       );
     }
   }
@@ -295,11 +301,11 @@ export async function extractL1Memories(params: {
       `${TAG} LLM extraction failed on all ${samplesPerBatch} sample(s): ${firstFailure?.message ?? "unknown"}`,
     );
     logger?.warn?.(
-      `${TAG} l1-deferred reason=${firstFailure?.reason ?? "llm_error"} sessionKey=${sessionKey} — batch deferred, checkpoint cursor unchanged`,
+      `${TAG} l1-deferred reason=${firstFailure?.reason ?? "llm_error"} sessionKey=${sessionKey}, ${pmTag()} — batch deferred, checkpoint cursor unchanged`,
     );
     throw (
       firstFailure ??
-      new L1ExtractionFailure("llm_error", "L1 extraction failed: all samples failed")
+      new L1ExtractionFailure("llm_error", `L1 extraction failed: all samples failed (${pmTag()})`)
     );
   }
   if (failedSamples > 0) {
@@ -436,7 +442,7 @@ export async function extractL1Memories(params: {
     // 同上的轮次锚点：模型正常回答但确无可记（合法空产出）——此前该分支直接
     // return，跳过下方的 "Extraction complete" 日志，面板「最近蒸馏」因此看不到
     // 任何一个空产出轮（实测历史 156 次）。
-    logger?.info?.(`${TAG} Extraction complete: extracted=0, stored=0, session=${sessionKey}, sid=${sessionId ?? "default"} (no memories returned: ${messages.length} message(s) → ${scenes.length} scene segment(s))`);
+    logger?.info?.(`${TAG} Extraction complete: extracted=0, stored=0, session=${sessionKey}, sid=${sessionId ?? "default"}, ${pmTag()} (no memories returned: ${messages.length} message(s) → ${scenes.length} scene segment(s))`);
     // ── 评测指标：L1 提取率（提取为空的情况） ──
     if (metricInstanceId) {
       try {
@@ -542,14 +548,16 @@ export async function extractL1Memories(params: {
       // 已入库副本会进候选召回被 merge/skip。message 保留原文（限流文案须能被
       // isRateLimitError 命中→worker 2/4/6min 退避）。
       const msg = err instanceof Error ? err.message : String(err);
-      logger?.warn?.(`${TAG} l1-deferred reason=dedup_failed sessionKey=${sessionKey} — batch deferred, checkpoint cursor unchanged (${msg})`);
-      throw new L1ExtractionFailure("dedup_failed", `L1 dedup failed: ${msg}`);
+      logger?.warn?.(`${TAG} l1-deferred reason=dedup_failed sessionKey=${sessionKey}, ${pmTag()} — batch deferred, checkpoint cursor unchanged (${msg})`);
+      // 后缀带厂商/模型：随错误消息进入 worker 死信转储的 error 字段，面板死信卡
+      // 无需额外管道即可显示归属（2026-10-13）。
+      throw new L1ExtractionFailure("dedup_failed", `L1 dedup failed: ${msg} (${pmTag()})`);
     }
   } else {
     storedRecords = await storeAllDirectly(memoriesWithIds, baseDir, sessionKey, sessionId, taskId, teamId, userId, agentId, logger, options.vectorStore, options.embeddingService, storage);
   }
 
-  logger?.info(`${TAG} Extraction complete: extracted=${extracted.length}, stored=${storedRecords.length}, session=${sessionKey}, sid=${sessionId ?? "default"}`);
+  logger?.info(`${TAG} Extraction complete: extracted=${extracted.length}, stored=${storedRecords.length}, session=${sessionKey}, sid=${sessionId ?? "default"}, ${pmTag()}`);
 
   // ── l1_extraction metric ──
   if (metricInstanceId && logger) {

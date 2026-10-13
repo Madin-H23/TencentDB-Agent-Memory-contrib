@@ -272,6 +272,8 @@ export interface StandaloneLLMOverrideConfig {
   maxConcurrency?: number;
   /** 整调用硬期限 ms（可选，缺省 180s）。必须 ≥ 各层 timeoutMs，否则 per-attempt 超时虚设（2026-10-13）。 */
   callDeadlineMs?: number;
+  /** 厂商显示名（yaml llm.activeProvider 原样，如 "opencode-go"）：L1 日志归属与面板展示用。 */
+  providerLabel?: string;
 }
 
 /** Context Offload settings — controls multi-layer context compression. */
@@ -694,6 +696,7 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
         },
         maxConcurrency: num(llmGroup, "maxConcurrency"),
         callDeadlineMs: num(llmGroup, "callDeadlineMs"),
+        providerLabel: str(llmGroup, "providerLabel"),
       };
     })(),
     offload,
