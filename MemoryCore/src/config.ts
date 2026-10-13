@@ -264,12 +264,14 @@ export interface StandaloneLLMOverrideConfig {
   disableThinking?: boolean;
   /** 分层覆盖（可选）：按蒸馏层（l1|l2|l3）覆盖 model/maxTokens/timeoutMs/disableThinking。 */
   layers?: {
-    l1?: { model?: string; maxTokens?: number; timeoutMs?: number; disableThinking?: boolean };
-    l2?: { model?: string; maxTokens?: number; timeoutMs?: number; disableThinking?: boolean };
-    l3?: { model?: string; maxTokens?: number; timeoutMs?: number; disableThinking?: boolean };
+    l1?: { model?: string; maxTokens?: number; timeoutMs?: number; disableThinking?: boolean; callDeadlineMs?: number };
+    l2?: { model?: string; maxTokens?: number; timeoutMs?: number; disableThinking?: boolean; callDeadlineMs?: number };
+    l3?: { model?: string; maxTokens?: number; timeoutMs?: number; disableThinking?: boolean; callDeadlineMs?: number };
   };
   /** 进程级厂商并发上限（可选，≤0/缺省不限）。经 gateway 折叠与 resolveRuntimeLlm 透传至 runner 闸门。 */
   maxConcurrency?: number;
+  /** 整调用硬期限 ms（可选，缺省 180s）。必须 ≥ 各层 timeoutMs，否则 per-attempt 超时虚设（2026-10-13）。 */
+  callDeadlineMs?: number;
 }
 
 /** Context Offload settings — controls multi-layer context compression. */
@@ -691,6 +693,7 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
           useMemorySystemUserKey: bool(proxyGroup, "useMemorySystemUserKey") ?? true,
         },
         maxConcurrency: num(llmGroup, "maxConcurrency"),
+        callDeadlineMs: num(llmGroup, "callDeadlineMs"),
       };
     })(),
     offload,

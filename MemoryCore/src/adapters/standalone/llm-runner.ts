@@ -127,6 +127,15 @@ export interface StandaloneLLMConfig {
    * 未配置或 ≤0 = 不限（上游默认行为）。
    */
   maxConcurrency?: number;
+  /**
+   * 整调用硬期限 ms（可选，env TDAI_LLM_CALL_DEADLINE_MS / yaml llm.callDeadlineMs，
+   * 可被 llm.layers.<层>.callDeadlineMs 按层覆盖）。runWithRateLimitRetry 的
+   * Promise.race 兜底（2026-10-09 持锁 4.5h 事故的保险丝）。
+   * ⚠️ 必须 ≥ 各层 timeoutMs（+限流退避预算），否则 per-attempt 超时配置被盖成虚设
+   * ——2026-10-13 发现内置 180s 曾把 yaml 的 l1 300s / dedup 240s / l2·l3 600s
+   * 全部压死。未配置 = 180s（上游行为不变）。
+   */
+  callDeadlineMs?: number;
 }
 
 /** llm.layers.<层> 可覆盖的标量字段。不支持按层换 baseUrl/apiKeyEnv（换厂商仍走 activeProvider）。 */
@@ -136,6 +145,8 @@ export interface LlmLayerOverride {
   timeoutMs?: number;
   /** 三态：true 强制关 / false 强制开(压过全局 env) / 未设沿用全局(env 兜底)。 */
   disableThinking?: boolean;
+  /** 整调用硬期限覆盖（须 ≥ 该层 timeoutMs + 限流退避预算，否则重试无意义）。 */
+  callDeadlineMs?: number;
 }
 
 // ============================
@@ -300,7 +311,7 @@ export class StandaloneLLMRunner implements LLMRunner {
     return runWithRateLimitRetry(generate, {
       maxRetries: RATE_LIMIT_MAX_RETRIES,
       baseMs: RATE_LIMIT_BASE_MS,
-      deadlineMs: RATE_LIMIT_DEADLINE_MS,
+      deadlineMs: this.config.callDeadlineMs ?? RATE_LIMIT_DEADLINE_MS,
     }, signal);
   }
 
@@ -430,7 +441,8 @@ export class StandaloneLLMRunner implements LLMRunner {
           if (!gateLoggedKeys.has(gateKey)) {
             gateLoggedKeys.add(gateKey);
             this.logger?.info?.(
-              `${TAG} [llm-concurrency] 厂商调用并发闸门生效 key=${gateKey} limit=${limit}`,
+              `${TAG} [llm-concurrency] 厂商调用并发闸门生效 key=${gateKey} limit=${limit}` +
+              ` deadline=${this.config.callDeadlineMs ?? RATE_LIMIT_DEADLINE_MS}ms`,
             );
           }
           return withSharedLlmLimit(gateKey, limit, invoke);

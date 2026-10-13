@@ -483,7 +483,7 @@ export function loadGatewayConfig(overrides?: Partial<GatewayConfig>): GatewayCo
       }
       if (!rawVal || typeof rawVal !== "object") continue;
       const layerSrc = rawVal as Record<string, unknown>;
-      const ov: { model?: string; maxTokens?: number; timeoutMs?: number; disableThinking?: boolean } = {};
+      const ov: { model?: string; maxTokens?: number; timeoutMs?: number; disableThinking?: boolean; callDeadlineMs?: number } = {};
       const lModel = str(layerSrc, "model");
       if (lModel) ov.model = lModel;
       const lMaxTokens = num(layerSrc, "maxTokens");
@@ -492,6 +492,8 @@ export function loadGatewayConfig(overrides?: Partial<GatewayConfig>): GatewayCo
       if (lTimeoutMs !== undefined) ov.timeoutMs = lTimeoutMs;
       const lDisableThinking = bool(layerSrc, "disableThinking");
       if (lDisableThinking !== undefined) ov.disableThinking = lDisableThinking;
+      const lCallDeadlineMs = num(layerSrc, "callDeadlineMs");
+      if (lCallDeadlineMs !== undefined) ov.callDeadlineMs = lCallDeadlineMs;
       if (Object.keys(ov).length > 0) {
         parsed[layerKey as "l1" | "l2" | "l3"] = ov;
       }
@@ -556,6 +558,8 @@ export function loadGatewayConfig(overrides?: Partial<GatewayConfig>): GatewayCo
     timeoutMs: envInt("TDAI_LLM_TIMEOUT_MS") ?? entryTimeoutMs ?? num(llmConfig, "timeoutMs") ?? 120_000,
     maxConcurrency:
       envInt("TDAI_LLM_MAX_CONCURRENCY") ?? num(llmConfig, "maxConcurrency"),
+    callDeadlineMs:
+      envInt("TDAI_LLM_CALL_DEADLINE_MS") ?? num(llmConfig, "callDeadlineMs"),
     provider: llmProvider,
     proxy: {
       useMemorySystemUserKey: bool(llmProxyConfig, "useMemorySystemUserKey") ?? true,
@@ -602,6 +606,7 @@ export function loadGatewayConfig(overrides?: Partial<GatewayConfig>): GatewayCo
       ...(llm.layers ? { layers: llm.layers } : {}),
       // 并发闸门透传（2026-10-13）：逐字段重建会丢新字段，漏掉即 runner 闸门静默失效
       ...(llm.maxConcurrency !== undefined ? { maxConcurrency: llm.maxConcurrency } : {}),
+      ...(llm.callDeadlineMs !== undefined ? { callDeadlineMs: llm.callDeadlineMs } : {}),
     };
   }
 
