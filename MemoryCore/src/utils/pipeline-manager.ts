@@ -80,6 +80,7 @@ import type { PipelineSessionState } from "./checkpoint.js";
 import { SessionFilter } from "./session-filter.js";
 import { ManagedTimer } from "./managed-timer.js";
 import { SerialQueue } from "./serial-queue.js";
+import { isRateLimitError } from "./rate-limit-backoff.js";
 import { report } from "../core/report/reporter.js";
 import type { Logger } from "../core/types.js";
 
@@ -736,9 +737,17 @@ export class MemoryPipelineManager {
       const timers = this.getOrCreateTimers(sessionKey);
       timers.l1RetryCount += 1;
       if (timers.l1RetryCount <= this.L1_MAX_RETRIES) {
-        timers.l1Idle.schedule(this.L1_RETRY_DELAY_MS, () => this.onL1IdleTimeout(sessionKey));
+        // 限流感知退避（P1，v2 859d388 移植）：限流/并发拒 → 2min×(rc+1) 线性长退避
+        // （等厂商高峰窗口/幽灵请求消散，快速重试只会继续被拒）；其他错误保持既有
+        // 30s 固定节奏。
+        const errMsg = err instanceof Error ? err.message : String(err);
+        const retryDelayMs = isRateLimitError(errMsg)
+          ? 120_000 * timers.l1RetryCount
+          : this.L1_RETRY_DELAY_MS;
+        timers.l1Idle.schedule(retryDelayMs, () => this.onL1IdleTimeout(sessionKey));
         this.logger?.debug?.(
-          `${TAG} [${sessionKey}] L1 retry scheduled in ${this.L1_RETRY_DELAY_MS / 1000}s ` +
+          `${TAG} [${sessionKey}] L1 retry scheduled in ${retryDelayMs / 1000}s ` +
+          `${isRateLimitError(errMsg) ? "(rate-limit backoff) " : ""}` +
           `(attempt ${timers.l1RetryCount}/${this.L1_MAX_RETRIES})`,
         );
       } else {

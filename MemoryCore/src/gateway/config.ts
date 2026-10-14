@@ -12,6 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
 import { getEnv } from "../utils/env.js";
+import { setDefaultLlmConcurrency } from "../utils/llm-concurrency.js";
 import { parseConfig as parseMemoryConfig } from "../config.js";
 import type { MemoryTdaiConfig } from "../config.js";
 import type { StandaloneLLMConfig } from "../adapters/standalone/llm-runner.js";
@@ -653,6 +654,11 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
     model: env("TDAI_LLM_MODEL") ?? str(llmConfig, "model") ?? "gpt-4o",
     maxTokens: envInt("TDAI_LLM_MAX_TOKENS") ?? num(llmConfig, "maxTokens") ?? 4096,
     timeoutMs: envInt("TDAI_LLM_TIMEOUT_MS") ?? num(llmConfig, "timeoutMs") ?? 120_000,
+    // 并发闸门/整调用硬期限（P1，v2 8c00003/7a93b9d 移植）：yaml llm.maxConcurrency/
+    // llm.callDeadlineMs（env 可覆盖）。装配即设进程级默认，全部 runner 实例共享，
+    // 不逐构造点穿字段（v2 e674e3a 装配链丢字段教训）。
+    maxConcurrency: envInt("TDAI_LLM_MAX_CONCURRENCY") ?? num(llmConfig, "maxConcurrency"),
+    callDeadlineMs: envInt("TDAI_LLM_CALL_DEADLINE_MS") ?? num(llmConfig, "callDeadlineMs"),
     provider: llmProvider,
     proxy: {
       useMemorySystemUserKey: bool(llmProxyConfig, "useMemorySystemUserKey") ?? true,
@@ -665,6 +671,7 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
       return bool(llmConfig, "stream") ?? false;
     })(),
   };
+  setDefaultLlmConcurrency(llm.maxConcurrency ?? 0);
 
   // Memory config (reuse the plugin's parseConfig for full compatibility)
   const memoryRaw = obj(fileConfig, "memory");

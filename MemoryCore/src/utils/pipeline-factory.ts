@@ -615,7 +615,16 @@ export function createL1Runner(opts: {
       }));
       const l1Prompts = await resolveMemoryPrompts(vectorStore, l1PromptTargets);
 
-      for (const group of groups) {
+      // 组间有界并行（P2-④，v2 adf734a/8ffabad 移植）：每组一次独立 LLM 调用，
+      // 串行时切片耗时=各组之和（v2 实测 4 组×慢端点 1-2min ≈ 7.5min/片）；并行后
+      // ≈最慢单组。聚合在并行完成后按 groups 原序（=时间序）归并，
+      // lastSceneNames/游标语义与串行版逐字一致；任一组失败仍整批抛出（#1395 语义：
+      // 游标不动、延后重试）。池界=3：进程级厂商并发已由 llm-concurrency 闸门（P1）
+      // 统一约束，此处池界防单切片独占全部闸门槽位饿死 L2/L3。
+      const L1_GROUP_PARALLELISM = 3;
+      const results: Array<{ group: (typeof groups)[number]; l1Result: Awaited<ReturnType<typeof extractL1Memories>> }> = new Array(groups.length);
+      let nextGroupIdx = 0;
+      const runOne = async (group: (typeof groups)[number], slot: number) => {
         logger.debug?.(
           `${TAG} [l1] Group sessionId=${group.sessionId || "(empty)"}: ${group.messages.length} messages`,
         );
@@ -648,6 +657,7 @@ export function createL1Runner(opts: {
             embeddingTimeoutMs: cfg.embedding.captureTimeoutMs ?? cfg.embedding.timeoutMs,
             dedupTimeoutMs: cfg.extraction.dedupTimeoutMs,
             dedupFailFast: cfg.extraction.dedupFailFast,
+            dedupRecallRerank: cfg.extraction.dedupRecallRerank,
             userIdentityNames: cfg.extraction.userIdentityNames,
             llmRunner,
           },
@@ -655,7 +665,20 @@ export function createL1Runner(opts: {
           instanceId: getInstanceId?.(),
           storage,
         });
+        results[slot] = { group, l1Result };
+      };
+      const workerCount = Math.min(L1_GROUP_PARALLELISM, groups.length);
+      await Promise.all(
+        Array.from({ length: workerCount }, async () => {
+          while (true) {
+            const i = nextGroupIdx++;
+            if (i >= groups.length) return;
+            await runOne(groups[i]!, i);
+          }
+        }),
+      );
 
+      for (const { group, l1Result } of results) {
         totalExtracted += l1Result.extractedCount;
         totalStored += l1Result.storedCount;
         if (l1Result.storedCount > 0) {

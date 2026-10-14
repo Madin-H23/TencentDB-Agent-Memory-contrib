@@ -21,6 +21,8 @@ import path from "node:path";
 import { APICallError, generateText, streamText, tool, stepCountIs, jsonSchema } from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
 import { report } from "../../core/report/reporter.js";
+import { withSharedLlmLimit, getDefaultLlmConcurrency } from "../../utils/llm-concurrency.js";
+import { runWithRateLimitRetry } from "../../utils/rate-limit-backoff.js";
 import type {
   LLMRunner,
   LLMRunParams,
@@ -88,6 +90,19 @@ export interface StandaloneLLMConfig {
   maxTokens?: number;
   /** Request timeout in milliseconds (default: 120_000). */
   timeoutMs?: number;
+  /**
+   * 进程级并发闸门（P1，v2 8c00003 移植）：本 runner 实例发起的厂商调用在
+   * `llm:${baseUrl}` 共享信号量内执行，防多子系统叠加触发厂商并发秒拒。
+   * ≤0/缺省 → 回退进程级默认（gateway 装配时 setDefaultLlmConcurrency 设一次），
+   * 仍 ≤0 则不限流。
+   */
+  maxConcurrency?: number;
+  /**
+   * 整调用硬期限（P1，v2 callDeadlineMs 移植）：限流退避+多次尝试的总预算硬顶，
+   * 上游挂死时也必然在期限内返回（RateLimitDeadlineError）。
+   * 缺省 = timeoutMs×2 + 30s（≥ 两次尝试+一次 20s 退避预算，不盖死各层超时）。
+   */
+  callDeadlineMs?: number;
   /**
    * LLM 访问模式（gateway 层解释；runner 拿到的是已解析后的 baseUrl/apiKey）：
    *   - "openai": 直连通用 OpenAI 兼容服务（默认，向后兼容）
@@ -359,23 +374,38 @@ export class StandaloneLLMRunner implements LLMRunner {
       // 读 totalUsage 而不是单 step 的 usage —— tool-call 多 step 时后者只报最后一步,
       // 会漏掉前序工具调用请求的用量,导致 credit 计费偏低。
       // ai@6.0.164 的字段是 inputTokens/outputTokens/totalTokens。
-      const { text, usage, steps } = this.stream
-        ? await (async () => {
-            const streamResult = streamText(callParams);
-            return {
-              text: ((await streamResult.text) ?? "").trim(),
-              usage: await streamResult.totalUsage,
-              steps: await streamResult.steps,
-            };
-          })()
-        : await (async () => {
-            const genResult = await generateText(callParams);
-            return {
-              text: (genResult.text ?? "").trim(),
-              usage: genResult.totalUsage,
-              steps: genResult.steps,
-            };
-          })();
+      //
+      // 执行包络（P1，v2 8c00003+859d388 移植）：并发闸门在内层（厂商分桶信号量，
+      // 退避等待不占槽位），限流重试在外层（concurrency reached/429 → 指数退避
+      // 重试 1 次），整体受 callDeadline 硬顶——上游挂死也必然在期限内返回。
+      const callOnce = async () => {
+        const execute = async () => {
+          const r = this.stream
+            ? await (async () => {
+                const streamResult = streamText(callParams);
+                return {
+                  text: ((await streamResult.text) ?? "").trim(),
+                  usage: await streamResult.totalUsage,
+                  steps: await streamResult.steps,
+                };
+              })()
+            : await (async () => {
+                const genResult = await generateText(callParams);
+                return {
+                  text: (genResult.text ?? "").trim(),
+                  usage: genResult.totalUsage,
+                  steps: genResult.steps,
+                };
+              })();
+          return r;
+        };
+        const gateLimit = this.config.maxConcurrency ?? getDefaultLlmConcurrency();
+        return withSharedLlmLimit(`llm:${this.config.baseUrl}`, gateLimit, execute);
+      };
+      const { text, usage, steps } = await runWithRateLimitRetry(callOnce, {
+        maxRetries: 1,
+        deadlineMs: this.config.callDeadlineMs ?? timeoutMs * 2 + 30_000,
+      }, combinedSignal);
 
       const totalMs = Date.now() - runStartMs;
 
