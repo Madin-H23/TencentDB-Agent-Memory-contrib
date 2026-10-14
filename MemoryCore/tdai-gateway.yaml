@@ -232,9 +232,11 @@ memory:
     # 查重失败 fail-closed（S1，2026-10-12）：查重失败整批延后重试（游标不动、
     # 数据不丢），不再免检入库——免检是 L1 重复内容的主要新增源（5 天 53 次）。
     dedupFailFast: true
-    # D2 召回轻修开关（2026-10-14）：none=旧行为（当前值，灰度前不改）；
-    # lexical=FTS 超额(10→50)+词汇相似度重排+写入前指纹兜底。灰度时改此行+重启。
-    dedupRecallRerank: none
+    # D2 召回轻修开关（2026-10-14）：none=旧行为；
+    # lexical=FTS 超额(10→50)+词汇相似度重排+写入前指纹兜底。
+    # 2026-10-14 灰度开启（用户拍板）；回退=改 none+重启。观测提示词：
+    # D:\Develop	dai-workspace\openingsutomation-d2-gray-observation-20261014.md
+    dedupRecallRerank: lexical
     # 去重 LLM 判定超时：首版 120s 实测不足（dedup prompt 含候选+新记忆，step-5
     # 判定常 >120s 而抽取 60-90s 能过——48h 观察窗提前产出的数据点），调至 240s
     # （undici headersTimeout 上限 300s 之内）
