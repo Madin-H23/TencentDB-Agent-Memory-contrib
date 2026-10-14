@@ -80,6 +80,12 @@ export interface ExtractionConfig {
    * （step-5 判定常 >120s，180s 会放大 fail-fast 延后频率）。
    */
   dedupTimeoutMs?: number;
+  /**
+   * 用户身份白名单（P2，v2 3eb7c8b 移植）：只有这些姓名允许出现在记忆的
+   * 「用户（X）」括号里；其余（第三方姓名/角色标签/路径数字/状语）入库前
+   * 确定性归一为「用户」。缺省=全部非自指标签归一。
+   */
+  userIdentityNames?: string[];
 }
 
 /** Persona (L2/L3) settings — controls scene extraction (L2) and user profile generation (L3). */
@@ -673,6 +679,7 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       promptMode: normalizePromptMode(str(extractionGroup, "promptMode"), globalPromptMode),
       dedupFailFast: bool(extractionGroup, "dedupFailFast") ?? false,
       dedupTimeoutMs: num(extractionGroup, "dedupTimeoutMs"),
+      userIdentityNames: strArray(extractionGroup, "userIdentityNames"),
     },
     persona: {
       triggerEveryN: num(personaGroup, "triggerEveryN") ?? 50,

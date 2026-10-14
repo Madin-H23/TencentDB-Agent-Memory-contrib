@@ -648,6 +648,7 @@ export function createL1Runner(opts: {
             embeddingTimeoutMs: cfg.embedding.captureTimeoutMs ?? cfg.embedding.timeoutMs,
             dedupTimeoutMs: cfg.extraction.dedupTimeoutMs,
             dedupFailFast: cfg.extraction.dedupFailFast,
+            userIdentityNames: cfg.extraction.userIdentityNames,
             llmRunner,
           },
           logger,
@@ -679,8 +680,13 @@ export function createL1Runner(opts: {
       // always positive, TCVDB-safe. Boundary alignment guarantees we will not
       // skip same-ms siblings on the next round.
       await checkpoint.markL1ExtractionComplete(sessionKey, totalStored, maxRecordedAtMs || undefined, lastSceneName, lastSceneNames);
+      // 归属日志（P2，v2 c00899f/6415c8e 移植）：完成行带 model 与全组 sid，
+      // 面板/日志据此定位调用方与切片归属。model 优先级：extraction.model 显式
+      // 设置 > llm.model（单厂商直连配置）> unknown。
+      const l1Model = cfg.extraction.model ?? cfg.llm?.model;
       logger.info(
-        `${TAG} [l1] L1 complete: extracted=${totalExtracted}, stored=${totalStored} (${groups.length} group(s))`,
+        `${TAG} [l1] L1 complete: extracted=${totalExtracted}, stored=${totalStored} (${groups.length} group(s)), ` +
+        `model=${l1Model ?? "unknown"}, sids=[${groups.map((g) => g.sessionId || "(empty)").join(",")}]`,
       );
 
       return { processedCount: totalMessages, storedCount: totalStored, hasMore, hasFullBacklog, profileScopes: Array.from(profileScopes) };

@@ -657,6 +657,9 @@ export class VectorStore implements IMemoryStore {
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l0_user_agent_session ON l0_conversations(user_id, agent_id, session_id)");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l0_user_recorded  ON l0_conversations(user_id, recorded_at)");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l0_agent_recorded ON l0_conversations(agent_id, recorded_at)");
+    // 驱动索引（P2，v2 e601281 移植）：queryL0Paginated 的 user+agent 等值过滤 +
+    // timestamp 排序分页；无此索引时只能 idx_l0_timestamp 全扫描后回表过滤。
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_l0_user_agent_ts ON l0_conversations(user_id, agent_id, timestamp)");
 
     // L0 vector virtual table (cosine distance, same dimensions as L1) — deferred when dimensions=0
     if (this.dimensions > 0) {
