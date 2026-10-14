@@ -74,8 +74,22 @@ export async function batchDedup(params: {
   filter?: IsolationFilter;
   /** langfuse 上报身份四元组（team/user/agent/session），透传给 llmRunner。 */
   traceContext?: TraceContext;
+  /**
+   * 查重 LLM 判定超时（毫秒），缺省 180000。
+   * 上限：Node 内置 fetch(undici) 的 headersTimeout 默认 300s，非流式补全只在
+   * 生成完后发头，配到 600s 会被静默截到 ~300s（见上游 issue #1403 补充说明）。
+   */
+  timeoutMs?: number;
+  /**
+   * 查重失败 fail-closed（P0-Fix1，v2 S1 移植）：true=LLM 判定失败整批上抛
+   * （延后重试，游标不动、数据不丢）；false/缺省=既有降级「免检全 store」。
+   * 只覆盖「调用失败」；解析降级（LLM 返回乱文本）仍走 storeAll，由
+   * l1-dedup-fallback-silent WARN 锚点观测（v2 2026-10-12 拍板语义）。
+   */
+  dedupFailFast?: boolean;
 }): Promise<DedupDecision[]> {
-  const { memories, config, logger, model, promptMode = "chat", vectorStore, embeddingService, llmRunner, filter, traceContext } = params;
+  const { memories, config, logger, model, promptMode = "chat", vectorStore, embeddingService, llmRunner, filter, traceContext, dedupFailFast } = params;
+  const timeoutMs = params.timeoutMs ?? 180_000;
   const topK = params.conflictRecallTopK ?? 5;
 
   if (memories.length === 0) {
@@ -131,7 +145,7 @@ export async function batchDedup(params: {
   }
 
   // Phase 2: Batch LLM judgment
-  return runLlmJudgment(matches, memories, config, logger, model, promptMode, llmRunner, traceContext);
+  return runLlmJudgment(matches, memories, config, logger, model, promptMode, llmRunner, traceContext, timeoutMs, dedupFailFast);
 }
 
 /**
@@ -146,7 +160,12 @@ async function runLlmJudgment(
   promptMode: MemoryPromptMode,
   llmRunner?: LLMRunner,
   traceContext?: TraceContext,
+  /** 查重判定超时；未显式配置时仍是 180_000。 */
+  timeoutMs?: number,
+  /** fail-closed 开关（P0-Fix1）：true=判定失败上抛给调用方走延后；false=既有降级全 store */
+  dedupFailFast?: boolean,
 ): Promise<DedupDecision[]> {
+  const llmTimeoutMs = timeoutMs ?? 180_000;
   logger?.debug?.(`${TAG} Running batch conflict detection for ${memories.length} memories (promptMode=${promptMode})`);
 
   try {
@@ -164,7 +183,7 @@ async function runLlmJudgment(
         prompt: userPrompt,
         systemPrompt,
         taskId: "l1-conflict-detection",
-        timeoutMs: 180_000,
+        timeoutMs: llmTimeoutMs,
         ...traceParams,
       });
     } else {
@@ -180,7 +199,7 @@ async function runLlmJudgment(
         prompt: userPrompt,
         systemPrompt,
         taskId: "l1-conflict-detection",
-        timeoutMs: 180_000,
+        timeoutMs: llmTimeoutMs,
         ...traceParams,
       });
     }
@@ -188,8 +207,16 @@ async function runLlmJudgment(
     const decisions = parseBatchResult(result, memories, logger);
     return decisions;
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (dedupFailFast) {
+      // fail-closed（P0-Fix1）：查重失败≠免检入库——整批上抛走延后重试（游标不动、
+      // 数据不丢）。注意：不得打 "defaulting all to store" 字样（那是
+      // fail-closed 关闭时的可观测锚点，出现即代表开关未生效）。
+      logger?.warn?.(`${TAG} Batch conflict detection failed (fail-fast, batch deferred): ${msg}`);
+      throw err instanceof Error ? err : new Error(msg);
+    }
     logger?.warn?.(
-      `${TAG} Batch conflict detection failed, defaulting all to store: ${err instanceof Error ? err.message : String(err)}`,
+      `${TAG} Batch conflict detection failed, defaulting all to store: ${msg}`,
     );
     return memories.map((m) => ({
       record_id: m.record_id,
@@ -348,7 +375,7 @@ function parseBatchResult(
     const arrayMatch = cleaned.match(/\[[\s\S]*\]/);
     if (!arrayMatch) {
       logger?.warn?.(`${TAG} No JSON array found in conflict detection response`);
-      return fallbackStoreAll(memories);
+      return fallbackStoreAll(memories, "no_json_array", logger);
     }
 
     // Sanitize control characters inside JSON string literals that LLM may produce
@@ -357,7 +384,7 @@ function parseBatchResult(
 
     if (!Array.isArray(parsed)) {
       logger?.warn?.(`${TAG} Conflict detection response is not an array`);
-      return fallbackStoreAll(memories);
+      return fallbackStoreAll(memories, "not_array", logger);
     }
 
     // Build decisions from LLM output
@@ -407,14 +434,26 @@ function parseBatchResult(
     return decisions;
   } catch (err) {
     logger?.warn?.(`${TAG} Failed to parse conflict detection result: ${err instanceof Error ? err.message : String(err)}`);
-    return fallbackStoreAll(memories);
+    return fallbackStoreAll(memories, "parse_error", logger);
   }
 }
 
 /**
  * Fallback: store all memories when parsing fails.
+ *
+ * reason 三值对应 parseBatchResult 的三条路径。WARN 锚点（P0-Fix1 随迁，
+ * v2 f0ad3cc 语义）：「全 store」这个动作必须有独立可 grep 的日志行——
+ * parse 失败静默免检入库是 L1 重复的历史新增源，切回 think 类厂商时重复
+ * 暴涨会被误记为其它原因。此锚点即 kill-switch：出现即该轮查重空转。
  */
-function fallbackStoreAll(memories: Array<ExtractedMemory & { record_id: string }>): DedupDecision[] {
+function fallbackStoreAll(
+  memories: Array<ExtractedMemory & { record_id: string }>,
+  reason: "no_json_array" | "not_array" | "parse_error",
+  logger?: Logger,
+): DedupDecision[] {
+  logger?.warn?.(
+    `${TAG} l1-dedup-fallback-silent reason=${reason} — ${memories.length} memory(ies) stored without dedup judgment`,
+  );
   return memories.map((m) => ({
     record_id: m.record_id,
     action: "store" as const,

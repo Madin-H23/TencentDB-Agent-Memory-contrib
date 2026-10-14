@@ -67,6 +67,19 @@ export interface ExtractionConfig {
   model?: string;
   /** Prompt family for L1 extraction (default: chat). */
   promptMode: MemoryPromptMode;
+  /**
+   * 查重失败 fail-closed（P0-Fix1，v2 S1 移植，上游 #1640/#1641 同族）：
+   * true=查重 LLM 判定失败整批上抛（延后重试，游标不动、数据不丢）；
+   * false/缺省=既有降级「免检全 store」（重复入库风险）。opt-in，默认关。
+   */
+  dedupFailFast: boolean;
+  /**
+   * 查重 LLM 判定超时（毫秒）。缺省=180000（l1-dedup 层默认）。
+   * 上限注意：Node 内置 fetch(undici) headersTimeout 默认 300s，非流式补全
+   * 只在生成完后发头，配到 600s 会被静默截到 ~300s。v2 在役值 240000
+   * （step-5 判定常 >120s，180s 会放大 fail-fast 延后频率）。
+   */
+  dedupTimeoutMs?: number;
 }
 
 /** Persona (L2/L3) settings — controls scene extraction (L2) and user profile generation (L3). */
@@ -658,6 +671,8 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       maxMemoriesPerSession: num(extractionGroup, "maxMemoriesPerSession") ?? 20,
       model: optStr(extractionGroup, "model"),
       promptMode: normalizePromptMode(str(extractionGroup, "promptMode"), globalPromptMode),
+      dedupFailFast: bool(extractionGroup, "dedupFailFast") ?? false,
+      dedupTimeoutMs: num(extractionGroup, "dedupTimeoutMs"),
     },
     persona: {
       triggerEveryN: num(personaGroup, "triggerEveryN") ?? 50,

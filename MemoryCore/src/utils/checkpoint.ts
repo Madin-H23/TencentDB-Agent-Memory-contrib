@@ -49,6 +49,14 @@ export interface RunnerSessionState {
   last_l1_cursor: number;
   /** Last scene name from the most recent L1 extraction (for cross-batch continuity) */
   last_scene_name: string;
+  /**
+   * per-sessionId 场景映射（P0-Fix3，v2 ed42826 多线程治理移植）。
+   * 同一 sessionKey 并发多个会话线程时，共享单键 last_scene_name 会被
+   * 「本轮恰好后蒸馏的线程」覆盖，其他线程下一轮的【上一个情境】就串成
+   * 别人的场景（v2 实测：乙线拿到甲线场景）。读链优先本 map，缺失时回退
+   * last_scene_name（旧 checkpoint 无此字段=兼容；新 sid 首批一次性软污染，有界）。
+   */
+  last_scene_names?: Record<string, string>;
 }
 
 /**
@@ -643,6 +651,8 @@ export class CheckpointManager {
     memoriesExtracted: number,
     cursorRecordedAtMs?: number,
     lastSceneName?: string,
+    /** per-sessionId 场景映射（P0-Fix3）：各线程各自延续自己的连续性，合并落盘。 */
+    lastSceneNames?: Record<string, string>,
   ): Promise<void> {
     let regressed = false;
     await this.mutate((cp) => {
@@ -663,6 +673,9 @@ export class CheckpointManager {
       if (lastSceneName !== undefined) {
         state.last_scene_name = lastSceneName;
       }
+      if (lastSceneNames && Object.keys(lastSceneNames).length > 0) {
+        state.last_scene_names = { ...(state.last_scene_names ?? {}), ...lastSceneNames };
+      }
       cp.total_memories_extracted += memoriesExtracted;
       cp.memories_since_last_persona += memoriesExtracted;
     });
@@ -676,7 +689,8 @@ export class CheckpointManager {
     this.logger.info(
       `[checkpoint] markL1ExtractionComplete session=${sessionKey}: ` +
       `extracted=${memoriesExtracted}, cursor=${cursorRecordedAtMs ?? "(unchanged)"}, ` +
-      `lastScene="${lastSceneName ?? "(unchanged)"}"`,
+      `lastScene="${lastSceneName ?? "(unchanged)"}"` +
+      `${lastSceneNames && Object.keys(lastSceneNames).length > 0 ? `, perSid={${Object.keys(lastSceneNames).join(",")}}` : ""}`,
     );
   }
 

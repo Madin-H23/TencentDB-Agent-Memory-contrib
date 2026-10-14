@@ -598,6 +598,14 @@ export function createL1Runner(opts: {
 
       let totalExtracted = 0;
       let totalStored = 0;
+      // 多线程 continuity（P0-Fix3，v2 ed42826 移植）：per-sid 场景映射。同
+      // sessionKey 并发多个会话线程时，共享单键 last_scene_name 会被「本轮恰好
+      // 后蒸馏的线程」覆盖，其他线程下一轮的【上一个情境】就串成别人的场景
+      // （v2 实测：乙线拿到甲线场景）。读链：checkpoint 持久化的 per-sid map
+      // （跨轮延续）→ 旧单键回退（旧 checkpoint 兼容 + 新 sid 首批一次性软污染，
+      // 有界）。组按 sid 唯一，本轮内不会重复出现，写侧用 lastSceneNames 收集
+      // 本轮产出、结束时随 markL1ExtractionComplete 一次性落盘。
+      const lastSceneNames: Record<string, string> = {};
       let lastSceneName: string | undefined;
       const profileScopes = new Set<string>();
       const l1PromptTargets = groups.map((group) => ({
@@ -632,11 +640,14 @@ export function createL1Runner(opts: {
               agentId: group.agentId,
               layer: "l1",
             })),
-            previousSceneName: lastSceneName ?? (runnerState.last_scene_name || undefined),
+            previousSceneName:
+              runnerState.last_scene_names?.[group.sessionId] ?? (runnerState.last_scene_name || undefined),
             vectorStore,
             embeddingService,
             conflictRecallTopK: cfg.embedding.conflictRecallTopK,
             embeddingTimeoutMs: cfg.embedding.captureTimeoutMs ?? cfg.embedding.timeoutMs,
+            dedupTimeoutMs: cfg.extraction.dedupTimeoutMs,
+            dedupFailFast: cfg.extraction.dedupFailFast,
             llmRunner,
           },
           logger,
@@ -659,14 +670,15 @@ export function createL1Runner(opts: {
           }));
         }
         if (l1Result.lastSceneName) {
-          lastSceneName = l1Result.lastSceneName;
+          lastSceneNames[group.sessionId] = l1Result.lastSceneName;
+          lastSceneName = l1Result.lastSceneName; // 兼容单键：保持「最后组的场景」旧语义
         }
       }
 
       // Use maxRecordedAtMs (write time) of the **processed** slice as cursor —
       // always positive, TCVDB-safe. Boundary alignment guarantees we will not
       // skip same-ms siblings on the next round.
-      await checkpoint.markL1ExtractionComplete(sessionKey, totalStored, maxRecordedAtMs || undefined, lastSceneName);
+      await checkpoint.markL1ExtractionComplete(sessionKey, totalStored, maxRecordedAtMs || undefined, lastSceneName, lastSceneNames);
       logger.info(
         `${TAG} [l1] L1 complete: extracted=${totalExtracted}, stored=${totalStored} (${groups.length} group(s))`,
       );

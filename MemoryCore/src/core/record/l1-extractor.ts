@@ -76,6 +76,23 @@ export interface L1ExtractionResult {
   lastSceneName?: string;
 }
 
+/**
+ * L1 抽取失败异常（P0-Fix2，v2 c32bc6b / 上游 #1395 语义移植）：
+ * 抽取/查重失败必须整批延后（调用方不推进游标、下轮重试），而不是被当成
+ * 「合法空产出」跳过——失败轮内容一旦被游标越过即永久丢失。
+ * reason：llm_error=LLM 调用失败；parse_error=结构垃圾响应（无 JSON 数组/
+ * 非数组/JSON.parse 抛错）；dedup_failed=查重链失败（P0-Fix1 fail-closed）。
+ */
+export class L1ExtractionFailure extends Error {
+  readonly reason: "llm_error" | "parse_error" | "dedup_failed";
+
+  constructor(reason: "llm_error" | "parse_error" | "dedup_failed", message: string) {
+    super(message);
+    this.name = "L1ExtractionFailure";
+    this.reason = reason;
+  }
+}
+
 // ============================
 // Core function
 // ============================
@@ -130,6 +147,10 @@ export async function extractL1Memories(params: {
      * a CleanContextRunner (decouples from OpenClaw runtime).
      */
     llmRunner?: LLMRunner;
+    /** 查重 LLM 判定超时（毫秒），透传 batchDedup（缺省 180000）。 */
+    dedupTimeoutMs?: number;
+    /** 查重失败 fail-closed（P0-Fix1）：true=查重失败整批延后而非免检入库。 */
+    dedupFailFast?: boolean;
   };
   logger?: Logger;
   /** Plugin instance ID for metric reporting (optional — metrics skipped if absent) */
@@ -209,11 +230,19 @@ export async function extractL1Memories(params: {
     earlyEmptyReason = outcome.emptyReason;
     logger?.debug?.(`${TAG} LLM detected ${scenes.length} scene(s)`);
   } catch (err) {
-    logger?.error(`${TAG} LLM extraction failed: ${err instanceof Error ? err.message : String(err)}`);
+    // P0-Fix2（#1395 语义）：失败必须上抛整批延后（调用方不推进游标），
+    // 不得返回「空产出」——否则组循环不检查、游标照推，失败轮内容被永久跳过。
+    // JSON.parse 语法错误（SyntaxError）从 parseExtractionResult 一路抛到这，
+    // 归类 parse_error；其余（网络/超时/401 等）归类 llm_error。
+    const msg = err instanceof Error ? err.message : String(err);
+    const reason = err instanceof SyntaxError ? "parse_error" : "llm_error";
+    logger?.error(`${TAG} LLM extraction failed: ${msg}`);
     logger?.warn?.(
-      `${TAG} l1-empty reason=llm_error sessionKey=${sessionKey} msg=${err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200)}`,
+      `${TAG} l1-deferred reason=${reason} sessionKey=${sessionKey} — batch deferred, checkpoint cursor unchanged`,
     );
-    return { success: false, extractedCount: 0, storedCount: 0, records: [], sceneNames: [] };
+    throw err instanceof L1ExtractionFailure
+      ? err
+      : new L1ExtractionFailure(reason, `L1 extraction failed: ${msg.slice(0, 500)}`);
   }
 
   // Flatten all memories across scenes
@@ -256,6 +285,21 @@ export async function extractL1Memories(params: {
     logger?.warn?.(
       `${TAG} l1-empty reason=${finalReason} sessionKey=${sessionKey} scenes=${scenes.length} inputMsgs=${messages.length}`,
     );
+
+    // P0-Fix2（#1395 语义）：结构垃圾响应（无 JSON 数组 / 非数组 / JSON.parse
+    // 抛错=parse_fail）不是「合法空产出」——当空产出返回会让组循环推进游标，
+    // 这轮内容即被永久跳过。必须上抛 parse_error 整批延后。
+    // empty_scenes / normalized_all_dropped 是 LLM 的合法空判定，保持
+    // success:true 空产出（不误伤）。
+    if (finalReason === "no_json" || finalReason === "not_array" || finalReason === "parse_fail") {
+      logger?.warn?.(
+        `${TAG} l1-deferred reason=parse_error sessionKey=${sessionKey} — batch deferred, checkpoint cursor unchanged`,
+      );
+      throw new L1ExtractionFailure(
+        "parse_error",
+        `L1 extraction response was structural garbage (${finalReason}), batch deferred`,
+      );
+    }
 
     // ── 评测指标：L1 提取率（提取为空的情况） ──
     if (metricInstanceId) {
@@ -311,6 +355,8 @@ export async function extractL1Memories(params: {
       const decisions = await batchDedup({
         memories: memoriesWithIds,
         config,
+        timeoutMs: options.dedupTimeoutMs,
+        dedupFailFast: options.dedupFailFast,
         logger,
         model: options.model,
         promptMode: options.promptMode,
@@ -359,8 +405,15 @@ export async function extractL1Memories(params: {
       });
 
     } catch (err) {
-      logger?.warn?.(`${TAG} Batch dedup failed, storing all as new: ${err instanceof Error ? err.message : String(err)}`);
-      storedRecords = await storeAllDirectly(memoriesWithIds, baseDir, sessionKey, sessionId, taskId, teamId, userId, agentId, logger, options.vectorStore, options.embeddingService, storage);
+      // fail-closed（P0-Fix1，v2 S1 语义）：查重失败≠免检入库——免检入库是
+      // L1 重复内容的主要新增源。整批延后：游标不动、数据不丢，dedup 恢复后
+      // 重试时已入库副本会进候选召回被 merge/skip。message 保留原始错误文本
+      // （上游 #1640：5 天 53 次整批免检入库的实测教训）。
+      const msg = err instanceof Error ? err.message : String(err);
+      logger?.warn?.(
+        `${TAG} l1-deferred reason=dedup_failed sessionKey=${sessionKey} — batch deferred, checkpoint cursor unchanged (${msg})`,
+      );
+      throw new L1ExtractionFailure("dedup_failed", `L1 dedup failed: ${msg}`);
     }
   } else {
     storedRecords = await storeAllDirectly(memoriesWithIds, baseDir, sessionKey, sessionId, taskId, teamId, userId, agentId, logger, options.vectorStore, options.embeddingService, storage);
