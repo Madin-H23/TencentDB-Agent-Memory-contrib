@@ -14,6 +14,7 @@
 import type { MemoryPromptMode } from "../../config.js";
 import type { ExtractedMemory, MemoryRecord, DedupDecision, MemoryType } from "./l1-writer.js";
 import { formatBatchConflictPrompt, getConflictDetectionSystemPrompt, type DedupPromptVersion } from "../prompts/l1-dedup.js";
+import { rerankCandidatesBySimilarity, type DedupRecallRerank } from "./l1-recall-rerank.js";
 import type { CandidateMatch } from "../prompts/l1-dedup.js";
 import { CleanContextRunner } from "../../utils/clean-context-runner.js";
 import { sanitizeJsonForParse } from "../../utils/sanitize.js";
@@ -78,10 +79,14 @@ export async function batchDedup(params: {
   /** 查重失败 fail-closed（2026-10-12 S1）：true=LLM 判定失败整批上抛（延后重试，
    *  游标不动、数据不丢）；false/缺省=既有降级「免检全 store」（重复入库风险）。 */
   dedupFailFast?: boolean;
+  /** 查重判定提示词版本（D1：v2 含三条款，默认 v1；无效值在 prompt 函数 fail-fast） */
+  dedupPromptVersion?: DedupPromptVersion;
+  /** D2 召回轻修开关：none=旧行为（默认）；lexical=FTS 超额+词汇相似度重排 */
+  dedupRecallRerank?: DedupRecallRerank;
   /** langfuse 上报身份四元组（team/user/agent/session），透传给 llmRunner。 */
   traceContext?: TraceContext;
 }): Promise<DedupDecision[]> {
-  const { memories, config, logger, model, promptMode = "chat", vectorStore, embeddingService, llmRunner, filter, traceContext, dedupFailFast, dedupPromptVersion = "v1" } = params;
+  const { memories, config, logger, model, promptMode = "chat", vectorStore, embeddingService, llmRunner, filter, traceContext, dedupFailFast, dedupPromptVersion = "v1", dedupRecallRerank = "none" } = params;
   // 保持与改动前一致：未显式配置时仍是 180_000。
   // 注意上限：Node 内置 fetch(undici) 的 headersTimeout 默认 300s，非流式补全只在生成完后发头，
   // 配到 600s 会被静默截到 ~300s（见 issue #1403 的第三方补充说明）。
@@ -308,6 +313,9 @@ async function findCandidatesByFts(
   vectorStore: IMemoryStore,
   _logger?: Logger,
   filter?: IsolationFilter,
+  /** D2 召回轻修开关：none=旧行为（slice topK）；lexical=超额召回+词汇相似度重排 */
+  rerank: DedupRecallRerank = "none",
+  topK = 5,
 ): Promise<CandidateMatch[]> {
   const newRecordIds = new Set(memories.map((m) => m.record_id));
   const matches: CandidateMatch[] = [];
@@ -315,13 +323,16 @@ async function findCandidatesByFts(
   for (const mem of memories) {
     const ftsQuery = buildFtsQuery(mem.content);
     if (ftsQuery) {
+      // D2（2026-10-14）：lexical 模式超额召回（limit 10→50；sqlite 内部本已超额
+      // 50 取，改 limit 近乎零成本）给重排供料，把「6-10 名外/被 IDF 序挤出」的真
+      // 重复捞回 top-K；none 模式逐字保持旧行为。重排在 store 层截断，不增大 prompt。
+      const recallLimit = rerank === "lexical" ? 50 : 10;
       const ftsResults = filter
-        ? await vectorStore.searchL1Fts(ftsQuery, 10, filter)
-        : await vectorStore.searchL1Fts(ftsQuery, 10);
+        ? await vectorStore.searchL1Fts(ftsQuery, recallLimit, filter)
+        : await vectorStore.searchL1Fts(ftsQuery, recallLimit);
       // Filter out records from the current batch
-      const candidates: MemoryRecord[] = ftsResults
+      const mapped: MemoryRecord[] = ftsResults
         .filter((r) => !newRecordIds.has(r.record_id))
-        .slice(0, 5)
         .map((r) => ({
           id: r.record_id,
           content: r.content,
@@ -336,6 +347,10 @@ async function findCandidatesByFts(
           sessionKey: r.session_key,
           sessionId: r.session_id,
         }));
+      const candidates: MemoryRecord[] =
+        rerank === "lexical"
+          ? rerankCandidatesBySimilarity(mem.content, mapped, topK)
+          : mapped.slice(0, topK);
       matches.push({ newMemory: mem, candidates });
     } else {
       matches.push({ newMemory: mem, candidates: [] });

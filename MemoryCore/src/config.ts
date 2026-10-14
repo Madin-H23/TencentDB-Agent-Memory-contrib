@@ -55,6 +55,8 @@ export interface ExtractionConfig {
   dedupFailFast?: boolean;
   /** 查重判定提示词版本（D1：v2 含三条款；缺省 v1；非法值 fail-fast） */
   dedupPromptVersion?: "v1" | "v2";
+  /** D2 召回轻修开关：none=旧行为（缺省）；lexical=FTS 超额+词汇重排+写入前指纹兜底 */
+  dedupRecallRerank?: "none" | "lexical";
   /** LLM model for extraction, format: "provider/model" (falls back to OpenClaw default model when omitted) */
   model?: string;
   /** Prompt family for L1 extraction (default: chat). */
@@ -609,6 +611,12 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
         if (raw === undefined) return "v1";
         if (raw === "v1" || raw === "v2") return raw;
         throw new Error(`[config] extraction.dedupPromptVersion="${raw}" 非法（合法: v1|v2）`);
+      })(),
+      dedupRecallRerank: (() => {
+        const raw = str(extractionGroup, "dedupRecallRerank");
+        if (raw === undefined) return "none";
+        if (raw === "none" || raw === "lexical") return raw;
+        throw new Error(`[config] extraction.dedupRecallRerank="${raw}" 非法（合法: none|lexical）`);
       })(),
       model: optStr(extractionGroup, "model"),
       promptMode: normalizePromptMode(str(extractionGroup, "promptMode"), globalPromptMode),

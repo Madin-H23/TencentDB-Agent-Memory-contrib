@@ -3201,6 +3201,33 @@ export class VectorStore implements IMemoryStore {
   }
 
   /**
+   * D2 写入前指纹兜底（2026-10-14）：按内容前缀 LIKE 查已有记录。
+   *
+   * 前缀是**归一化**文本的前 N 字符（调用方传入）；对原始 content 做前缀匹配
+   * （原始内容通常以同类字符开头，标点差异在中段，不影响前缀命中），再由调用方
+   * 做完整归一化确认。LIKE 通配符（% _ \）在此转义。全表扫描 ~2ms（N≈1800），
+   * 写入路径每条一次，可接受。任何错误返回空数组（不阻塞写入）。
+   */
+  findByContentPrefix(prefix: string, limit = 5): Array<{ record_id: string; content: string; type: string; priority: number }> {
+    if (this.degraded || !prefix) return [];
+    try {
+      const escaped = prefix.replace(/([%_\\])/g, "\\$1");
+      const rows = this.db
+        .prepare(
+          `SELECT record_id, content_original AS content, type, priority
+           FROM l1_records WHERE content LIKE ? ESCAPE '\\' LIMIT ?`,
+        )
+        .all(`${escaped}%`, limit) as Array<{ record_id: string; content: string; type: string; priority: number }>;
+      return rows;
+    } catch (err) {
+      this.logger?.warn(
+        `${TAG} [L1-content-prefix] FAILED (non-fatal, returning empty): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return [];
+    }
+  }
+
+  /**
    * FTS5 keyword search on L0 conversation messages.
    * Returns top-`limit` results sorted by BM25 relevance (highest first).
    *
