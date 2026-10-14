@@ -437,3 +437,49 @@ memory:
     });
   });
 });
+
+describe("loadGatewayConfig memory.extraction.dedupRecallRerank（D2 召回轻修开关）", () => {
+  function withFixture(yaml: string, fn: () => void): void {
+    const p = path.join(tmpDir, "fixture-rerank.yaml");
+    fs.writeFileSync(p, yaml, "utf-8");
+    const prev = process.env.TDAI_GATEWAY_CONFIG;
+    process.env.TDAI_GATEWAY_CONFIG = p;
+    try {
+      fn();
+    } finally {
+      if (prev === undefined) delete process.env.TDAI_GATEWAY_CONFIG;
+      else process.env.TDAI_GATEWAY_CONFIG = prev;
+    }
+  }
+
+  const BASE = `
+llm:
+  activeProvider: "vendor-a"
+  providers:
+    - name: vendor-a
+      baseUrl: "https://vendor-a.example/v1"
+      apiKeyEnv: "TDAI_TEST_KEY_A"
+      model: "model-a1"
+memory:
+  extraction:
+    enableDedup: true
+`;
+
+  it("缺省 → none（生产默认行为不变，灰度才开 lexical）", () => {
+    withFixture(BASE, () => {
+      expect(loadGatewayConfig().memory.extraction.dedupRecallRerank).toBe("none");
+    });
+  });
+
+  it("yaml lexical → cfg.memory.extraction.dedupRecallRerank=lexical（出口钉）", () => {
+    withFixture(BASE + "    dedupRecallRerank: lexical\n", () => {
+      expect(loadGatewayConfig().memory.extraction.dedupRecallRerank).toBe("lexical");
+    });
+  });
+
+  it("非法值 fail-fast（拼写错误静默失效比报错更危险）", () => {
+    withFixture(BASE + "    dedupRecallRerank: hybrid\n", () => {
+      expect(() => loadGatewayConfig()).toThrow(/dedupRecallRerank/);
+    });
+  });
+});

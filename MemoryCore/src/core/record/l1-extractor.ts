@@ -16,6 +16,7 @@ import type { ConversationMessage } from "../conversation/l0-recorder.js";
 import { formatExtractionPrompt, getExtractMemoriesSystemPrompt, type MemoryPromptMode } from "../prompts/l1-extraction.js";
 import { batchDedup } from "./l1-dedup.js";
 import type { DedupPromptVersion } from "../prompts/l1-dedup.js";
+import { normalizeForFingerprint, type DedupRecallRerank } from "./l1-recall-rerank.js";
 import { writeMemory, generateMemoryId } from "./l1-writer.js";
 import type { ExtractedMemory, MemoryRecord, MemoryType, DedupDecision } from "./l1-writer.js";
 import { CleanContextRunner } from "../../utils/clean-context-runner.js";
@@ -166,6 +167,8 @@ export async function extractL1Memories(params: {
     dedupFailFast?: boolean;
     /** 查重判定提示词版本（D1：v2 含三条款，默认 v1） */
     dedupPromptVersion?: DedupPromptVersion;
+    /** D2 召回轻修开关（默认 none）：lexical=FTS 超额+词汇重排 + 写入前指纹兜底 */
+    dedupRecallRerank?: DedupRecallRerank;
     /**
      * 用户身份白名单：只有这些姓名允许出现在「用户（X）」的括号里。
      * 其余（第三方姓名/角色标签/路径数字/时间状语…）入库前一律归一为「用户」。
@@ -495,6 +498,7 @@ export async function extractL1Memories(params: {
         timeoutMs: options.dedupTimeoutMs,
         dedupFailFast: options.dedupFailFast,
         dedupPromptVersion: options.dedupPromptVersion,
+        dedupRecallRerank: options.dedupRecallRerank,
         logger,
         model: options.model,
         promptMode: options.promptMode,
@@ -544,6 +548,7 @@ export async function extractL1Memories(params: {
         vectorStore: options.vectorStore,
         embeddingService: options.embeddingService,
         storage,
+        dedupRecallRerank: options.dedupRecallRerank,
       });
 
     } catch (err) {
@@ -816,8 +821,10 @@ async function applyDecisions(params: {
   vectorStore?: IMemoryStore;
   embeddingService?: EmbeddingService;
   storage?: StorageAdapter;
+  /** D2 召回轻修开关：lexical 时对 store 决策做写入前指纹存在性检查 */
+  dedupRecallRerank?: DedupRecallRerank;
 }): Promise<MemoryRecord[]> {
-  const { memoriesWithIds, decisions, baseDir, sessionKey, sessionId, taskId, teamId, userId, agentId, logger, vectorStore, embeddingService, storage } = params;
+  const { memoriesWithIds, decisions, baseDir, sessionKey, sessionId, taskId, teamId, userId, agentId, logger, vectorStore, embeddingService, storage, dedupRecallRerank } = params;
   const storedRecords: MemoryRecord[] = [];
 
   // Build a map from record_id → decision
@@ -832,6 +839,28 @@ async function applyDecisions(params: {
       action: "store" as const,
       target_ids: [],
     };
+
+    // D2 写入前指纹兜底（2026-10-14）：store 决策落地前按归一化内容前缀直查活库，
+    // 命中同文 → 转 skip 不写入。治组间并行竞态的双入库（B 组判定时 A 组产出还没
+    // 进候选池）；check-then-write 非原子，但把双入库窗口从整个判定周期缩到两次写
+    // 之间，剩余竞态由月度审计兜底。store 无此方法的实现自动跳过（行为不变）。
+    if (
+      dedupRecallRerank === "lexical" &&
+      decision.action === "store" &&
+      typeof vectorStore?.findByContentPrefix === "function"
+    ) {
+      const norm = normalizeForFingerprint(memoryWithId.content);
+      if (norm) {
+        const hits = await vectorStore.findByContentPrefix(norm.slice(0, 16), 5);
+        const twin = hits.find((h) => normalizeForFingerprint(h.content) === norm);
+        if (twin) {
+          logger?.warn?.(
+            `${TAG} l1-dedup-fingerprint-skip record=${memoryWithId.record_id} twin=${twin.record_id} — 写入前指纹命中，转 skip（组间竞态双入库兜底）`,
+          );
+          continue;
+        }
+      }
+    }
 
     try {
       const record = await writeMemory({

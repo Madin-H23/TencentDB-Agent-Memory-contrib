@@ -572,6 +572,13 @@ export interface IMemoryStore {
 
   searchL1Vector(queryEmbedding: Float32Array, topK?: number, queryText?: string, filter?: IsolationFilter): MaybePromise<L1SearchResult[]>;
   searchL1Fts(ftsQuery: string, limit?: number, filter?: IsolationFilter): MaybePromise<L1FtsResult[]>;
+  /**
+   * D2 写入前指纹兜底（2026-10-14，可选实现）：按内容前缀查已有记录。
+   * 前缀由调用方从归一化内容截取（口径见 core/record/l1-recall-rerank.ts），
+   * 实现方负责 LIKE 转义；返回最小字段集（指纹确认只需 record_id/content）。
+   * 无此方法的 store 跳过指纹检查（行为不变）。
+   */
+  findByContentPrefix?(prefix: string, limit?: number): MaybePromise<Array<{ record_id: string; content: string; type: string; priority: number }>>;
   searchL1Hybrid?(params: {
     query?: string;
     queryEmbedding?: Float32Array;
