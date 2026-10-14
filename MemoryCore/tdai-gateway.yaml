@@ -1,24 +1,20 @@
 # ============================================================
-# TDAI Gateway — 默认配置（Standalone + Skill）
+# TDAI Gateway — v3 迁移配置（2026-10-14，自 v2 upstream-eval 迁移）
 # ============================================================
-# 基于 standalone 单机模式，同时启用 Skill 模块。
-# Memory 引擎和 Skill 模块共享同一个 baseDir，互不干扰：
-#   - Memory 数据: {baseDir}/conversations/, records/, scene_blocks/, persona.md ...
-#   - Skill 数据:  {baseDir}/skills/<name>/SKILL.md + files/
-#   - 共享 DB:     {baseDir}/vectors.db
+# 迁移来源：D:\Develop\TencentDB-Agent-Memory\repo\MemoryCore\tdai-gateway.yaml
+# （v2 在役运行态，HEAD ece04f5）。对照 v3 schema（gateway/config.ts）逐键映射。
 #
-# 启动：
-#   export TDAI_LLM_API_KEY="sk-..."           # 必填
-#   export TDAI_LLM_BASE_URL="https://..."     # 可选（覆盖 yaml）
-#   export TDAI_LLM_MODEL="gpt-4o-mini"        # 可选
-#   node --import tsx src/gateway/server.ts
-#
-# 自检：
-#   curl -s http://127.0.0.1:8420/health | jq
-#   curl -s -X POST http://127.0.0.1:8420/v3/skill/list \
-#     -H "x-tdai-service-id: default" \
-#     -H "Content-Type: application/json" -d '{"team_id":"smoke-team"}'
-# ============================================================
+# ── v2 有而 v3 无（迁移损失，详见 V3-MIGRATION-TRIAGE.md）──
+#   * llm 多厂商 providers[]/activeProvider —— v3 单厂商，切厂商=改本文件 baseUrl/model+重启
+#   * llm.layers.l1/l2/l3 分层 model 覆盖 —— v3 全层单模型；maxTokens/timeoutMs 走 offload.*
+#   * disableThinking（含 TDAI_DISABLE_THINKING env）—— v3 无思考开关，启动件该变量将被忽略
+#   * llm.maxConcurrency 并发闸门 / callDeadlineMs 硬期限 / 429 退避 —— v3 全无
+#   * extraction.dedupFailFast(S1 fail-closed) / dedupTimeoutMs(240s) / dedupRecallRerank(D2)
+#     / attributionGuard / userIdentityNames —— v3 无这些键（放进来也会被静默忽略，故不写）；
+#     v3 dedup 仍 fail-open 且查重超时硬编码 180s
+# ── 密钥链 ──
+#   启动件 start-gateway.bat 设 TDAI_LLM_API_KEY（阶跃 key；bat 内「DeepSeek」注释已过时）。
+#   v3 经 ${TDAI_LLM_API_KEY} 整串插值取得，与 v2「provider key 缺失→全局覆盖」实际效果一致。
 
 deployMode: standalone
 stateBackend: "local"
@@ -26,25 +22,23 @@ stateBackend: "local"
 server:
   port: 8420
   host: "127.0.0.1"
-  # apiKey: "${MEMORY_CORE_GATEWAY_API_KEY}"   # 可选；不填则所有 v2 接口默认开放（仅本机）
+  # apiKey 不填：v2/v3 接口本机开放（127.0.0.1 绑定，行为与 v2 在役一致）
 
 data:
   baseDir: "~/.memory-tencentdb/memory-tdai"
 
-# ── LLM (必填) ──
-# provider 默认 "openai" 即直连；若要走 context_proxy（统一鉴权/账务/观测），
-# 见 tdai-gateway.proxy.yaml 或 docs/llm-via-proxy.md
+# ── LLM（单厂商直连；原 activeProvider=阶跃星辰）──
 llm:
-  baseUrl: "https://api.lkeap.cloud.tencent.com/v1"
+  baseUrl: "https://api.stepfun.com/step_plan/v1"
   apiKey: "${TDAI_LLM_API_KEY}"
-  model: "deepseek-v3.2"
-  maxTokens: 32000
-  timeoutMs: 300000
+  # v2 分层模型：l1=step-3.7-flash（跟随厂商）、l2/l3=step-5-preview（钉死）。
+  # v3 全层单模型，取 step-5-preview（判定层现值）；l1 随之升档。回退=改 step-3.7-flash+重启。
+  model: "step-5-preview"
+  maxTokens: 65536
+  timeoutMs: 120000
 
-# ── Memory 引擎配置 ──
+# ── Memory 引擎 ──
 memory:
-  promptMode: code
-
   capture:
     enabled: true
 
@@ -52,27 +46,16 @@ memory:
     enabled: true
     enableDedup: true
     maxMemoriesPerSession: 20
+    # P0-Fix1（承接 v2 在役值）：查重失败 fail-closed——失败整批延后（游标不动、
+    # 数据不丢），不再免检入库；240s=step-5 判定常 >120s 的实测口径
+    # （undici headersTimeout 300s 上限之内）。
+    dedupFailFast: true
+    dedupTimeoutMs: 240000
 
   persona:
     triggerEveryN: 50
-    maxScenes: 15
-    triggerMode: current          # current: 累计 scene 数触发；jev: L2 更新后即时判断是否更新 L3
-    # JEV 即时更新门（可选）。启用时把上一行改为 jev，再取消下面整段注释。
-    # 以下与 MemoryProxy/config.example.yaml 一致，使用 TokenHub 作为示例；
-    # 原生 TypeSafe 可把 endpoint 改为 https://api.typesafe.ai/v1/systemone，
-    # 并填写该服务支持的模型名。endpoint、model 与 key 必须属于同一服务。
-    # jev:
-    #   provider: jev             # decision provider 类型；内置实现为 jev
-    #   endpoint: "https://tokenhub.tencentmaas.com/v1/systemone"
-    #   # 解析优先级：TYPESAFE_API_KEY 环境变量 > 此处（支持 ${VAR}）> 空。
-    #   # 启用 JEV 时 key 不能为空；不要在配置文件中写入真实密钥。
-    #   apiKey: "${TYPESAFE_API_KEY}"
-    #   model: "ep-YOUR-SERVICE-ID" # TokenHub 模型/服务 ID；此处仅为占位符
-    #   timeoutMs: 3000             # 在线路径单次调用超时，单位 ms；允许范围 100~60000
-    #   diagnostics:
-    #     # off: 关闭；metadata: 仅记录关联标识、计时、截断和判定元数据；
-    #     # full: 另记录 persona、scene、state 与原始响应，仅限短时诊断并保护日志访问。
-    #     mode: "off"
+    maxScenes: 20
+    triggerMode: current
 
   pipeline:
     everyNConversations: 5
@@ -86,98 +69,56 @@ memory:
     enabled: true
     maxResults: 5
     scoreThreshold: 0.3
-    strategy: "hybrid"
+    strategy: "keyword" # v2 在役口径；v3 可选 hybrid（需 embedding）
     timeoutMs: 5000
 
-  # ── 存储后端 ──
   storeBackend: "sqlite"
 
   embedding:
-    provider: "none"               # 默认关闭向量搜索, 仅用 BM25
-    # 开启向量搜索示例:
-    # provider: "openai"
-    # baseUrl: "https://api.openai.com/v1"
-    # apiKey: "${TDAI_LLM_API_KEY}"
-    # model: "text-embedding-3-small"
-    # dimensions: 1536
+    provider: "none"
 
   bm25:
     enabled: true
     language: "zh"
 
+# ── 蒸馏分层参数（承接 v2 llm.layers 的 maxTokens/timeout 口径）──
+# v2：l1 maxTokens 32768 / 超时 300s；l2·l3 maxTokens 65536 / 超时 600s。
+# l15 为 v3 新增的轻量压缩层，保持默认。
+offload:
+  l1MaxTokens: 32768
+  l1TimeoutMs: 300000
+  l2MaxTokens: 65536
+  l2TimeoutMs: 600000
+
 # ── Skill 模块 ──
-# Skill 是额外能力，数据存储在 {baseDir}/skills/ 下，不影响 Memory 引擎。
-# 设 enabled: false 或删除此段即可完全关闭 skill，Memory 功能不受任何影响。
 skill:
   enabled: true
-
-  # 【复用】storeBackend 不填则继承 memory.storeBackend（此处即 sqlite）；
-  #        tcvdb 需 TCVDB 凭证（memory.tcvdb），缺失时自动降级 sqlite。
-  # storeBackend: "sqlite"
-  # 【探针】contentBackend 不填则 auto-probe：有 COS 凭证(cos.*)→cos，否则→local。
-  # contentBackend: "local"
-
   routing:
-    mode: "bm25"          # bm25 | embedding | hybrid（后两者需 memory.embedding 启用，否则降级 bm25）
-    searchTopK: 20        # listing 接口最多注入多少条 skill（name+description）
-    # 以下为预留字段：resolver 有默认值但运行时暂无消费者，保持默认即可。
-    # hybridAlpha: 0.3
-    # charBudgetPercent: 0.01
-    # fastPathMinNameLength: 4
-
+    mode: "bm25"
+    searchTopK: 20
+  # extraction 萃取档：v2 拍板「等面板批次再开」，迁移期保持关闭（v3 示例默认开，须显式关）
   extraction:
-    enabled: true                 # 需要顶层 llm 配置有效（baseUrl + apiKey）
-    maxIterations: 16             # Review Agent tool-calling 最大迭代轮数
-    # model: "deepseek-v3.2"      # 【复用】不填则复用顶层 llm.model
-    # toolCallThreshold: 10       # 预留字段，暂无消费者
-    # 说明：headChars / tailChars 在 service 模式的 per-instance extractor 路径不透传，
-    #      因此不在 yaml 暴露；如需调整请改 skill-extractor.ts 默认或补 server.ts 透传。
-    queue:
-      backend: "local"            # standalone 用进程内队列；service 改 "redis"
-      keyPrefix: "tdai"           # Redis key 前缀（redis 后端）
-      resultTtlSeconds: 86400     # 抽取结果 hash 的 TTL（秒）
-      lockTtlMs: 600000           # agent 级锁 TTL（毫秒，10min）
-      maxRetries: 2               # 抽取失败最大重试次数
-      retryBackoffsMs: [5000, 15000]  # 每次重试的退避间隔（毫秒）
-      # 【复用】service 模式复用顶层 redis 共享客户端，redisUrl 留空即可；
-      #        探测到共享客户端时即使 backend=local 也会自动切 redis。
-      # redisUrl: "redis://:password@host:6379/0"
-
+    enabled: false
   resources:
-    maxResourceSizeBytes: 5000000  # ✅ 生效：单个资源文件上限（5MB），超限拒写
-    # 以下为未接线字段，已从活跃配置移除：
-    #   allowExecutable — 本意为可执行资源安全开关，但未传入 SkillResourceStore，不拦截
-    #   downloadDir     — 本意为资源落盘临时目录，但资源读取走内存返回，无消费者
+    maxResourceSizeBytes: 5000000
+  # 注：v2 的 resources.allowExecutable 在 v3 未接线（写了也不拦截），已随迁移丢弃
 
-  # ── 版本清理（两个维度，取并集；0=关闭）──
-  # versionTtlDays: 0             # 时间维度：非 head 版本保留天数
-  # maxVersions: 100              # 数量维度：每 skill 非 head 版本数上限
-
-# ── 可观测性配置（本地开发） ──
+# ── 可观测性（全部关闭，与 v2 无遥测状态一致）──
 observability:
   otel:
-    enabled: false                    # 本地不接智研，关掉 OTel gRPC
+    enabled: false
   clickhouse:
     enabled: false
   kafka:
     enabled: false
   langfuse:
-    enabled: true
-    # 生产端点 / 凭证从 env 注入，避免明文提交进仓入镜像。
-    # 空值下 core 会自动 skip langfuse 上报（不 fail），本地开发按需 export。
-    host: "${LANGFUSE_HOST:-}"
-    publicKey: "${LANGFUSE_PUBLIC_KEY:-}"
-    secretKey: "${LANGFUSE_SECRET_KEY:-}"
+    enabled: false
 
-# ── Analytics 查询模块（读取 Proxy 侧 ClickHouse 埋点）──
-# 本地开发默认关闭；需要调试 analytics 接口时打开并配指向 proxy CH 的地址。
 analytics:
   clickhouse:
     enabled: false
-    # endpoint: "http://localhost:8123"
-    # database: "context_proxy"
 
-# ── 元数据模块（v3 store + 密码 pepper；敏感项 ${} 由 .env 注入）──
+# ── 元数据模块（standalone 模式不启用 mongo；保留 v3 示例骨架，env 缺省为空）──
 metadata:
   maxUsersPerInstance: 500
   maxTeamsPerInstance: 100
@@ -190,14 +131,3 @@ metadata:
       userId: "${TDAI_MEMORY_SYSTEM_USER_ID}"
       displayName: "${TDAI_MEMORY_SYSTEM_USER_NAME}"
       userKey: "${TDAI_MEMORY_SYSTEM_USER_KEY}"
-
-# ── Task 外部导入配置，非必需──────────────────────────
-# 驼峰键 → env：sources.<id>.<键> ⇒ TASK_SOURCE_<大写ID>_<大写下划线键>。
-taskSource:
-  # enabled: "${TASK_SOURCE_ENABLED}"        # 启用的来源 id，逗号分隔；不配则不启用
-  taiPatUrl: "${TAI_PAT_URL}"              # 太湖令牌申请页（iWiki 与 TAPD 共用）
-  sources:
-    tapd:                                  # 以下两项均为必填，缺一即 fail-fast
-      mcpUrl: "${TASK_SOURCE_TAPD_MCP_URL}"              # MCP 网关端点
-      siteBaseUrl: "${TASK_SOURCE_TAPD_SITE_BASE_URL}"   # 站点根，拼接详情页地址
-      personalTokenUrl: "${TASK_SOURCE_TAPD_PERSONAL_TOKEN_URL}"  # TAPD 个人令牌申请页
