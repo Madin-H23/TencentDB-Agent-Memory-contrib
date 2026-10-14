@@ -24,7 +24,7 @@ data:
 # 厂商实测档案见 handoff-memory-config-provider-dev-20260908.md §4;新厂商接入后必须
 #   实测一轮蒸馏(extracted>0)才算接入成功
 llm:
-  activeProvider: "opencode-go"
+  activeProvider: "阶跃星辰"
   # 进程级厂商并发闸门(2026-10-13):并发类秒拒(concurrency reached)防护。step-5 限额 5
   # 时压到 4 留余量;opencode-go 无此硬限但 4 仍是合理的进程级上限。0/缺省=不限。
   maxConcurrency: 4
@@ -125,23 +125,6 @@ llm:
         - glm-4-flash-250414
       extra:
         disableThinking: true
-    - name: 阶跃星辰
-      baseUrl: https://api.stepfun.com/step_plan/v1
-      apiKeyEnv: TDAI_KEY_____
-      model: step-5-preview
-      models:
-        - step-3.7-flash
-        - step-router-v1
-        - stepaudio-2.5-chat
-        - stepaudio-2.5-tts
-        - stepaudio-2.5-asr
-        - stepaudio-2.5-realtime
-        - step-image-edit-2
-        - step-3.5-flash-2603
-        - step-3.5-flash
-        - step-5-preview
-      extra:
-        disableThinking: false
     - name: opencode-go
       baseUrl: https://opencode.ai/zen/go/v1
       apiKeyEnv: TDAI_KEY_OPENCODE
@@ -189,6 +172,23 @@ llm:
         disableThinking: false
         headers:
           x-opencode-session: 8ae1bd54-2614-41ae-9ada-c21a2a3e7a00
+    - name: 阶跃星辰
+      baseUrl: https://api.stepfun.com/step_plan/v1
+      apiKeyEnv: TDAI_KEY_____
+      model: step-3.7-flash
+      models:
+        - step-3.7-flash
+        - step-router-v1
+        - stepaudio-2.5-chat
+        - stepaudio-2.5-tts
+        - stepaudio-2.5-asr
+        - stepaudio-2.5-realtime
+        - step-image-edit-2
+        - step-3.5-flash-2603
+        - step-3.5-flash
+        - step-5-preview
+      extra:
+        disableThinking: false
   maxTokens: 4096
   timeoutMs: 120000
   # 分层覆盖(2026-10-07 改):三层不再钉 model——模型跟随 activeProvider(厂商切换时三层自动跟随,
@@ -201,17 +201,14 @@ llm:
     l2:
       maxTokens: 65536
       disableThinking: false
-      timeoutMs: 600000
-      callDeadlineMs: 660000
+      model: step-5-preview
     l3:
       maxTokens: 65536
       disableThinking: false
-      timeoutMs: 600000
-      callDeadlineMs: 660000
+      model: step-5-preview
     l1:
       maxTokens: 32768
       disableThinking: true
-      model: deepseek-v4.1-flash
 
 # ── Memory 引擎配置 ──
 memory:
@@ -247,7 +244,7 @@ memory:
     maxScenes: 20
 
   pipeline:
-    everyNConversations: 10
+    everyNConversations: 5
     enableWarmup: true
     l1IdleTimeoutSeconds: 600
     l2DelayAfterL1Seconds: 90
