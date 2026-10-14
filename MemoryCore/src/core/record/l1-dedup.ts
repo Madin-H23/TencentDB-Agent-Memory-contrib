@@ -25,6 +25,7 @@ import { hasClientEmbedding, type EmbeddingService } from "../store/embedding.js
 import type { LLMRunner, Logger, TraceContext } from "../types.js";
 import { buildTraceParams } from "../types.js";
 import { recallL1Candidates } from "../tools/l1-candidate-recall.js";
+import { rerankCandidatesBySimilarity, type DedupRecallRerank } from "./l1-recall-rerank.js";
 
 const TAG = "[memory-tdai][l1-dedup]";
 
@@ -87,8 +88,10 @@ export async function batchDedup(params: {
    * l1-dedup-fallback-silent WARN 锚点观测（v2 2026-10-12 拍板语义）。
    */
   dedupFailFast?: boolean;
+  /** D2 召回轻修开关：none=旧行为（默认）；lexical=超额召回+词汇相似度重排。 */
+  dedupRecallRerank?: DedupRecallRerank;
 }): Promise<DedupDecision[]> {
-  const { memories, config, logger, model, promptMode = "chat", vectorStore, embeddingService, llmRunner, filter, traceContext, dedupFailFast } = params;
+  const { memories, config, logger, model, promptMode = "chat", vectorStore, embeddingService, llmRunner, filter, traceContext, dedupFailFast, dedupRecallRerank = "none" } = params;
   const timeoutMs = params.timeoutMs ?? 180_000;
   const topK = params.conflictRecallTopK ?? 5;
 
@@ -133,8 +136,8 @@ export async function batchDedup(params: {
   // FTS ∥ client-vector RRF via recallL1Candidates). A keyword-only store
   // (vectorCapable=false) or a Noop embedding service degrades to the FTS leg
   // inside the shared helper; vector failures are non-fatal there.
-  logger?.debug?.(`${TAG} Using hybrid candidate recall (topK=${topK})`);
-  const matches = await findCandidates(memories, vectorStore!, vectorCapable ? embeddingService : undefined, topK, logger, params.embeddingTimeoutMs, filter, hasVectorData);
+  logger?.debug?.(`${TAG} Using hybrid candidate recall (topK=${topK}, rerank=${dedupRecallRerank})`);
+  const matches = await findCandidates(memories, vectorStore!, vectorCapable ? embeddingService : undefined, topK, logger, params.embeddingTimeoutMs, filter, hasVectorData, dedupRecallRerank);
 
   // Check if any memory has candidates
   const hasAnyCandidates = matches.some((m) => m.candidates.length > 0);
@@ -263,6 +266,8 @@ async function findCandidates(
   embeddingTimeoutMs: number | undefined,
   filter: IsolationFilter | undefined,
   hasVectorData: boolean,
+  /** D2 召回轻修：lexical=超额召回喂词汇重排（真重复被召回序挤出时捞回）；none=旧行为 */
+  rerank: DedupRecallRerank = "none",
 ): Promise<CandidateMatch[]> {
   const newRecordIds = new Set(memories.map((m) => m.record_id));
   const nativeHybrid = !!(
@@ -291,14 +296,17 @@ async function findCandidates(
     }
   }
 
-  const recallTopK = topK + memories.length;
+  // D2（v2 4db48bf 移植）：lexical 模式超额召回（5+1 → 50）给重排供料，把
+  // 「6-10 名外/被召回序挤出」的真重复捞回 top-K；重排是纯词汇计算（毫秒级），
+  // 在 store 层截断、不增大 LLM prompt。none 模式逐字保持旧行为。
+  const recallFetch = rerank === "lexical" ? Math.max(topK * 10, 50) : topK + memories.length;
   const matches: CandidateMatch[] = [];
 
   for (let i = 0; i < memories.length; i++) {
     const mem = memories[i];
     const recalled = await recallL1Candidates({
       query: mem.content,
-      topK: recallTopK,
+      topK: recallFetch,
       vectorStore,
       embeddingService: vectorSvc,
       logger,
@@ -308,10 +316,11 @@ async function findCandidates(
       logTag: TAG,
     });
 
-    const candidates: MemoryRecord[] = recalled.hits
-      .filter((r) => !newRecordIds.has(r.record_id))
-      .slice(0, topK)
-      .map(hitToMemoryRecord);
+    const filtered = recalled.hits.filter((r) => !newRecordIds.has(r.record_id));
+    const topHits = rerank === "lexical"
+      ? rerankCandidatesBySimilarity(mem.content, filtered, topK)
+      : filtered.slice(0, topK);
+    const candidates: MemoryRecord[] = topHits.map(hitToMemoryRecord);
 
     matches.push({ newMemory: mem, candidates });
   }

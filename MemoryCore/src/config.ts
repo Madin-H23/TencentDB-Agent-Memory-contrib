@@ -86,6 +86,11 @@ export interface ExtractionConfig {
    * 确定性归一为「用户」。缺省=全部非自指标签归一。
    */
   userIdentityNames?: string[];
+  /**
+   * D2 召回轻修开关（v2 4db48bf 移植）：none=旧行为；lexical=查重候选超额
+   * 召回+字符 4-gram Jaccard 重排。缺省 none；非法值 fail-fast。
+   */
+  dedupRecallRerank: "none" | "lexical";
 }
 
 /** Persona (L2/L3) settings — controls scene extraction (L2) and user profile generation (L3). */
@@ -680,6 +685,13 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       dedupFailFast: bool(extractionGroup, "dedupFailFast") ?? false,
       dedupTimeoutMs: num(extractionGroup, "dedupTimeoutMs"),
       userIdentityNames: strArray(extractionGroup, "userIdentityNames"),
+      dedupRecallRerank: (() => {
+        const raw = str(extractionGroup, "dedupRecallRerank");
+        if (raw !== undefined && raw !== "none" && raw !== "lexical") {
+          throw new Error(`[config] extraction.dedupRecallRerank 非法值 "${raw}"（合法：none|lexical）`);
+        }
+        return raw ?? "none";
+      })(),
     },
     persona: {
       triggerEveryN: num(personaGroup, "triggerEveryN") ?? 50,

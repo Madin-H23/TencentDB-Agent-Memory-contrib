@@ -152,6 +152,8 @@ export async function extractL1Memories(params: {
     dedupTimeoutMs?: number;
     /** 查重失败 fail-closed（P0-Fix1）：true=查重失败整批延后而非免检入库。 */
     dedupFailFast?: boolean;
+    /** D2 召回轻修开关：none=旧行为；lexical=超额召回+词汇相似度重排。 */
+    dedupRecallRerank?: "none" | "lexical";
     /**
      * 用户身份白名单（P2，v2 3eb7c8b）：仅这些姓名可保留在「用户（X）」里，
      * 其余入库前归一为「用户」。缺省/空=全部非自指标签归一。
@@ -377,6 +379,7 @@ export async function extractL1Memories(params: {
         config,
         timeoutMs: options.dedupTimeoutMs,
         dedupFailFast: options.dedupFailFast,
+        dedupRecallRerank: options.dedupRecallRerank,
         logger,
         model: options.model,
         promptMode: options.promptMode,
@@ -386,7 +389,10 @@ export async function extractL1Memories(params: {
         embeddingTimeoutMs: options.embeddingTimeoutMs,
         llmRunner: options.llmRunner,
         traceContext: { teamId, userId, agentId, sessionId },
-        ...(teamId || userId || agentId || sessionId || taskId ? { filter: { teamId, userId, agentId, sessionId, taskId } } : {}),
+        // sessionId 不进 filter（P2-④ 并行安全，v2 2026-10-09 多线程治理语义）：
+        // hook 转发真实 sid 后，各线程只在「自己的桶」查重会让两线程产出的同一
+        // 事实双入库。跨线程去重语义以 team/user/agent/task 为界。
+        ...(teamId || userId || agentId || taskId ? { filter: { teamId, userId, agentId, taskId } } : {}),
       });
       dedupLatencyMs = Date.now() - dedupStartMs;
 

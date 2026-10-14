@@ -36,6 +36,11 @@ llm:
   model: "step-5-preview"
   maxTokens: 65536
   timeoutMs: 120000
+  # 进程级并发闸门（P1，承接 v2 在役值 4）：按 baseUrl 分桶限流，防多子系统调用
+  # 叠加触发厂商并发秒拒；0/缺省=不限
+  maxConcurrency: 4
+  # 整调用硬期限（P1，承接 v2 在役值）：≥ 各层超时+一次退避预算；缺省=timeout×2+30s
+  callDeadlineMs: 360000
 
 # ── Memory 引擎 ──
 memory:
@@ -57,6 +62,9 @@ memory:
       - 何伟健
       - heweijian
       - Weijian He
+    # D2 召回轻修（2026-10-14 灰度开启）：lexical=查重候选超额召回+词汇相似度重排；
+    # 回退=改 none+重启
+    dedupRecallRerank: lexical
 
   persona:
     triggerEveryN: 50
