@@ -3392,6 +3392,14 @@ async function main(): Promise<void> {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
+  // unhandledRejection 日志兜底（P1，v2 70055eb 语义）：fire-and-forget 的
+  // Promise（如后台写失败）不再默认杀进程——Node ≥15 默认 crash 会让网关
+  // 静默消失且自启动只在登录时触发。single-user standalone 偏可用性；
+  // uncaughtException 维持默认崩溃语义（同步抛出后的状态不可信）。
+  process.on("unhandledRejection", (reason) => {
+    console.error("[tdai-gateway] Unhandled promise rejection:", reason);
+  });
+
   await gateway.start();
 }
 

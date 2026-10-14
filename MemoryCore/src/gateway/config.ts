@@ -606,8 +606,14 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
           : {};
       }
       fileConfig = expandEnvVars(fileConfig) as Record<string, unknown>;
-    } catch {
-      // Config file is optional — malformed files fall back to env-only config.
+    } catch (err) {
+      // 配置文件解析失败不再静默吞掉（P1，v2 70055eb 语义）：显错带路径与
+      // 错误信息，env-only 回退行为不变——静默吞掉的坏配置会让运行态与
+      // yaml 假性一致，排障时误判「配置已生效」。
+      console.error(
+        `[tdai-gateway][config] Failed to parse config file ${configPath}; falling back to env-only config:`,
+        err instanceof Error ? err.message : String(err),
+      );
     }
   }
 
