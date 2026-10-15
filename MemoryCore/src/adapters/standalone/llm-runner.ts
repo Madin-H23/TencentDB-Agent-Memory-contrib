@@ -131,6 +131,12 @@ export interface StandaloneLLMConfig {
    */
   disableThinking?: boolean;
   /**
+   * 厂商显示名（v2 c00899f 归属移植，2026-10-15）：yaml llm.providerLabel，
+   * 用于 L1 完成/延后/失败日志与面板蒸馏归属。v3 无 activeProvider 折叠，
+   * 此为纯展示字段，不参与调用路由。
+   */
+  providerLabel?: string;
+  /**
    * 蒸馏分层覆盖（v2 llm.layers 移植，2026-10-15）：l1|l2|l3 各层可覆盖
    * 标量字段，未配置的层沿用全局值。面板「分层配置编辑」写入的即是本结构。
    */

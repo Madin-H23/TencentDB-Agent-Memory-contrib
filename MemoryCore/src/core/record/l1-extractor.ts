@@ -129,6 +129,8 @@ export async function extractL1Memories(params: {
     maxMemoriesPerSession?: number;
     /** LLM model override */
     model?: string;
+    /** 厂商显示名（归属日志/面板，v2 c00899f 移植）：完成/延后/失败行与失败消息后缀。 */
+    providerLabel?: string;
     /** Previous scene name for continuity */
     previousSceneName?: string;
     /** Prompt family for L1 extraction (default: chat). */
@@ -179,6 +181,11 @@ export async function extractL1Memories(params: {
   const maxBgMessages = options.maxBackgroundMessages ?? 5;
   const enableDedup = options.enableDedup ?? true;
   const maxMemoriesPerSession = options.maxMemoriesPerSession ?? 10;
+  // 归属标签（v2 c00899f 移植，2026-10-15）：完成/延后行内联与失败消息后缀
+  // （面板 COMPLETE_RE/DEFERRED_RE/PM_SUFFIX_RE 的契约，缺即面板归属列空白）。
+  const pmModel = options.model ?? "unknown";
+  const pmProvider = options.providerLabel ?? "unknown";
+  const pmSuffix = ` (model=${pmModel}, provider=${pmProvider})`;
 
   if (messages.length === 0) {
     logger?.debug?.(`${TAG} No messages to extract from`);
@@ -246,11 +253,11 @@ export async function extractL1Memories(params: {
     const reason = err instanceof SyntaxError ? "parse_error" : "llm_error";
     logger?.error(`${TAG} LLM extraction failed: ${msg}`);
     logger?.warn?.(
-      `${TAG} l1-deferred reason=${reason} sessionKey=${sessionKey} — batch deferred, checkpoint cursor unchanged`,
+      `${TAG} l1-deferred reason=${reason} sessionKey=${sessionKey}, model=${pmModel}, provider=${pmProvider} — batch deferred, checkpoint cursor unchanged`,
     );
     throw err instanceof L1ExtractionFailure
       ? err
-      : new L1ExtractionFailure(reason, `L1 extraction failed: ${msg.slice(0, 500)}`);
+      : new L1ExtractionFailure(reason, `L1 extraction failed: ${msg.slice(0, 500)}${pmSuffix}`);
   }
 
   // Flatten all memories across scenes
@@ -315,11 +322,11 @@ export async function extractL1Memories(params: {
     // success:true 空产出（不误伤）。
     if (finalReason === "no_json" || finalReason === "not_array" || finalReason === "parse_fail") {
       logger?.warn?.(
-        `${TAG} l1-deferred reason=parse_error sessionKey=${sessionKey} — batch deferred, checkpoint cursor unchanged`,
+        `${TAG} l1-deferred reason=parse_error sessionKey=${sessionKey}, model=${pmModel}, provider=${pmProvider} — batch deferred, checkpoint cursor unchanged`,
       );
       throw new L1ExtractionFailure(
         "parse_error",
-        `L1 extraction response was structural garbage (${finalReason}), batch deferred`,
+        `L1 extraction response was structural garbage (${finalReason}), batch deferred${pmSuffix}`,
       );
     }
 
@@ -437,9 +444,9 @@ export async function extractL1Memories(params: {
       // （上游 #1640：5 天 53 次整批免检入库的实测教训）。
       const msg = err instanceof Error ? err.message : String(err);
       logger?.warn?.(
-        `${TAG} l1-deferred reason=dedup_failed sessionKey=${sessionKey} — batch deferred, checkpoint cursor unchanged (${msg})`,
+        `${TAG} l1-deferred reason=dedup_failed sessionKey=${sessionKey}, model=${pmModel}, provider=${pmProvider} — batch deferred, checkpoint cursor unchanged (${msg})`,
       );
-      throw new L1ExtractionFailure("dedup_failed", `L1 dedup failed: ${msg}`);
+      throw new L1ExtractionFailure("dedup_failed", `L1 dedup failed: ${msg}${pmSuffix}`);
     }
   } else {
     storedRecords = await storeAllDirectly(memoriesWithIds, baseDir, sessionKey, sessionId, taskId, teamId, userId, agentId, logger, options.vectorStore, options.embeddingService, storage);
@@ -484,7 +491,10 @@ export async function extractL1Memories(params: {
       : undefined,
   });
 
-  logger?.info(`${TAG} Extraction complete: extracted=${extracted.length}, stored=${storedRecords.length}`);
+  logger?.info(
+    `${TAG} Extraction complete: extracted=${extracted.length}, stored=${storedRecords.length}, ` +
+    `session=${sessionKey}, sid=${sessionId ?? "(none)"}, model=${pmModel}, provider=${pmProvider}`,
+  );
 
   // ── l1_extraction metric ──
   if (metricInstanceId && logger) {

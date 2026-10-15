@@ -299,6 +299,11 @@ export interface StandaloneLLMOverrideConfig {
    */
   callDeadlineMs?: number;
   /**
+   * 厂商显示名（v2 c00899f 归属移植，2026-10-15）：yaml llm.providerLabel，
+   * 随 splice 进 memory.llm，供 L1 完成/延后/失败日志与面板蒸馏归属。
+   */
+  providerLabel?: string;
+  /**
    * 蒸馏分层覆盖（v2 llm.layers 移植，2026-10-15）：l1|l2|l3 各层可覆盖
    * model/maxTokens/timeoutMs/disableThinking/callDeadlineMs 标量字段；
    * 不支持按层换 baseUrl/apiKey（换厂商仍改全局 llm 块）。未配置的层沿用全局值。

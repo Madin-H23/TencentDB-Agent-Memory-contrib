@@ -663,6 +663,9 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
     // 不逐构造点穿字段（v2 e674e3a 装配链丢字段教训）。
     maxConcurrency: envInt("TDAI_LLM_MAX_CONCURRENCY") ?? num(llmConfig, "maxConcurrency"),
     callDeadlineMs: envInt("TDAI_LLM_CALL_DEADLINE_MS") ?? num(llmConfig, "callDeadlineMs"),
+    // 厂商显示名（v2 c00899f 归属移植）：纯展示字段（面板蒸馏归属/日志），
+    // v3 无 activeProvider 折叠，故直接取 yaml/env 字面值。
+    providerLabel: env("TDAI_LLM_PROVIDER_LABEL") ?? str(llmConfig, "providerLabel"),
     provider: llmProvider,
     proxy: {
       useMemorySystemUserKey: bool(llmProxyConfig, "useMemorySystemUserKey") ?? true,
@@ -740,6 +743,7 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
       stream: llm.stream,
       maxConcurrency: llm.maxConcurrency,
       callDeadlineMs: llm.callDeadlineMs,
+      providerLabel: llm.providerLabel,
       ...(llm.layers ? { layers: llm.layers } : {}),
     };
   }

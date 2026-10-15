@@ -446,6 +446,7 @@ export function createL1Runner(opts: {
       `${TAG} [l1] dedupFailFast=${cfg.extraction.dedupFailFast ? "on" : "off"}, ` +
       `dedupTimeoutMs=${cfg.extraction.dedupTimeoutMs ?? 180000}ms, ` +
       `model=${l1Model ?? "unknown"}, ` +
+      `provider=${cfg.llm?.providerLabel ?? "unknown"}, ` +
       `maxConcurrency=${cfg.llm?.maxConcurrency ?? "(default)"}, ` +
       `callDeadlineMs=${cfg.llm?.callDeadlineMs ?? "(default)"}, ` +
       `dedupRecallRerank=${cfg.extraction.dedupRecallRerank ?? "none"}, ` +
@@ -660,7 +661,11 @@ export function createL1Runner(opts: {
           options: {
             enableDedup: cfg.extraction.enableDedup,
             maxMemoriesPerSession: cfg.extraction.maxMemoriesPerSession,
-            model: cfg.extraction.model,
+            // 生效模型（v2 c00899f 同款修法）：extraction.model 缺省时旧传参
+            // undefined，日志/生成记录归属全空。与锚点 l1Model 同优先级。
+            model: l1Model,
+            // 厂商显示名（归属移植）：extractor 完成/延后/失败日志与面板用。
+            providerLabel: cfg.llm?.providerLabel,
             promptMode: cfg.extraction.promptMode,
             memoryPrompt: l1Prompts.get(memoryPromptResolveKey({
               teamId: group.teamId,
@@ -722,9 +727,8 @@ export function createL1Runner(opts: {
       // skip same-ms siblings on the next round.
       await checkpoint.markL1ExtractionComplete(sessionKey, totalStored, maxRecordedAtMs || undefined, lastSceneName, lastSceneNames);
       // 归属日志（P2，v2 c00899f/6415c8e 移植）：完成行带 model 与全组 sid，
-      // 面板/日志据此定位调用方与切片归属。model 优先级：extraction.model 显式
-      // 设置 > llm.model（单厂商直连配置）> unknown。
-      const l1Model = cfg.extraction.model ?? cfg.llm?.model;
+      // 面板/日志据此定位调用方与切片归属。model 用外层 l1Model（优先级：
+      // extraction.model > llm.layers.l1.model > llm.model，与锚点/extractor 同源）。
       logger.info(
         `${TAG} [l1] L1 complete: extracted=${totalExtracted}, stored=${totalStored} (${groups.length} group(s)), ` +
         `model=${l1Model ?? "unknown"}, sids=[${groups.map((g) => g.sessionId || "(empty)").join(",")}]`,

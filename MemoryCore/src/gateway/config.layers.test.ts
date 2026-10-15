@@ -102,3 +102,18 @@ describe("loadGatewayConfig：llm.layers 解析 + splice 透传", () => {
     expect(cfg.memory.llm.layers?.l3?.callDeadlineMs).toBe(660000);
   });
 });
+
+describe("loadGatewayConfig：providerLabel 归属字段（v2 c00899f 移植）", () => {
+  it("yaml llm.providerLabel 解析并随 splice 进 memory.llm", () => {
+    const cfg = loadWithYaml(
+      `${YAML}\n  providerLabel: "阶跃星辰"\n`,
+    );
+    expect(cfg.llm.providerLabel).toBe("阶跃星辰");
+    expect(cfg.memory.llm.providerLabel).toBe("阶跃星辰");
+  });
+  it("未配置 → undefined（面板归属列留空，不猜）", () => {
+    const cfg = loadWithYaml(YAML);
+    expect(cfg.llm.providerLabel).toBeUndefined();
+    expect(cfg.memory.llm.providerLabel).toBeUndefined();
+  });
+});

@@ -31,6 +31,9 @@ data:
 llm:
   baseUrl: "https://api.stepfun.com/step_plan/v1"
   apiKey: "${TDAI_LLM_API_KEY}"
+  # 厂商显示名（归属移植，v2 c00899f）：纯展示字段——L1 完成/延后/失败日志与
+  # 面板蒸馏记录/死信两卡的「(厂商: 模型)」归属。不参与调用路由。
+  providerLabel: "阶跃星辰"
   # 全局模型（l2/l3 未显式覆盖 model 时沿用）：迁移期取 step-5-preview（判定层现值）。
   model: "step-5-preview"
   maxTokens: 65536
