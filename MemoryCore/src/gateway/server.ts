@@ -1064,6 +1064,8 @@ export class TdaiGateway {
         // the handler returns 503 in that case.
         stateBackend: this.stateBackend ?? undefined,
         pipelineWorker: this.pipelineWorker ?? undefined,
+        // /v2/pipeline/l1/trigger 手动排空（仅 standalone；service 模式 404）。
+        getStatefulPipelineManager: () => this.statefulPipelineManager ?? undefined,
         logger: this.logger,
         // `V3_STRICT_ISOLATION` controls only /v3 L0–L3 memory data-plane
         // strictness. Default OFF for local/integration; production should set it.
