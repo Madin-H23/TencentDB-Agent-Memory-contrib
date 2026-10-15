@@ -15,7 +15,11 @@ import { getEnv } from "../utils/env.js";
 import { setDefaultLlmConcurrency } from "../utils/llm-concurrency.js";
 import { parseConfig as parseMemoryConfig } from "../config.js";
 import type { MemoryTdaiConfig } from "../config.js";
-import type { StandaloneLLMConfig } from "../adapters/standalone/llm-runner.js";
+import type {
+  StandaloneLLMConfig,
+  LlmLayerOverride,
+  LlmLayersOverride,
+} from "../adapters/standalone/llm-runner.js";
 // v2.6 方案 E fallback:yaml 未配 supportedAgents 时用此常量
 import { DEFAULT_SUPPORTED_AGENTS_FALLBACK } from "../metadata/default-supported-agents.js";
 
@@ -671,6 +675,30 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
       return bool(llmConfig, "stream") ?? false;
     })(),
   };
+  // 蒸馏分层覆盖（v2 llm.layers 移植，2026-10-15）：l1|l2|l3 五标量字段，
+  // 未配置的层不产出键。面板「分层配置编辑」写入的即是本结构。
+  const layersRaw = obj(llmConfig, "layers");
+  const parseLlmLayer = (name: "l1" | "l2" | "l3"): LlmLayerOverride | undefined => {
+    const g = obj(layersRaw, name);
+    const layer: LlmLayerOverride = {};
+    const model = str(g, "model");
+    if (model) layer.model = model;
+    const maxTokens = num(g, "maxTokens");
+    if (maxTokens !== undefined) layer.maxTokens = maxTokens;
+    const timeoutMs = num(g, "timeoutMs");
+    if (timeoutMs !== undefined) layer.timeoutMs = timeoutMs;
+    const disableThinking = bool(g, "disableThinking");
+    if (disableThinking !== undefined) layer.disableThinking = disableThinking;
+    const callDeadlineMs = num(g, "callDeadlineMs");
+    if (callDeadlineMs !== undefined) layer.callDeadlineMs = callDeadlineMs;
+    return Object.keys(layer).length > 0 ? layer : undefined;
+  };
+  const parsedLayers: LlmLayersOverride = {};
+  for (const name of ["l1", "l2", "l3"] as const) {
+    const parsed = parseLlmLayer(name);
+    if (parsed) parsedLayers[name] = parsed;
+  }
+  if (Object.keys(parsedLayers).length > 0) llm.layers = parsedLayers;
   setDefaultLlmConcurrency(llm.maxConcurrency ?? 0);
 
   // Memory config (reuse the plugin's parseConfig for full compatibility)
@@ -705,6 +733,12 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
       proxy: {
         useMemorySystemUserKey: llm.proxy?.useMemorySystemUserKey ?? true,
       },
+      // 透传面（2026-10-15 分层移植补全）：本 splice 逐字段重建，漏字段即静默失效
+      // （v2 e674e3a 装配链教训）。stream 此前也一直被丢（llm.stream=true 的 yaml 是死配置）。
+      stream: llm.stream,
+      maxConcurrency: llm.maxConcurrency,
+      callDeadlineMs: llm.callDeadlineMs,
+      ...(llm.layers ? { layers: llm.layers } : {}),
     };
   }
 

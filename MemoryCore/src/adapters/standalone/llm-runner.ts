@@ -124,6 +124,62 @@ export interface StandaloneLLMConfig {
    * 透传给调用方,只是"以流式协议请求上游后等待完整文本"的兼容层。
    */
   stream?: boolean;
+  /**
+   * 关思考三态开关（v2 分层移植，2026-10-15）：显式值优先，未设置回落
+   * env TDAI_DISABLE_THINKING。DeepSeek-V4 系列默认开思考（reasoning_content），
+   * 会烧光 max_tokens 导致 content 空/截断（v2 2026-09-08 实测）。
+   */
+  disableThinking?: boolean;
+  /**
+   * 蒸馏分层覆盖（v2 llm.layers 移植，2026-10-15）：l1|l2|l3 各层可覆盖
+   * 标量字段，未配置的层沿用全局值。面板「分层配置编辑」写入的即是本结构。
+   */
+  layers?: LlmLayersOverride;
+}
+
+/** llm.layers.<层> 可覆盖的标量字段。不支持按层换 baseUrl/apiKey（换厂商仍改全局 llm 块）。 */
+export interface LlmLayerOverride {
+  model?: string;
+  maxTokens?: number;
+  timeoutMs?: number;
+  /** 三态：true 强制关 / false 强制开(压过全局 env) / 未设沿用全局(env 兜底)。 */
+  disableThinking?: boolean;
+  /** 整调用硬期限覆盖（须 ≥ 该层 timeoutMs + 限流退避预算，否则重试无意义）。 */
+  callDeadlineMs?: number;
+}
+
+export interface LlmLayersOverride {
+  l1?: LlmLayerOverride;
+  l2?: LlmLayerOverride;
+  l3?: LlmLayerOverride;
+}
+
+/**
+ * 关思考三态判定：显式配置值优先，未设置回落 env TDAI_DISABLE_THINKING === "true"。
+ * 纯函数（env 经参数外读取），供 runner 与启动锚点共用同一口径。
+ */
+export function resolveDisableThinking(explicit?: boolean): boolean {
+  return explicit ?? process.env.TDAI_DISABLE_THINKING === "true";
+}
+
+/**
+ * 按层叠覆盖运行时 LLM 配置（v2 tdai-core resolveRuntimeLlm 的覆盖段移植）：
+ * 只拷贝 LlmLayerOverride 声明过的标量字段；model 空串视为未设置；
+ * 数值 0 视为显式生效。不改写入参（纯函数）。
+ */
+export function applyLlmLayerOverride<T extends StandaloneLLMConfig>(
+  base: T,
+  ov?: LlmLayerOverride,
+): T {
+  if (!ov) return base;
+  return {
+    ...base,
+    ...(ov.model ? { model: ov.model } : {}),
+    ...(ov.maxTokens !== undefined ? { maxTokens: ov.maxTokens } : {}),
+    ...(ov.timeoutMs !== undefined ? { timeoutMs: ov.timeoutMs } : {}),
+    ...(ov.disableThinking !== undefined ? { disableThinking: ov.disableThinking } : {}),
+    ...(ov.callDeadlineMs !== undefined ? { callDeadlineMs: ov.callDeadlineMs } : {}),
+  };
 }
 
 // ============================
@@ -310,16 +366,39 @@ export class StandaloneLLMRunner implements LLMRunner {
 
     this.logger?.debug?.(
       `${TAG} run() start: taskId=${params.taskId}, model=${this.model}, ` +
-      `tools=${effectiveEnableTools}${callerProvidedTools ? "(caller)" : ""}, timeout=${timeoutMs}ms`,
+      `tools=${effectiveEnableTools}${callerProvidedTools ? "(caller)" : ""}, timeout=${timeoutMs}ms, ` +
+      `disableThinking=${resolveDisableThinking(this.config.disableThinking)}`,
     );
 
     // Create OpenAI-compatible provider via AI SDK
     // Use "compatible" mode to call /chat/completions (not Responses API),
     // which works with all OpenAI-compatible backends (DeepSeek, Qwen, etc.)
+    // 关思考三态开关（v2 移植，2026-10-15）：config.disableThinking 显式值优先，
+    // 未设置回落 env TDAI_DISABLE_THINKING。实现注意（v2 2026-09-08 fetch 探针实测）：
+    // AI SDK 的 openai-compatible provider 不会把 thinking 序列化进请求体
+    // （providerOptions 路径实测 thinking=undefined），因此改在 fetch 层直接
+    // 改写 JSON body 注入 thinking:{type:"disabled"}。
+    const wantsDisableThinking = resolveDisableThinking(this.config.disableThinking);
     const provider = createOpenAI({
       baseURL: this.config.baseUrl,
       apiKey: this.config.apiKey,
       compatibility: "compatible",
+      ...(wantsDisableThinking
+        ? {
+            fetch: async (url: unknown, init?: RequestInit) => {
+              if (typeof init?.body === "string") {
+                try {
+                  const body = JSON.parse(init.body) as Record<string, unknown>;
+                  body.thinking = { type: "disabled" };
+                  init = { ...init, body: JSON.stringify(body) };
+                } catch {
+                  // body 非 JSON 时保持原样
+                }
+              }
+              return fetch(url as Parameters<typeof fetch>[0], init);
+            },
+          }
+        : {}),
     });
 
     // Select tools based on mode + storage

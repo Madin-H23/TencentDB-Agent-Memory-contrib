@@ -31,8 +31,7 @@ data:
 llm:
   baseUrl: "https://api.stepfun.com/step_plan/v1"
   apiKey: "${TDAI_LLM_API_KEY}"
-  # v2 分层模型：l1=step-3.7-flash（跟随厂商）、l2/l3=step-5-preview（钉死）。
-  # v3 全层单模型，取 step-5-preview（判定层现值）；l1 随之升档。回退=改 step-3.7-flash+重启。
+  # 全局模型（l2/l3 未显式覆盖 model 时沿用）：迁移期取 step-5-preview（判定层现值）。
   model: "step-5-preview"
   maxTokens: 65536
   timeoutMs: 120000
@@ -41,6 +40,30 @@ llm:
   maxConcurrency: 4
   # 整调用硬期限（P1，承接 v2 在役值）：≥ 各层超时+一次退避预算；缺省=timeout×2+30s
   callDeadlineMs: 360000
+  # 蒸馏分层覆盖（2026-10-15 移植 v2 llm.layers）。修迁移失误：v3 曾全层单模型
+  # step-5-preview（含 L1 热路径），而 step-5 判死档案=单调用 1-5min/永远思考/并发
+  # 幽灵——10-15 全天 dedup 240s 超时+concurrency reached 死信即该形态。l1 拨回
+  # v2 在役值 step-3.7-flash；l2·l3 沿用判定层（v2 原样）。
+  # 五标量字段可按层覆盖：model/maxTokens/timeoutMs/disableThinking/callDeadlineMs；
+  # 未配置字段沿用全局；面板「分层配置编辑」写入同结构；改后须重启网关，看
+  # [l1] 锚点行确认生效值。disableThinking 三态：true 强制关（注入
+  # thinking:{type:disabled}）/ false 不注入 / 缺省回落 env TDAI_DISABLE_THINKING。
+  layers:
+    l1:
+      model: "step-3.7-flash"
+      maxTokens: 32768
+      timeoutMs: 300000
+      disableThinking: true
+    l2:
+      model: "step-5-preview"
+      maxTokens: 65536
+      timeoutMs: 600000
+      disableThinking: false
+    l3:
+      model: "step-5-preview"
+      maxTokens: 65536
+      timeoutMs: 600000
+      disableThinking: false
 
 # ── Memory 引擎 ──
 memory:
@@ -95,14 +118,8 @@ memory:
     enabled: true
     language: "zh"
 
-# ── 蒸馏分层参数（承接 v2 llm.layers 的 maxTokens/timeout 口径）──
-# v2：l1 maxTokens 32768 / 超时 300s；l2·l3 maxTokens 65536 / 超时 600s。
-# l15 为 v3 新增的轻量压缩层，保持默认。
-offload:
-  l1MaxTokens: 32768
-  l1TimeoutMs: 300000
-  l2MaxTokens: 65536
-  l2TimeoutMs: 600000
+# （原 offload.l1MaxTokens/l1TimeoutMs/… 分层参数块已删 2026-10-15：无任何代码读取
+#  的死配置，其口径已由 llm.layers 真正承接——maxTokens/timeoutMs 按层覆盖见上。）
 
 # ── Skill 模块 ──
 skill:

@@ -24,6 +24,7 @@ import type { ConversationMessage } from "../core/conversation/l0-recorder.js";
 import { CheckpointManager } from "./checkpoint.js";
 import type { PipelineSessionState } from "./checkpoint.js";
 import { createStoreBundle } from "../core/store/factory.js";
+import { resolveDisableThinking } from "../adapters/standalone/llm-runner.js";
 import type { IMemoryStore } from "../core/store/types.js";
 import { memoryPromptResolveKey, resolveMemoryPrompts } from "../core/memory-prompt/resolver.js";
 import {
@@ -434,6 +435,20 @@ export function createL1Runner(opts: {
     const cp = await checkpoint.read();
     const runnerState = checkpoint.getRunnerState(cp, sessionKey);
 
+    // 每轮配置锚点（v2 pipeline-factory 移植，2026-10-15）：v3 重写丢失该行，
+    // 「改配置必须看锚点确认生效值」的运维手段一度失效。model 优先级与 tdai-core
+    // resolveRuntimeLlm("l1") 一致：extraction.model > llm.layers.l1.model > llm.model；
+    // disableThinking 为 L1 层生效值（显式配置 > env TDAI_DISABLE_THINKING）。
+    const l1Model = cfg.extraction.model ?? cfg.llm?.layers?.l1?.model ?? cfg.llm?.model;
+    logger.info(
+      `${TAG} [l1] dedupFailFast=${cfg.extraction.dedupFailFast ? "on" : "off"}, ` +
+      `dedupTimeoutMs=${cfg.extraction.dedupTimeoutMs ?? 180000}ms, ` +
+      `model=${l1Model ?? "unknown"}, ` +
+      `maxConcurrency=${cfg.llm?.maxConcurrency ?? "(default)"}, ` +
+      `callDeadlineMs=${cfg.llm?.callDeadlineMs ?? "(default)"}, ` +
+      `dedupRecallRerank=${cfg.extraction.dedupRecallRerank ?? "none"}, ` +
+      `disableThinking=${resolveDisableThinking(cfg.llm?.layers?.l1?.disableThinking)}`,
+    );
     logger.info(
       `${TAG} [l1] Session ${sessionKey}: l1_cursor=${runnerState.last_l1_cursor || "(start)"}`,
     );

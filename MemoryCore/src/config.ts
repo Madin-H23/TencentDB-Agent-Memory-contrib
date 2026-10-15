@@ -11,6 +11,8 @@
 // Type definitions
 // ============================
 
+import type { LlmLayersOverride } from "./adapters/standalone/llm-runner.js";
+
 /** Prompt family for L1-L3 memory pipeline. */
 export type MemoryPromptMode = "chat" | "code";
 export type PersonaTriggerMode = "current" | "jev";
@@ -286,6 +288,23 @@ export interface StandaloneLLMOverrideConfig {
    * 等待完整文本",给只接受流式的兼容后端做兼容层用。
    */
   stream?: boolean;
+  /**
+   * 进程级厂商并发上限（可选，≤0/缺省不限）。P1 移植：经 gateway splice 进
+   * memory.llm 供 runner 闸门读取；gateway 装配时另设进程级默认兜底。
+   */
+  maxConcurrency?: number;
+  /**
+   * 整调用硬期限 ms（可选）。P1 移植：经 splice 进 memory.llm，
+   * 可被 llm.layers.<层>.callDeadlineMs 按层覆盖。
+   */
+  callDeadlineMs?: number;
+  /**
+   * 蒸馏分层覆盖（v2 llm.layers 移植，2026-10-15）：l1|l2|l3 各层可覆盖
+   * model/maxTokens/timeoutMs/disableThinking/callDeadlineMs 标量字段；
+   * 不支持按层换 baseUrl/apiKey（换厂商仍改全局 llm 块）。未配置的层沿用全局值。
+   * 面板「分层配置编辑」（PUT /api/layers/:layer）写入的即是本结构。
+   */
+  layers?: LlmLayersOverride;
 }
 
 /** Context Offload settings — controls multi-layer context compression. */
