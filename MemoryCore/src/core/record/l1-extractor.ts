@@ -15,6 +15,7 @@
 import type { ConversationMessage } from "../conversation/l0-recorder.js";
 import { formatExtractionPrompt, getExtractMemoriesSystemPrompt, type MemoryPromptMode } from "../prompts/l1-extraction.js";
 import { batchDedup } from "./l1-dedup.js";
+import { normalizeForFingerprint, type DedupRecallRerank } from "./l1-recall-rerank.js";
 import { writeMemory, generateMemoryId } from "./l1-writer.js";
 import type { ExtractedMemory, MemoryRecord, MemoryType, DedupDecision } from "./l1-writer.js";
 import { CleanContextRunner } from "../../utils/clean-context-runner.js";
@@ -435,6 +436,7 @@ export async function extractL1Memories(params: {
         vectorStore: options.vectorStore,
         embeddingService: options.embeddingService,
         storage,
+        dedupRecallRerank: options.dedupRecallRerank,
       });
 
     } catch (err) {
@@ -790,8 +792,10 @@ async function applyDecisions(params: {
   vectorStore?: IMemoryStore;
   embeddingService?: EmbeddingService;
   storage?: StorageAdapter;
+  /** D2 开关（写入前指纹兜底仅 lexical 下启用，v2 4db48bf 语义）。 */
+  dedupRecallRerank?: DedupRecallRerank;
 }): Promise<MemoryRecord[]> {
-  const { memoriesWithIds, decisions, baseDir, sessionKey, sessionId, taskId, teamId, userId, agentId, logger, vectorStore, embeddingService, storage } = params;
+  const { memoriesWithIds, decisions, baseDir, sessionKey, sessionId, taskId, teamId, userId, agentId, logger, vectorStore, embeddingService, storage, dedupRecallRerank } = params;
   const storedRecords: MemoryRecord[] = [];
 
   // Build a map from record_id → decision
@@ -806,6 +810,29 @@ async function applyDecisions(params: {
       action: "store" as const,
       target_ids: [],
     };
+
+    // 写入前指纹兜底（D2 第三件套，v2 4db48bf 移植）：组间有界并行下，A 组的新
+    // 记录写入前 B 组的 batchDedup 可能已跑完（B 的候选里没有 A 的产出——同批
+    // 互斥+写入时序），B 判 store 直接写 → 同事实双入库。check-then-write 非
+    // 原子，但把双入库窗口从整个判定周期缩到两次写之间，剩余竞态由月度审计兜底。
+    // store 无此方法的实现自动跳过（行为不变）。
+    if (
+      dedupRecallRerank === "lexical" &&
+      decision.action === "store" &&
+      typeof vectorStore?.findByContentPrefix === "function"
+    ) {
+      const norm = normalizeForFingerprint(memoryWithId.content);
+      if (norm) {
+        const hits = await vectorStore.findByContentPrefix(norm.slice(0, 16), 5);
+        const twin = hits.find((h) => normalizeForFingerprint(h.content) === norm);
+        if (twin) {
+          logger?.warn?.(
+            `${TAG} l1-dedup-fingerprint-skip record=${memoryWithId.record_id} twin=${twin.record_id} — 写入前指纹命中，转 skip（组间竞态双入库兜底）`,
+          );
+          continue;
+        }
+      }
+    }
 
     try {
       const record = await writeMemory({

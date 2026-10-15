@@ -2999,6 +2999,38 @@ export class VectorStore implements IMemoryStore {
   }
 
   /**
+   * 写入前指纹兜底（D2 第三件套，v2 4db48bf 移植）：按内容前缀直查活库，供
+   * applyDecisions 在 store 决策写入前做同文存在性检查（组间竞态双入库的
+   * 确定性防线，v2 2026-10-13 拍板）。
+   *
+   * 前缀是**归一化**文本的前 N 字符（调用方传入）；对原始 content 做前缀匹配
+   * （原始内容通常以同类字符开头，标点差异在中段，不影响前缀命中），再由调用方
+   * 做完整归一化确认。LIKE 通配符（% _ \）在此转义。全表扫描 ~2ms（N≈1800），
+   * 写入路径每条一次，可接受。任何错误返回空数组（不阻塞写入）。
+   *
+   * 注：v2 实现查 content_original 列；v3 的 l1_records 无该列（v2 进程跑 v3 库
+   * 时报 "no such column: content_original" 即此），故查 content。
+   */
+  findByContentPrefix(prefix: string, limit = 5): Array<{ record_id: string; content: string; type: string; priority: number }> {
+    if (this.degraded || !prefix) return [];
+    try {
+      const escaped = prefix.replace(/([%_\\])/g, "\\$1");
+      const rows = this.db
+        .prepare(
+          `SELECT record_id, content, type, priority
+           FROM l1_records WHERE content LIKE ? ESCAPE '\\' LIMIT ?`,
+        )
+        .all(`${escaped}%`, limit) as Array<{ record_id: string; content: string; type: string; priority: number }>;
+      return rows;
+    } catch (err) {
+      this.logger?.warn(
+        `${TAG} [L1-content-prefix] FAILED (non-fatal, returning empty): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return [];
+    }
+  }
+
+  /**
    * FTS5 keyword search on L1 records.
    * Returns top-`limit` results sorted by BM25 relevance (highest first).
    *

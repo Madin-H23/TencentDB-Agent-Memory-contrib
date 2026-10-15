@@ -698,6 +698,15 @@ export interface IMemoryStore extends MemoryPromptStore, MemoryGenerationRefStor
 
   isFtsAvailable(): boolean;
 
+  /**
+   * 写入前指纹兜底（D2 第三件套，v2 4db48bf 移植）：按归一化内容前缀直查活库，
+   * 供 applyDecisions 在 store 决策写入前做同文存在性检查（组间竞态双入库的
+   * 确定性防线）。前缀是归一化文本的前 N 字符（调用方传入）；实现方负责 LIKE
+   * 转义，返回最小字段集（指纹确认只需 record_id/content）。无此方法的 store
+   * 跳过指纹检查（行为不变）。
+   */
+  findByContentPrefix?(prefix: string, limit?: number): MaybePromise<Array<{ record_id: string; content: string; type: string; priority: number }>>;
+
   // ── v2 API: Paginated queries (optional — added for Gateway v2) ──
 
   /**
