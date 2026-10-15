@@ -92,4 +92,13 @@ describe("loadGatewayConfig：llm.layers 解析 + splice 透传", () => {
     expect(cfg.llm.layers).toBeUndefined();
     expect(cfg.memory.llm.layers).toBeUndefined();
   });
+
+  it("l2 可配 stream:true（流式绕开 undici 300s headersTimeout）与 callDeadlineMs 覆盖", () => {
+    const cfg = loadWithYaml(
+      `${YAML}\n    l3:\n      stream: true\n      callDeadlineMs: 660000\n`,
+    );
+    expect(cfg.llm.layers?.l3).toEqual({ stream: true, callDeadlineMs: 660000 });
+    expect(cfg.memory.llm.layers?.l3?.stream).toBe(true);
+    expect(cfg.memory.llm.layers?.l3?.callDeadlineMs).toBe(660000);
+  });
 });

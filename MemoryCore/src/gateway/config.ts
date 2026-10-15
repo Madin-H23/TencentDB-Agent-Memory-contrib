@@ -691,6 +691,8 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
     if (disableThinking !== undefined) layer.disableThinking = disableThinking;
     const callDeadlineMs = num(g, "callDeadlineMs");
     if (callDeadlineMs !== undefined) layer.callDeadlineMs = callDeadlineMs;
+    const stream = bool(g, "stream");
+    if (stream !== undefined) layer.stream = stream;
     return Object.keys(layer).length > 0 ? layer : undefined;
   };
   const parsedLayers: LlmLayersOverride = {};

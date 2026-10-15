@@ -146,6 +146,12 @@ export interface LlmLayerOverride {
   disableThinking?: boolean;
   /** 整调用硬期限覆盖（须 ≥ 该层 timeoutMs + 限流退避预算，否则重试无意义）。 */
   callDeadlineMs?: number;
+  /**
+   * 流式请求覆盖（2026-10-15 加）。Node 内置 fetch(undici) headersTimeout 默认
+   * 300s，非流式补全「生成完才发头」，慢层（l2/l3 开思考的 step-5，单调用
+   * 1-5min）配到 600s 也会被静默截到 ~300s；流式即时发头绕开该天花板。
+   */
+  stream?: boolean;
 }
 
 export interface LlmLayersOverride {
@@ -179,6 +185,7 @@ export function applyLlmLayerOverride<T extends StandaloneLLMConfig>(
     ...(ov.timeoutMs !== undefined ? { timeoutMs: ov.timeoutMs } : {}),
     ...(ov.disableThinking !== undefined ? { disableThinking: ov.disableThinking } : {}),
     ...(ov.callDeadlineMs !== undefined ? { callDeadlineMs: ov.callDeadlineMs } : {}),
+    ...(ov.stream !== undefined ? { stream: ov.stream } : {}),
   };
 }
 

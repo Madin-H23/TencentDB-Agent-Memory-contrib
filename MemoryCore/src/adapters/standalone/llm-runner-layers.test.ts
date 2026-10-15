@@ -50,6 +50,12 @@ describe("applyLlmLayerOverride：按层叠覆盖", () => {
     expect(out.callDeadlineMs).toBe(660_000);
   });
 
+  it("stream 可按层覆盖（l2/l3 流式绕开 undici 300s headersTimeout）", () => {
+    expect(applyLlmLayerOverride(BASE, { stream: true }).stream).toBe(true);
+    expect(applyLlmLayerOverride(BASE, { stream: false }).stream).toBe(false);
+    expect(applyLlmLayerOverride(BASE, {}).stream).toBe(BASE.stream);
+  });
+
   it("不改写入参 base（纯函数）", () => {
     const snapshot = { ...BASE };
     applyLlmLayerOverride(BASE, { model: "x", maxTokens: 1, timeoutMs: 2, disableThinking: true, callDeadlineMs: 3 });

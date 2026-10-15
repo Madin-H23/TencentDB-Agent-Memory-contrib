@@ -440,6 +440,8 @@ export function createL1Runner(opts: {
     // resolveRuntimeLlm("l1") 一致：extraction.model > llm.layers.l1.model > llm.model；
     // disableThinking 为 L1 层生效值（显式配置 > env TDAI_DISABLE_THINKING）。
     const l1Model = cfg.extraction.model ?? cfg.llm?.layers?.l1?.model ?? cfg.llm?.model;
+    const l2Deadline = cfg.llm?.layers?.l2?.callDeadlineMs ?? cfg.llm?.callDeadlineMs;
+    const l2Stream = cfg.llm?.layers?.l2?.stream;
     logger.info(
       `${TAG} [l1] dedupFailFast=${cfg.extraction.dedupFailFast ? "on" : "off"}, ` +
       `dedupTimeoutMs=${cfg.extraction.dedupTimeoutMs ?? 180000}ms, ` +
@@ -447,7 +449,8 @@ export function createL1Runner(opts: {
       `maxConcurrency=${cfg.llm?.maxConcurrency ?? "(default)"}, ` +
       `callDeadlineMs=${cfg.llm?.callDeadlineMs ?? "(default)"}, ` +
       `dedupRecallRerank=${cfg.extraction.dedupRecallRerank ?? "none"}, ` +
-      `disableThinking=${resolveDisableThinking(cfg.llm?.layers?.l1?.disableThinking)}`,
+      `disableThinking=${resolveDisableThinking(cfg.llm?.layers?.l1?.disableThinking)}, ` +
+      `l2l3DeadlineMs=${l2Deadline ?? "(default)"}, l2l3Stream=${l2Stream === undefined ? "(global)" : l2Stream ? "on" : "off"}`,
     );
     logger.info(
       `${TAG} [l1] Session ${sessionKey}: l1_cursor=${runnerState.last_l1_cursor || "(start)"}`,
