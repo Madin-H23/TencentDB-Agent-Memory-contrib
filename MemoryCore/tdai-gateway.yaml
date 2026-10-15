@@ -36,8 +36,10 @@ llm:
   maxTokens: 65536
   timeoutMs: 120000
   # 进程级并发闸门（P1，承接 v2 在役值 4）：按 baseUrl 分桶限流，防多子系统调用
-  # 叠加触发厂商并发秒拒；0/缺省=不限
-  maxConcurrency: 4
+  # 叠加触发厂商并发秒拒；0/缺省=不限。10-15 4→2（用户令）：给中止调用的厂商侧
+  # 幽灵请求（中止后继续推理约 7min）留出 limit 5 的余量，代价是 L1/L2/L3 共桶
+  # 排队变慢（同一 stepfun baseUrl 分桶，慢层会占住槽位）。
+  maxConcurrency: 2
   # 整调用硬期限（P1，承接 v2 在役值）：≥ 各层超时+一次退避预算；缺省=timeout×2+30s
   callDeadlineMs: 360000
   # 蒸馏分层覆盖（2026-10-15 移植 v2 llm.layers）。修迁移失误：v3 曾全层单模型
