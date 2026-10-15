@@ -67,17 +67,17 @@ llm:
       # 全局 360s 曾被 splice 盖死本层 600s 超时——不配这里，L2/L3 合法长调用
       # （思考开+慢判定）会在 6min 被硬顶掐死。须 ≥ timeoutMs+退避预算。
       callDeadlineMs: 660000
-      # 流式（2026-10-15 加）：Node 内置 fetch(undici) headersTimeout 默认 300s，
-      # 非流式「生成完才发头」会把 600s 超时静默截到 ~300s；流式即时发头绕开。
-      # runner 收齐全文才返回，语义不变。
-      stream: true
+      # stream 曾于 2026-10-15 17:22 开启、18:41 回退：step-5 流式返回的
+      # tool_calls chunk 畸形（id/type/name 全空），AI SDK 校验拒收
+      # （AI_TypeValidationError）且在流读取协程逃逸成未处理拒绝→进程死
+      # （17:26/18:41 两度崩溃，网关静默死亡 ~20min）。流式复用须先修 chunk
+      # 清洗，非流式接受 undici 300s 天花板（v2 既定已知限制）。
       disableThinking: false
     l3:
       model: "step-5-preview"
       maxTokens: 65536
       timeoutMs: 600000
       callDeadlineMs: 660000
-      stream: true
       disableThinking: false
 
 # ── Memory 引擎 ──
