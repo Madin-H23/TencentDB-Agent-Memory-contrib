@@ -86,9 +86,9 @@ export interface L1ExtractionResult {
  * 非数组/JSON.parse 抛错）；dedup_failed=查重链失败（P0-Fix1 fail-closed）。
  */
 export class L1ExtractionFailure extends Error {
-  readonly reason: "llm_error" | "parse_error" | "dedup_failed";
+  readonly reason: "llm_error" | "empty_response" | "parse_error" | "dedup_failed";
 
-  constructor(reason: "llm_error" | "parse_error" | "dedup_failed", message: string) {
+  constructor(reason: "llm_error" | "empty_response" | "parse_error" | "dedup_failed", message: string) {
     super(message);
     this.name = "L1ExtractionFailure";
     this.reason = reason;
@@ -319,15 +319,18 @@ export async function extractL1Memories(params: {
     // P0-Fix2（#1395 语义）：结构垃圾响应（无 JSON 数组 / 非数组 / JSON.parse
     // 抛错=parse_fail）不是「合法空产出」——当空产出返回会让组循环推进游标，
     // 这轮内容即被永久跳过。必须上抛 parse_error 整批延后。
+    // empty_response（C2：上游空响应）同属必须延后的非判定族——空响应不是
+    // 「模型判定无可记」，延后标签用 empty_response 与结构垃圾区分。
     // empty_scenes / normalized_all_dropped 是 LLM 的合法空判定，保持
     // success:true 空产出（不误伤）。
-    if (finalReason === "no_json" || finalReason === "not_array" || finalReason === "parse_fail") {
+    if (finalReason === "no_json" || finalReason === "not_array" || finalReason === "parse_fail" || finalReason === "empty_response") {
+      const deferReason = finalReason === "empty_response" ? "empty_response" : "parse_error";
       logger?.warn?.(
-        `${TAG} l1-deferred reason=parse_error sessionKey=${sessionKey}, model=${pmModel}, provider=${pmProvider} — batch deferred, checkpoint cursor unchanged`,
+        `${TAG} l1-deferred reason=${deferReason} sessionKey=${sessionKey}, model=${pmModel}, provider=${pmProvider} — batch deferred, checkpoint cursor unchanged`,
       );
       throw new L1ExtractionFailure(
-        "parse_error",
-        `L1 extraction response was structural garbage (${finalReason}), batch deferred${pmSuffix}`,
+        deferReason,
+        `L1 extraction response was ${finalReason === "empty_response" ? "empty (upstream returned no content), batch deferred" : `structural garbage (${finalReason}), batch deferred`}${pmSuffix}`,
       );
     }
 
@@ -606,7 +609,9 @@ async function callLlmExtraction(params: {
       prompt: userPrompt,
       systemPrompt,
       taskId: "l1-extraction",
-      timeoutMs: 180_000,
+      // 不传 timeoutMs（A1，2026-10-16）：回落 runner 的分层解析超时（l1 层
+      // yaml timeoutMs，在役 300s）。曾硬编码 180_000 盖死层配置——v2 7a93b9d
+      // 同款教训，10-15 晚 persona 连续整 180s 中止即硬编码复发。
       ...traceParams,
     });
   } else {
@@ -622,7 +627,7 @@ async function callLlmExtraction(params: {
       prompt: userPrompt,
       systemPrompt,
       taskId: "l1-extraction",
-      timeoutMs: 180_000,
+      // 同主路径：不传 timeoutMs，由 fallback runner 自身配置/缺省治理
       ...traceParams,
     });
   }
@@ -637,6 +642,7 @@ async function callLlmExtraction(params: {
  */
 export type L1EmptyReason =
   | "llm_error"      // LLM call raised (thrown by callLlmExtraction)
+  | "empty_response" // 上游返回空/纯空白/只剩 think（C2，2026-10-16：瞬态可重试族，非结构垃圾）
   | "no_json"        // /\[[\s\S]*\]/ did not match in raw content
   | "parse_fail"     // JSON.parse threw on the extracted substring
   | "not_array"      // parse succeeded but result is not an array
@@ -691,6 +697,14 @@ function parseExtractionResult(raw: string, logger?: Logger): ParseExtractionOut
     let cleaned = stripped.trim();
     if (cleaned.startsWith("```")) {
       cleaned = cleaned.replace(/^```(?:json)?\s*\n?/, "").replace(/\n?```\s*$/, "");
+    }
+
+    // C2（2026-10-16）：think 剥离 + fence 剥离后仍为空 = 上游返回空内容
+    // （厂商瞬态/思考烧预算/截断）。与 no_json（有内容但无数组）分开归类：
+    // 同属延后集（数据不丢），但标签必须是 empty_response——10-15 rawLen=0
+    // 实证被打成「structural garbage (no_json)」，误导归因。
+    if (!cleaned) {
+      return { scenes: [], emptyReason: "empty_response" };
     }
 
     // Try to extract JSON array
@@ -762,8 +776,51 @@ function parseExtractionResult(raw: string, logger?: Logger): ParseExtractionOut
   }
 }
 
+/**
+ * B1（2026-10-16）：字符串感知的未转义引号修复。LLM 常把英文双引号裸写进
+ * 字符串值（10-15 PARSE_FAIL 实证：content 里 `...SSH over 443，"Everything
+ * up-to-date"需ls-remote...`，parse 在第一个裸引号后即崩，整轮作废）。逐字符
+ * 扫描跟踪字符串上下文：字符串内的 `"` 若后续（跳过空白）不是结构字符
+ * （, } ] :）或输入结束，则视为内容一部分，转义为 \"。
+ * 安全底线：合法 JSON 串内不存在裸引号（引号必以 \" 出现或即闭合），故合法
+ * 输入经本函数逐字节原样返回——幂等性有专测（b1-stray-quote-repair.test.ts）。
+ */
+function escapeStrayQuotesInStrings(json: string): string {
+  let out = "";
+  let inString = false;
+  for (let i = 0; i < json.length; i++) {
+    const ch = json[i]!;
+    if (!inString) {
+      out += ch;
+      if (ch === '"') inString = true;
+      continue;
+    }
+    if (ch === "\\") {
+      // 转义序列（\" \\ \n 等）：反斜杠+下一字符原样保留
+      out += ch + (json[i + 1] ?? "");
+      i++;
+      continue;
+    }
+    if (ch === '"') {
+      // 真闭合 vs 裸引号：看后续第一个非空白字符
+      let j = i + 1;
+      while (j < json.length && /\s/.test(json[j]!)) j++;
+      const next = json[j];
+      if (next === undefined || next === "," || next === "}" || next === "]" || next === ":") {
+        inString = false;
+        out += ch;
+      } else {
+        out += '\\"'; // 内容里的裸引号 → 转义，内容不丢
+      }
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
 function repairExtractionJson(json: string): string {
-  return json
+  return escapeStrayQuotesInStrings(json)
     .replace(
       /("priority"\s*:\s*)(?!-?\d+(?:\.\d+)?\s*[,}]|"[^"\\]*(?:\\.[^"\\]*)*"\s*[,}])([\s\S]*?)(?=,\s*"(?:content|type|priority|source_message_ids|metadata)"\s*:|[}\]])/g,
       (_m, prefix: string) => `${prefix}50`,

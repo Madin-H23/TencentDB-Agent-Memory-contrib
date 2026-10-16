@@ -202,14 +202,16 @@ export class PersonaGenerator {
 
     // 8. Run LLM agent (sandboxed to dataDir, tools enabled — LLM writes target L3 file directly)
     try {
-      this.logger?.debug?.(`${TAG} Calling LLM for ${targetFile} generation (timeout=180s, tools=enabled, workspaceDir=${this.dataDir})...`);
+      this.logger?.debug?.(`${TAG} Calling LLM for ${targetFile} generation (tools=enabled, workspaceDir=${this.dataDir})...`);
       // langfuse trace 语义：L3 persona 生成有独立 name / 顶级 user/session 列 / 可筛选 tags。
       const traceParams = buildTraceParams("memory.persona-generate", this.traceContext);
       await this.runner.run({
         systemPrompt,
         prompt: userPrompt,
         taskId: "persona-generation",
-        timeoutMs: 180_000,
+        // 不传 timeoutMs（A1，2026-10-16）：回落 runner 的分层解析超时（l3 层
+        // yaml timeoutMs，在役 600s）。曾硬编码 180_000——10-15 晚 persona
+        // 连续三次整 180s 中止（10-16 晨 L3 死信×3 的根因之一）。
         // maxTokens omitted → core uses the resolved model's maxTokens from catalog
         workspaceDir: this.dataDir,
         // Service mode: LLM tools read/write via StorageAdapter (COS) instead of local FS

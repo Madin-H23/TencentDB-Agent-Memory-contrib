@@ -447,13 +447,13 @@ export class StandaloneLLMRunner implements LLMRunner {
     }
 
     try {
-      // H-11 Step 2: combine internal timeout with caller-provided abortSignal
-      // (e.g. pipeline-worker lost its lock and wants the LLM call to bail out).
-      // AbortSignal.any (Node 20+) aborts when ANY of the listed signals abort.
-      const timeoutSignal = AbortSignal.timeout(timeoutMs);
-      const combinedSignal = params.abortSignal
-        ? AbortSignal.any([timeoutSignal, params.abortSignal])
-        : timeoutSignal;
+      // H-11 Step 2: caller-provided abortSignal（e.g. pipeline-worker lost its
+      // lock and wants the LLM call to bail out）—— 仅保留给外层重试/期限竞速做
+      // abort 传播。每次尝试的超时信号在闸门内创建（A2，2026-10-16）：曾在闸门外
+      // 创建，L1 排在 L2/L3 慢调用之后时队列等待时间烧掉 timeoutMs 预算，且两次
+      // 重试共用同一个已烧过的信号；移入后排队不烧预算、每次尝试独享满额，
+      // 总量仍由 runWithRateLimitRetry 的 callDeadlineMs 硬顶。
+      const callerSignal = params.abortSignal;
 
       const callParams = {
         model: provider.chat(this.model),
@@ -466,7 +466,6 @@ export class StandaloneLLMRunner implements LLMRunner {
           ? { tools, stopWhen: stepCountIs(maxIterations) }
           : {}),
         maxOutputTokens: maxTokens,
-        abortSignal: combinedSignal,
         experimental_telemetry: {
           isEnabled: true,
           functionId: params.taskId,
@@ -477,16 +476,22 @@ export class StandaloneLLMRunner implements LLMRunner {
       // stream=true → streamText(给只吃流式的上游);否则 generateText。
       // 读 totalUsage 而不是单 step 的 usage —— tool-call 多 step 时后者只报最后一步,
       // 会漏掉前序工具调用请求的用量,导致 credit 计费偏低。
-      // ai@6.0.164 的字段是 inputTokens/outputTokens/totalTokens。
+      // ai@6.0.164 的字段是 inputTokens/outputTokens/totalUsage。
       //
       // 执行包络（P1，v2 8c00003+859d388 移植）：并发闸门在内层（厂商分桶信号量，
       // 退避等待不占槽位），限流重试在外层（concurrency reached/429 → 指数退避
       // 重试 1 次），整体受 callDeadline 硬顶——上游挂死也必然在期限内返回。
       const callOnce = async () => {
         const execute = async () => {
+          // 超时信号在闸门内创建（A2）：每次尝试独享满额 timeoutMs，与 caller
+          // abort 合并（Node 20+ AbortSignal.any，任一触发即中止）。
+          const timeoutSignal = AbortSignal.timeout(timeoutMs);
+          const attemptSignal = callerSignal
+            ? AbortSignal.any([timeoutSignal, callerSignal])
+            : timeoutSignal;
           const r = this.stream
             ? await (async () => {
-                const streamResult = streamText(callParams);
+                const streamResult = streamText({ ...callParams, abortSignal: attemptSignal });
                 return {
                   text: ((await streamResult.text) ?? "").trim(),
                   usage: await streamResult.totalUsage,
@@ -494,7 +499,7 @@ export class StandaloneLLMRunner implements LLMRunner {
                 };
               })()
             : await (async () => {
-                const genResult = await generateText(callParams);
+                const genResult = await generateText({ ...callParams, abortSignal: attemptSignal });
                 return {
                   text: (genResult.text ?? "").trim(),
                   usage: genResult.totalUsage,
@@ -509,7 +514,7 @@ export class StandaloneLLMRunner implements LLMRunner {
       const { text, usage, steps } = await runWithRateLimitRetry(callOnce, {
         maxRetries: 1,
         deadlineMs: this.config.callDeadlineMs ?? timeoutMs * 2 + 30_000,
-      }, combinedSignal);
+      }, callerSignal);
 
       const totalMs = Date.now() - runStartMs;
 
