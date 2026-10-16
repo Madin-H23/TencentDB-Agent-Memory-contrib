@@ -56,6 +56,18 @@ describe("applyLlmLayerOverride：按层叠覆盖", () => {
     expect(applyLlmLayerOverride(BASE, {}).stream).toBe(BASE.stream);
   });
 
+  it("headers 是全局字段：按层覆盖不丢、层覆盖改不动（v2 extra.headers 移植）", () => {
+    const withHeaders: StandaloneLLMConfig = {
+      ...BASE,
+      headers: { "x-opencode-session": "8ae1bd54-2614-41ae-9ada-c21a2a3e7a00" },
+    };
+    expect(applyLlmLayerOverride(withHeaders, { model: "l1-model" }).headers).toEqual({
+      "x-opencode-session": "8ae1bd54-2614-41ae-9ada-c21a2a3e7a00",
+    });
+    // LlmLayerOverride 无 headers 键——编译期即挡「按层换头」意图
+    expect(applyLlmLayerOverride(withHeaders, { maxTokens: 1 }).headers).toEqual(withHeaders.headers);
+  });
+
   it("不改写入参 base（纯函数）", () => {
     const snapshot = { ...BASE };
     applyLlmLayerOverride(BASE, { model: "x", maxTokens: 1, timeoutMs: 2, disableThinking: true, callDeadlineMs: 3 });

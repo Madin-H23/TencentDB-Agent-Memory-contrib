@@ -104,6 +104,13 @@ export interface StandaloneLLMConfig {
    */
   callDeadlineMs?: number;
   /**
+   * 自定义请求头（v2 extra.headers 移植，2026-10-16）：随每次厂商请求发送。
+   * 部分 OpenAI 兼容上游强制要求固定头（opencode-go 缺 x-opencode-session 时
+   * 上游 400 MissingSessionID，node fetch 探针 2026-10-16 实证）。全局字段，
+   * 不按层覆盖（换头=改全局 llm 块）。
+   */
+  headers?: Record<string, string>;
+  /**
    * LLM 访问模式（gateway 层解释；runner 拿到的是已解析后的 baseUrl/apiKey）：
    *   - "openai": 直连通用 OpenAI 兼容服务（默认，向后兼容）
    *   - "proxy":  走 context_proxy，运行时会自动把 baseUrl 拼成
@@ -396,6 +403,11 @@ export class StandaloneLLMRunner implements LLMRunner {
       baseURL: this.config.baseUrl,
       apiKey: this.config.apiKey,
       compatibility: "compatible",
+      // 自定义请求头（v2 extra.headers 移植）：opencode-go 等厂商强制要求
+      // （缺 x-opencode-session 上游 400）。空对象/缺省不传，行为不变。
+      ...(this.config.headers && Object.keys(this.config.headers).length > 0
+        ? { headers: this.config.headers }
+        : {}),
       ...(wantsDisableThinking
         ? {
             fetch: async (url: unknown, init?: RequestInit) => {

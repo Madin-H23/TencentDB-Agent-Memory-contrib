@@ -677,6 +677,19 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
       if (envVal !== undefined) return envVal === "true";
       return bool(llmConfig, "stream") ?? false;
     })(),
+    // 自定义请求头（v2 extra.headers 移植，2026-10-16）：yaml llm.headers 字符串
+    // 映射。opencode-go 等厂商强制要求固定头（缺 x-opencode-session 上游 400
+    // MissingSessionID，node fetch 探针实证）；无 headers 厂商不配即行为不变。
+    headers: (() => {
+      const raw = obj(llmConfig, "headers");
+      const out: Record<string, string> = {};
+      for (const [k, v] of Object.entries(raw)) {
+        // 只收字符串值：数字/布尔/null/对象跳过（请求头语义即字符串，
+        // yaml 写错类型时静默忽略该条而非把 [object Object] 发上游）
+        if (typeof v === "string") out[k] = v;
+      }
+      return Object.keys(out).length > 0 ? out : undefined;
+    })(),
   };
   // 蒸馏分层覆盖（v2 llm.layers 移植，2026-10-15）：l1|l2|l3 五标量字段，
   // 未配置的层不产出键。面板「分层配置编辑」写入的即是本结构。
@@ -744,6 +757,8 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
       maxConcurrency: llm.maxConcurrency,
       callDeadlineMs: llm.callDeadlineMs,
       providerLabel: llm.providerLabel,
+      // 自定义请求头（2026-10-16 补）：同上，漏丢=opencode-go 类厂商 400。
+      ...(llm.headers ? { headers: llm.headers } : {}),
       ...(llm.layers ? { layers: llm.layers } : {}),
     };
   }

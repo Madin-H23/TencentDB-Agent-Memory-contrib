@@ -310,6 +310,12 @@ export interface StandaloneLLMOverrideConfig {
    * 面板「分层配置编辑」（PUT /api/layers/:layer）写入的即是本结构。
    */
   layers?: LlmLayersOverride;
+  /**
+   * 自定义请求头（v2 extra.headers 移植，2026-10-16）：yaml llm.headers 字符串
+   * 映射，随每次厂商请求发送。opencode-go 缺 x-opencode-session 时上游 400
+   * （MissingSessionID，探针实证）——切这类厂商必须配。全局字段不按层覆盖。
+   */
+  headers?: Record<string, string>;
 }
 
 /** Context Offload settings — controls multi-layer context compression. */

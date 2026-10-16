@@ -654,6 +654,7 @@ export class TdaiCore {
     disableThinking?: boolean;
     maxConcurrency?: number;
     callDeadlineMs?: number;
+    headers?: Record<string, string>;
   } {
     const resolved = resolveStandaloneLlmForRuntime(this.cfg.llm, this.instanceId);
     const base = {
@@ -666,6 +667,9 @@ export class TdaiCore {
       ...(resolved.disableThinking !== undefined ? { disableThinking: resolved.disableThinking } : {}),
       ...(resolved.maxConcurrency !== undefined ? { maxConcurrency: resolved.maxConcurrency } : {}),
       ...(resolved.callDeadlineMs !== undefined ? { callDeadlineMs: resolved.callDeadlineMs } : {}),
+      // 自定义请求头（2026-10-16）：全局字段，按层覆盖不动它——出口必须显式带，
+      // 否则 splice 进来也到不了 runner（装配链逐字段重建教训）。
+      ...(resolved.headers ? { headers: resolved.headers } : {}),
     };
     return applyLlmLayerOverride(base, layer ? this.cfg.llm.layers?.[layer] : undefined);
   }

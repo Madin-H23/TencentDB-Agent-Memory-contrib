@@ -117,3 +117,49 @@ describe("loadGatewayConfig：providerLabel 归属字段（v2 c00899f 移植）"
     expect(cfg.memory.llm.providerLabel).toBeUndefined();
   });
 });
+
+describe("loadGatewayConfig：llm.headers 自定义请求头（v2 extra.headers 移植，2026-10-16）", () => {
+  // opencode-go 等厂商强制要求固定请求头（缺 x-opencode-session 时上游 400
+  // MissingSessionID，node fetch 探针 2026-10-16 实证）；v3 单厂商配置原无 headers
+  // 字段，切这类厂商前补解析+splice。全局字段（不按层覆盖）。
+  const HEADERS_YAML = `${YAML}
+  headers:
+    x-opencode-session: "8ae1bd54-2614-41ae-9ada-c21a2a3e7a00"
+    x-custom-flag: "on"
+`;
+
+  it("yaml llm.headers 字符串映射解析", () => {
+    const cfg = loadWithYaml(HEADERS_YAML);
+    expect(cfg.llm.headers).toEqual({
+      "x-opencode-session": "8ae1bd54-2614-41ae-9ada-c21a2a3e7a00",
+      "x-custom-flag": "on",
+    });
+  });
+
+  it("splice 进 memory.llm（装配链逐字段重建，漏字段即静默失效——e674e3a 教训）", () => {
+    const cfg = loadWithYaml(HEADERS_YAML);
+    expect(cfg.memory.llm.headers).toEqual({
+      "x-opencode-session": "8ae1bd54-2614-41ae-9ada-c21a2a3e7a00",
+      "x-custom-flag": "on",
+    });
+  });
+
+  it("未配置 → 两处均 undefined（不影响无 headers 厂商）", () => {
+    const cfg = loadWithYaml(YAML);
+    expect(cfg.llm.headers).toBeUndefined();
+    expect(cfg.memory.llm.headers).toBeUndefined();
+  });
+
+  it("非字符串值跳过（数字/布尔/null/对象不入 headers）", () => {
+    const cfg = loadWithYaml(
+      `${YAML}
+  headers:
+    x-num: 123
+    x-bool: true
+    x-null: null
+    x-ok: "keep"
+`,
+    );
+    expect(cfg.llm.headers).toEqual({ "x-ok": "keep" });
+  });
+});
