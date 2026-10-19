@@ -1,21 +1,14 @@
 # ============================================================
-# TDAI Gateway — v3 迁移配置（2026-10-14，自 v2 upstream-eval 迁移）
+# TDAI Gateway — v3 在役配置（快照 2026-10-19；2026-10-14 自 v2 upstream-eval 迁移）
 # ============================================================
-# 迁移来源：D:\Develop\TencentDB-Agent-Memory\repo\MemoryCore\tdai-gateway.yaml
-# （v2 在役运行态，HEAD ece04f5）。对照 v3 schema（gateway/config.ts）逐键映射。
-#
-# ── v2 有而 v3 无（迁移损失，详见 V3-MIGRATION-TRIAGE.md）──
-#   * llm 多厂商 providers[]/activeProvider —— v3 单厂商，切厂商=改本文件 baseUrl/model+重启
-#   * llm.layers.l1/l2/l3 分层 model 覆盖 —— v3 全层单模型；maxTokens/timeoutMs 走 offload.*
-#   * disableThinking（含 TDAI_DISABLE_THINKING env）—— v3 无思考开关，启动件该变量将被忽略
-#   * llm.maxConcurrency 并发闸门 / callDeadlineMs 硬期限 / 429 退避 —— v3 全无
-#   * extraction.dedupFailFast(S1 fail-closed) / dedupTimeoutMs(240s) / dedupRecallRerank(D2)
-#     / attributionGuard / userIdentityNames —— v3 无这些键（放进来也会被静默忽略，故不写）；
-#     v3 dedup 仍 fail-open 且查重超时硬编码 180s
+# 迁移时「v2 有而 v3 无」的能力此后已陆续移植回 v3（本文件 llm 块即最终形态）：
+# 排空端点 d239d6b / 分层配置+关思考 5e23941 / 并发闸门+callDeadline+限流退避
+# 1765221 / D2 指纹兜底 0acac07 / 请求头注入 f05b696 / 按厂商并发（面板 2026-10-18）。
+# 剩余差异与挂账见 V3-MIGRATION-TRIAGE.md。切厂商优先走面板（自动清层 model 覆盖）。
 # ── 密钥链 ──
-#   厂商 key 经 yaml ${TDAI_KEY_*} 插值取得（当前 llm.apiKey=${TDAI_KEY_OPENCODE}，
-#   opencode-go）。启动件不得设 TDAI_LLM_API_KEY——gateway/config.ts 里 env 优先于
-#   yaml，设了就会把别家 key 强塞给当前厂商（2026-10-16 切厂商时已从 bat 摘除该行）。
+#   厂商 key 经 yaml ${TDAI_KEY_*} 插值取得（当前 llm.apiKey=${TDAI_KEY_ZHIPU}，
+#   zhipu-free）。启动件不得设 TDAI_LLM_API_KEY——env 优先于 yaml，设了会把别家
+#   key 强塞给当前厂商（2026-10-16 起已从启动件摘除该行）。
 
 deployMode: standalone
 stateBackend: "local"
@@ -28,38 +21,44 @@ server:
 data:
   baseDir: "~/.memory-tencentdb/memory-tdai"
 
-# ── LLM（单厂商直连；2026-10-16 切到 opencode-go）──
+# ── LLM（单厂商直连；当前在役 zhipu-free，2026-10-18 晚起）──
 llm:
-  # 厂商切换史：阶跃星辰（step-3.7-flash/step-5-preview，10-14~10-16 10:22 在役）
-  # → 10-16 10:22 阶跃 step 套餐额度耗尽（"you have no left credit for step plan"，
-  # L1/L2/L3 全层连败+L3 死信×3）→ 切回 v2 实证可用的 opencode-go。
-  baseUrl: "https://opencode.ai/zen/go/v1"
-  # key 走 yaml 插值（启动件 set TDAI_KEY_OPENCODE）；注意启动件不得再设
-  # TDAI_LLM_API_KEY——env 优先于 yaml，会把别家 key 强塞给本厂商（已从 bat 摘除）。
-  apiKey: "${TDAI_KEY_OPENCODE}"
-  # 自定义请求头（2026-10-16 移植 v2 extra.headers）：opencode-go 强制要求
-  # x-opencode-session，缺失时上游 400 MissingSessionID（node fetch 探针实证：
-  # 缺头 400/带头 200；v2 yaml 注释同述「2026-09-08 起缺失拒请求」）。
-  headers:
-    x-opencode-session: "8ae1bd54-2614-41ae-9ada-c21a2a3e7a00"
+  # 厂商切换史（各带死因）：阶跃星辰（10-14~10-16 10:22，step 套餐额度耗尽）
+  # → opencode-go/deepseek-v4.1-flash（10-16 11:24~14:45，402 额度尽；10-18 复查
+  #   key 又 401 失效，复用需新 key）→ OpenRouter nemotron-3.5-super-vl:free
+  #   （10-16 傍晚~10-18 08:47，free-models-per-day 日额度耗尽；UTC 0 点自愈但
+  #   免费档额度扛不住日常蒸馏量）→ zhipu-free/glm-4.7-flash（10-18 晚起在役）。
+  # 备选：智谱coding plan（open.bigmodel.cn/api/coding/paas/v4 订阅端点，key 同
+  # TDAI_KEY_ZHIPU，已入面板目录，晚高峰可切）/ deepseek-official（按量付费）。
+  baseUrl: "https://open.bigmodel.cn/api/paas/v4"
+  # key 走 yaml 插值（启动件 set TDAI_KEY_ZHIPU）；注意启动件不得再设
+  # TDAI_LLM_API_KEY——env 优先于 yaml，会把别家 key 强塞给本厂商。
+  apiKey: "${TDAI_KEY_ZHIPU}"
+  # 无自定义请求头：zhipu 不要求固定头（opencode-go 的 x-opencode-session 是
+  # 上一家厂商的专项，切走即摘；headers 字段缺省=不发额外头）。
   # 厂商显示名（归属移植，v2 c00899f）：纯展示字段——L1 完成/延后/失败日志与
   # 面板蒸馏记录/死信两卡的「(厂商: 模型)」归属。不参与调用路由。
-  providerLabel: "opencode-go"
-  # 全局模型（l2/l3 未显式覆盖 model 时沿用）：opencode-go 在役值 deepseek-v4.1-flash。
-  model: "deepseek-v4.1-flash"
+  providerLabel: "zhipu-free"
+  # 全局模型（l2/l3 未显式覆盖 model 时沿用）：glm-4.7-flash（zhipu 免费档）。
+  # 已知边界：**上下文远小于 nemotron 的 1M**——L2/L3 长输入会撞 Prompt exceeds
+  # max length（10-19 实测 6 次，400 不可重试），待决策分层大上下文模型；
+  # 晚高峰易触发上游「访问量过大」（并发负载）与「已达到速率限制」（账户级 RPM，
+  # 并发 1 也挡不住）两类限流，退避已兜底、游标不动数据不丢。
+  model: "glm-4.7-flash"
   maxTokens: 65536
   timeoutMs: 120000
-  # 进程级并发闸门（P1，承接 v2 在役值）：按 baseUrl 分桶限流，防多子系统调用
-  # 叠加触发厂商并发秒拒；0/缺省=不限。10-15 曾在阶跃 limit=5 语境下 4→2（给中止
-  # 调用的厂商侧幽灵请求留余量）；opencode-go 无该硬限（v2 在役值 4，今早零异常），
-  # 此处维持 2 未回抬——要提速可改 4+重启。
-  maxConcurrency: 2
+  # 进程级并发闸门：按 baseUrl 分桶限流，防多子系统调用叠加触发厂商秒拒；0/缺省=不限。
+  # 按厂商并发（2026-10-18）：面板目录条目 maxConcurrency 随切换写入本值——zhipu-free
+  # 内置 1（晚高峰持续拥堵实证，串行最稳）；条目无设定=保留现值（生效行有回显，
+  # 上家残留可经「编」修改）。
+  maxConcurrency: 1
   # 整调用硬期限（P1，承接 v2 在役值）：≥ 各层超时+一次退避预算；缺省=timeout×2+30s
   callDeadlineMs: 360000
   # 蒸馏分层覆盖（2026-10-15 移植 v2 llm.layers）。修迁移失误：v3 曾全层单模型
   # step-5-preview（含 L1 热路径），而 step-5 判死档案=单调用 1-5min/永远思考/并发
   # 幽灵——10-15 全天 dedup 240s 超时+concurrency reached 死信即该形态。
-  # 分层机制本身与厂商无关：10-16 切 opencode-go 只改各层 model 值，结构不动。
+  # 分层机制与厂商无关。2026-10-18 起面板切换厂商会**自动清空各层 model 覆盖**
+  # （残留旧厂商模型名在新厂商侧必 400 实证）；需分层异模型，切换后在管线图重新指定。
   # 五标量字段可按层覆盖：model/maxTokens/timeoutMs/disableThinking/callDeadlineMs；
   # 未配置字段沿用全局；面板「分层配置编辑」写入同结构；改后须重启网关，看
   # [l1] 锚点行确认生效值。disableThinking 三态：true 强制关（注入
@@ -68,26 +67,15 @@ llm:
   # content 空，v2 注释实证）；l2·l3 开思考（用户 10-15 令）。
   layers:
     l1:
-      model: "deepseek-v4.1-flash"
       maxTokens: 32768
       timeoutMs: 300000
       disableThinking: true
     l2:
-      model: "deepseek-v4.1-flash"
       maxTokens: 65536
       timeoutMs: 600000
-      # 整调用硬期限 660s（2026-10-15 加，v2 实证口径「全局 360s + l2/l3 660s」）：
-      # 全局 360s 曾被 splice 盖死本层 600s 超时——不配这里，L2/L3 合法长调用
-      # （思考开+慢判定）会在 6min 被硬顶掐死。须 ≥ timeoutMs+退避预算。
       callDeadlineMs: 660000
-      # stream 曾于 2026-10-15 17:22 开启、18:41 回退：step-5 流式返回的
-      # tool_calls chunk 畸形（id/type/name 全空），AI SDK 校验拒收
-      # （AI_TypeValidationError）且在流读取协程逃逸成未处理拒绝→进程死
-      # （17:26/18:41 两度崩溃，网关静默死亡 ~20min）。流式复用须先修 chunk
-      # 清洗，非流式接受 undici 300s 天花板（v2 既定已知限制）。
       disableThinking: false
     l3:
-      model: "deepseek-v4.1-flash"
       maxTokens: 65536
       timeoutMs: 600000
       callDeadlineMs: 660000
@@ -162,7 +150,7 @@ skill:
     maxResourceSizeBytes: 5000000
   # 注：v2 的 resources.allowExecutable 在 v3 未接线（写了也不拦截），已随迁移丢弃
 
-# ── 可观测性（全部关闭，与 v2 无遥测状态一致）──
+  # ── 可观测性（全部关闭，与 v2 无遥测状态一致）──
 observability:
   otel:
     enabled: false

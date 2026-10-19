@@ -84,7 +84,7 @@
 | e601281 | idx_l0_user_agent_ts 驱动索引 | 需重做(低优) | v3 无 (user,agent,timestamp) 复合索引（sqlite memory-store.ts:650-659）；一行 DDL 可作本地补丁 |
 | b299c87 | 热路径与死代码清理 | 不再需要 | v2 特定清理面，v3 重写 |
 | 70055eb | 运维降噪+损坏配置显错+unhandledRejection 兜底 | **需重做(高优)** | v3 无进程级兜底（node ≥15 默认 unhandled rejection 即 crash）；v3 yaml 解析失败反而**静默吞掉回退 env**（gateway/config.ts:609-611 空 catch）——比 v2 更糟 |
-| a583c3d | L1 积压搁浅竞态+手动排空端点 | 需审查 | v3 pipeline-manager 重写，buffer 恢复机制不同（30s×5 重试）；需确认同类竞态是否存在 |
+| a583c3d | L1 积压搁浅竞态+手动排空端点 | **端点已移植**（10-15 `d239d6b`）；竞态仍待审查 | v3 pipeline-manager 重写，buffer 恢复机制不同（30s×5 重试）；同类竞态是否仍存在待确认。端点两种场景（手动立即排空+补跑误跳批次）都需要，先补 HTTP 暴露：V2RouterDeps 加 getStatefulPipelineManager + server 接线 + 6 单测（63/63 绿）；面板排空按钮 404 已修复 |
 | e2bba75 | 空产出轮日志锚点 | **被吸收** | v3 有 l1-empty reason=llm_error 日志（l1-extractor.ts:211-217） |
 | e854810 | skill.enabled=true | 配置承接 | 新 yaml 已带 |
 | 1132661+f124dec(pipeline) | everyNConversations=5/maxScenes 20 | 配置承接 | v3 同键同语义（探索实证），新 yaml 已带 |
@@ -111,9 +111,7 @@
 
 ## 十一、重做优先级汇总（若拍板「v3+重做」路线）
 
-> **2026-10-14 更新：用户拍板路线 B；P0 三项已重做完成并实证**（commit 111c3b7，分支 local/p0-fixes，
-> 红→绿 20/20 测试 + 坏端点注入冒烟：任务 3 重试→死信、游标不动、L1 数不变、恢复后补蒸馏；
-> checkpoint 兼容性在 v2 生产写入的 30+ sid map 上直接实证）。配置承接 commit 2ca5a7e。
+> **2026-10-14 更新（二批）：用户拍板①②③④全部推进、⑤销项**。已完成：①并发闸门+限流退避+callDeadline（1765221，maxConcurrency=4/360s 承接 v2）✅；④组间并行工作池 3（同 commit，含查重 filter 去 sessionId 的并行安全随修）✅；③金标 harness 适配 v3+双臂改 none/lexical（9a24f1c，--limit=3 冒烟通过）✅；②D2 召回重排 lexical 灰度开启（9a24f1c，全量 250 对 A/B 验证进行中）✅。deferred：D2 写入前指纹兜底（主 both-new 向量已被 filter 修复消除，留观察窗后评估）。销项：扫描截断保护（单租户形态不触发）、面板版本显示（用户暂缓）。
 
 - **P0（数据正确性）**：~~S1 fail-closed + dedupTimeoutMs 可配（C 组）~~✅已重做；~~L1 失败不推进游标（c32bc6b）~~✅已重做；~~per-sid 场景连续性（ed42826 残留半边）~~✅已重做
 - **P1（稳定性）**：unhandledRejection 兜底+配置解析显错（70055eb）、并发闸门+429 退避（B 组，若续用阶跃/免费档厂商）、D2 召回轻修重做
