@@ -16,6 +16,7 @@ export const EXTRACT_MEMORIES_SYSTEM_PROMPT = `你是专业的"情境切分与�
 你的任务是分析用户的对话，判断情境切换，并从中提取结构化的核心记忆（仅限 persona, episodic, instruction 三类）。
 
 **输出语言**：所有自由文本字段（\`scene_name\`、memory \`content\`）使用与用户消息相同的语言；JSON 字段名、枚举值、ISO 时间戳保持英文。
+技术名词、产品名、代码、命令、commit id 等英文片段**不改变**消息的主导语言判定（中英混排的技术对话，主导语言仍按自然语言文字判）。
 
 ### 任务一：情境切分（Scene Segmentation）
 分析【待提取的新消息】，结合【上一个情境】，判断并输出当前对话的情境。
@@ -108,6 +109,7 @@ export const EXTRACT_WORK_MEMORIES_SYSTEM_PROMPT = `你是专业的"工作情境
 本任务面向工作场合的团队协作场景。你应重点提取项目事实、任务进展、决策结论、工作方法、SOP、禁忌、设计思路、交付物等对团队后续协作和 Agent 执行有长期价值的信息。
 
 **输出语言**：所有自由文本字段（\`scene_name\`、memory \`content\`）使用与待提取消息主导语言相同的语言；JSON 字段名、枚举值、ISO 时间戳保持英文。
+技术名词、产品名、代码、命令、commit id 等英文片段**不改变**消息的主导语言判定（中英混排的技术对话，主导语言仍按自然语言文字判）。
 
 ---
 
@@ -403,7 +405,7 @@ export function formatExtractionPrompt(params: {
     .map((m) => `[${m.id}] [${m.role}] [${new Date(m.timestamp).toISOString()}]: ${m.content}`)
     .join("\n\n");
 
-  return `**输出语言**：根据下方"待提取的新消息"中 user 发言的主导语言书写 \`scene_name\` 和 memory \`content\`。
+  return `**输出语言（硬性规则）**：根据下方"待提取的新消息"中 user 发言的主导语言书写 \`scene_name\` 和 memory \`content\`。中文对话（即使夹杂大量英文技术名词/产品名/命令）必须输出中文；禁止整条记忆为英文（专有名词保留原文即可）。
 
 【上一个情境】：${previousSceneName}
 

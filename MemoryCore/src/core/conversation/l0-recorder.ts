@@ -70,6 +70,8 @@ export interface L0ConversationRecord {
 }
 
 const TAG = "[memory-tdai][l0]";
+// 污染替换兜底计数（2026-10-19 巡检①）：进程级累计，每 50 次输出一条 info 汇总
+let l0ReplacementFallbackCount = 0;
 
 // ============================
 // Core function
@@ -245,9 +247,19 @@ export async function recordConversation(params: {
         `skipping replacement, will rely on sanitizeText().`,
       );
     } else {
-      logger?.warn?.(
+      // 2026-10-19 巡检①：定位失败是 best-effort 兜底的常态路径（批量边界错位/
+      // capture 未带位置元数据），~1% L0 消息存注入版且 sanitizeText 兜底——
+      // 曾以 WARN 刷屏 err（累计 2873 条）淹没真告警，降 debug+计数（每 50 次
+      // 输出一条 info 汇总，跳过率可 grep）。
+      l0ReplacementFallbackCount++;
+      if (l0ReplacementFallbackCount % 50 === 1) {
+        logger?.info?.(
+          `${TAG} 污染替换兜底累计 ${l0ReplacementFallbackCount} 次（定位失败，已用 sanitizeText 兜底入库）`,
+        );
+      }
+      logger?.debug?.(
         `${TAG} Have originalUserText but cannot locate target raw message — ` +
-        `skipping replacement, will rely on sanitizeText().`,
+        `skipping replacement (count=${l0ReplacementFallbackCount}), will rely on sanitizeText().`,
       );
     }
   }
