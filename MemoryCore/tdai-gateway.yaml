@@ -24,7 +24,7 @@ data:
 # 厂商实测档案见 handoff-memory-config-provider-dev-20260908.md §4;新厂商接入后必须
 #   实测一轮蒸馏(extracted>0)才算接入成功
 llm:
-  activeProvider: "阶跃星辰"
+  activeProvider: "opencode-go"
   # 进程级厂商并发闸门(2026-10-13):并发类秒拒(concurrency reached)防护。step-5 限额 5
   # 时压到 4 留余量;opencode-go 无此硬限但 4 仍是合理的进程级上限。0/缺省=不限。
   maxConcurrency: 4
@@ -201,11 +201,9 @@ llm:
     l2:
       maxTokens: 65536
       disableThinking: false
-      model: step-5-preview
     l3:
       maxTokens: 65536
       disableThinking: false
-      model: step-5-preview
     l1:
       maxTokens: 32768
       disableThinking: true
