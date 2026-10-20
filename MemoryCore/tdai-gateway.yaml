@@ -51,7 +51,7 @@ llm:
   # 按厂商并发（2026-10-18）：面板目录条目 maxConcurrency 随切换写入本值——zhipu-free
   # 内置 1（晚高峰持续拥堵实证，串行最稳）；条目无设定=保留现值（生效行有回显，
   # 上家残留可经「编」修改）。
-  maxConcurrency: 2
+  maxConcurrency: 4
   # 整调用硬期限（P1，承接 v2 在役值）：≥ 各层超时+一次退避预算；缺省=timeout×2+30s
   callDeadlineMs: 360000
   # 蒸馏分层覆盖（2026-10-15 移植 v2 llm.layers）。修迁移失误：v3 曾全层单模型
@@ -67,19 +67,22 @@ llm:
   # content 空，v2 注释实证）；l2·l3 开思考（用户 10-15 令）。
   layers:
     l1:
-      maxTokens: 32768
+      maxTokens: 64000
       timeoutMs: 300000
-      thinkingLevel: disabled
+      thinkingLevel: low
+      model: minimax-m3.1-flash-free
     l2:
-      maxTokens: 65536
+      maxTokens: 128000
       timeoutMs: 600000
       callDeadlineMs: 660000
-      thinkingLevel: enabled
+      thinkingLevel: max
+      model: minimax-m3.1-flash-free
     l3:
-      maxTokens: 65536
+      maxTokens: 128000
       timeoutMs: 600000
       callDeadlineMs: 660000
-      thinkingLevel: enabled
+      thinkingLevel: max
+      model: minimax-m3.1-flash-free
   headers:
     x-opencode-session: 8ae1bd54-2614-41ae-9ada-c21a2a3e7a00
 
