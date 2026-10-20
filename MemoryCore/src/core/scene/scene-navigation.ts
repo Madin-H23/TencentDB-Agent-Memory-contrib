@@ -7,6 +7,7 @@
 
 import path from "node:path";
 import type { SceneIndexEntry } from "./scene-index.js";
+import { redactPii } from "../../utils/pii-redact.js";
 
 const NAV_HEADER = "---\n## 🗺️ Scene Navigation (Scene Index)";
 
@@ -111,7 +112,11 @@ export function renderSceneNavigation(
   const blocks = sorted.map((e) => {
     const pathLine = `### Path: ${opts.pathFor(e)}`;
     const heatLine = `**热度**: ${e.heat}${heatEmoji(e.heat)}${e.updated ? ` | **更新**: ${e.updated}` : ""}`;
-    const summaryLine = `Summary: ${e.summary}`;
+    // nav 段是工程代码追加的（上游 persona-generator 只脱敏 LLM 写的 body），
+    // 摘要逐字来自场景文件 META，未脱敏会把私有邮箱/手机号带进 persona.md
+    // 并经 /v2/core/read 与 rowfs 读时重渲染对外可见（审计 P0-1）。
+    // 路径行不脱敏：它是给本地 agent 用 read 工具回读场景文件的必要信息。
+    const summaryLine = `Summary: ${redactPii(e.summary)}`;
     return `${pathLine}\n${heatLine}\n${summaryLine}`;
   });
 

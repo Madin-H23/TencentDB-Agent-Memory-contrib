@@ -577,6 +577,16 @@ export class StandaloneLLMRunner implements LLMRunner {
           ? { tools, stopWhen: stepCountIs(maxIterations) }
           : {}),
         maxOutputTokens: maxTokens,
+        // maxRetries:0 = 关闭 AI SDK 内置快速重试（默认 2 连发，共 3 次请求）。
+        // 回归修复（2026-10-20，批次 1.2）：v2 的 859d388 已在 SDK 调用上设过
+        // maxRetries:0，v3 移植 1765221 时漏带，SDK 调用回落到默认 3 连发。
+        // 内置重试间隔约 8s，对限流/日额度类拒绝毫无意义（额度不会在 8 秒内
+        // 恢复），却把每次失败的厂商请求放大 3 倍；与外层限流退避重试叠加后
+        // 单次抽取最多打出 6 个厂商请求，在按日额度计费的厂商上是纯浪费。
+        // 实测证据："Failed after 3 attempts" 在 v2 生效期（10-08~10-13）出现
+        // 0 次，v3 接管后（10-14~10-20）出现 999 次。
+        // 限流感知的长退避由外层 runWithRateLimitRetry 承担（见下）。
+        maxRetries: 0,
         experimental_telemetry: {
           isEnabled: true,
           functionId: params.taskId,
