@@ -20,6 +20,7 @@ import type {
   LlmLayerOverride,
   LlmLayersOverride,
 } from "../adapters/standalone/llm-runner.js";
+import { isThinkingLevel } from "../adapters/standalone/llm-runner.js";
 // v2.6 方案 E fallback:yaml 未配 supportedAgents 时用此常量
 import { DEFAULT_SUPPORTED_AGENTS_FALLBACK } from "../metadata/default-supported-agents.js";
 
@@ -705,6 +706,11 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
     if (timeoutMs !== undefined) layer.timeoutMs = timeoutMs;
     const disableThinking = bool(g, "disableThinking");
     if (disableThinking !== undefined) layer.disableThinking = disableThinking;
+    // 思考等级（2026-10-20）：新键优先于旧三态 disableThinking；非法值忽略
+    const thinkingLevelRaw = str(g, "thinkingLevel");
+    if (thinkingLevelRaw && isThinkingLevel(thinkingLevelRaw)) {
+      layer.thinkingLevel = thinkingLevelRaw;
+    }
     const callDeadlineMs = num(g, "callDeadlineMs");
     if (callDeadlineMs !== undefined) layer.callDeadlineMs = callDeadlineMs;
     const stream = bool(g, "stream");

@@ -30,6 +30,7 @@ import type {
   ConversationSearchParams,
 } from "./types.js";
 import type { MemoryTdaiConfig } from "../config.js";
+import type { ThinkingLevel } from "../adapters/standalone/llm-runner.js";
 import type { IMemoryStore } from "./store/types.js";
 import type { EmbeddingService } from "./store/embedding.js";
 import type { StorageAdapter } from "./storage/adapter.js";
@@ -652,6 +653,7 @@ export class TdaiCore {
     timeoutMs: number;
     stream: boolean;
     disableThinking?: boolean;
+    thinkingLevel?: ThinkingLevel;
     maxConcurrency?: number;
     callDeadlineMs?: number;
     headers?: Record<string, string>;
@@ -665,6 +667,7 @@ export class TdaiCore {
       timeoutMs: resolved.timeoutMs ?? 120_000,
       stream: resolved.stream ?? false,
       ...(resolved.disableThinking !== undefined ? { disableThinking: resolved.disableThinking } : {}),
+      ...(resolved.thinkingLevel !== undefined ? { thinkingLevel: resolved.thinkingLevel } : {}),
       ...(resolved.maxConcurrency !== undefined ? { maxConcurrency: resolved.maxConcurrency } : {}),
       ...(resolved.callDeadlineMs !== undefined ? { callDeadlineMs: resolved.callDeadlineMs } : {}),
       // 自定义请求头（2026-10-16）：全局字段，按层覆盖不动它——出口必须显式带，

@@ -138,6 +138,11 @@ export interface StandaloneLLMConfig {
    */
   disableThinking?: boolean;
   /**
+   * 思考等级（2026-10-20 用户需求，思考改按等级）：显式值优先于旧三态
+   * disableThinking 与 env TDAI_DISABLE_THINKING。
+   */
+  thinkingLevel?: ThinkingLevel;
+  /**
    * 厂商显示名（v2 c00899f 归属移植，2026-10-15）：yaml llm.providerLabel，
    * 用于 L1 完成/延后/失败日志与面板蒸馏归属。v3 无 activeProvider 折叠，
    * 此为纯展示字段，不参与调用路由。
@@ -155,8 +160,11 @@ export interface LlmLayerOverride {
   model?: string;
   maxTokens?: number;
   timeoutMs?: number;
-  /** 三态：true 强制关 / false 强制开(压过全局 env) / 未设沿用全局(env 兜底)。 */
+  /** 三态：true 强制关 / false 强制开(压过全局 env) / 未设沿用全局(env 兜底)。
+   *  @deprecated 2026-10-20 起改用 thinkingLevel（旧三态仍兼容读取）。 */
   disableThinking?: boolean;
+  /** 思考等级（2026-10-20）：default/disabled/enabled/low/high/max。 */
+  thinkingLevel?: ThinkingLevel;
   /** 整调用硬期限覆盖（须 ≥ 该层 timeoutMs + 限流退避预算，否则重试无意义）。 */
   callDeadlineMs?: number;
   /**
@@ -176,9 +184,56 @@ export interface LlmLayersOverride {
 /**
  * 关思考三态判定：显式配置值优先，未设置回落 env TDAI_DISABLE_THINKING === "true"。
  * 纯函数（env 经参数外读取），供 runner 与启动锚点共用同一口径。
+ * @deprecated 2026-10-20 起思考改按等级（resolveThinkingLevel），本函数仅保留
+ *             旧三态兼容（legacy disableThinking 映射用）。
  */
 export function resolveDisableThinking(explicit?: boolean): boolean {
   return explicit ?? process.env.TDAI_DISABLE_THINKING === "true";
+}
+
+/**
+ * 思考等级（2026-10-20 用户需求：把「关思考」开关改为按等级，参考 ZCode 的
+ * Default/Low/High/Max 与 enabled/disabled 档）：
+ *   default   不注入任何思考参数（env TDAI_DISABLE_THINKING=true 时回落为 disabled）
+ *   disabled  强制关闭 → thinking:{type:"disabled"}
+ *   enabled   明确开启（不受 env 影响）→ 不注入，由上游默认思考
+ *   low/high  强度档 → reasoning_effort:low|high
+ *   max       最高档 → reasoning_effort:high + thinking:{type:"enabled"}
+ * 旧三态 disableThinking 无损映射：true→disabled / false→enabled / 缺省→default。
+ */
+export type ThinkingLevel = "default" | "disabled" | "enabled" | "low" | "high" | "max";
+
+export const THINKING_LEVELS: readonly ThinkingLevel[] = ["default", "disabled", "enabled", "low", "high", "max"];
+
+export function isThinkingLevel(v: unknown): v is ThinkingLevel {
+  return typeof v === "string" && (THINKING_LEVELS as readonly string[]).includes(v);
+}
+
+/**
+ * 等级判定（纯函数）：显式等级优先 → 旧三态映射 → env 回落。
+ * 与旧 resolveDisableThinking 的行为完全等价（显式 false 压过 env true 保持）。
+ */
+export function resolveThinkingLevel(explicit?: ThinkingLevel, legacyDisable?: boolean): ThinkingLevel {
+  if (explicit) return explicit;
+  if (legacyDisable === true) return "disabled";
+  if (legacyDisable === false) return "enabled";
+  return process.env.TDAI_DISABLE_THINKING === "true" ? "disabled" : "default";
+}
+
+/** 等级 → 请求体注入内容（null=不注入任何思考参数）。OpenAI 兼容 reasoning_effort 口径。 */
+export function thinkingLevelPatch(level: ThinkingLevel): Record<string, unknown> | null {
+  switch (level) {
+    case "disabled":
+      return { thinking: { type: "disabled" } };
+    case "low":
+      return { reasoning_effort: "low" };
+    case "high":
+      return { reasoning_effort: "high" };
+    case "max":
+      return { reasoning_effort: "high", thinking: { type: "enabled" } };
+    default:
+      return null; // default / enabled —— 由上游默认思考行为决定
+  }
 }
 
 /**
@@ -197,6 +252,7 @@ export function applyLlmLayerOverride<T extends StandaloneLLMConfig>(
     ...(ov.maxTokens !== undefined ? { maxTokens: ov.maxTokens } : {}),
     ...(ov.timeoutMs !== undefined ? { timeoutMs: ov.timeoutMs } : {}),
     ...(ov.disableThinking !== undefined ? { disableThinking: ov.disableThinking } : {}),
+    ...(ov.thinkingLevel !== undefined ? { thinkingLevel: ov.thinkingLevel } : {}),
     ...(ov.callDeadlineMs !== undefined ? { callDeadlineMs: ov.callDeadlineMs } : {}),
     ...(ov.stream !== undefined ? { stream: ov.stream } : {}),
   };
@@ -384,10 +440,26 @@ export class StandaloneLLMRunner implements LLMRunner {
     const effectiveEnableTools = params.enableTools ?? this.enableTools;
     const maxIterations = params.maxIterations ?? MAX_TOOL_ITERATIONS;
 
+    // 思考等级（2026-10-20 用户需求：思考改按等级，参考 ZCode 的 Default/Low/
+    // High/Max 与 enabled/disabled 档）。等级优先于旧三态 disableThinking，
+    // 旧三态经 resolveThinkingLevel 无损映射（true→disabled/false→enabled）。
+    const thinkingLevel = resolveThinkingLevel(this.config.thinkingLevel, this.config.disableThinking);
+    const levelPatch = thinkingLevelPatch(thinkingLevel);
+    // 2026-10-20：部分厂商模型**要求** adaptive thinking（如 MiniMax-M3 系列，
+    // 探针实测：带 thinking:{type:"disabled"} → 400 invalid params「requires
+    // adaptive thinking」；不带 → 200 正常）。对这类模型不注入任何思考参数
+    // ——其思考由模型自适应决定，等级对其语义上无效（显式 warn 以免静默）。
+    const modelRequiresAdaptiveThinking = /minimax/i.test(this.model ?? "");
+    if (levelPatch && modelRequiresAdaptiveThinking) {
+      this.logger?.warn?.(
+        `${TAG} 模型 ${this.model} 要求 adaptive thinking，忽略思考等级 ${thinkingLevel}（不注入思考参数）`,
+      );
+    }
+
     this.logger?.debug?.(
       `${TAG} run() start: taskId=${params.taskId}, model=${this.model}, ` +
       `tools=${effectiveEnableTools}${callerProvidedTools ? "(caller)" : ""}, timeout=${timeoutMs}ms, ` +
-      `disableThinking=${resolveDisableThinking(this.config.disableThinking)}`,
+      `thinkingLevel=${thinkingLevel}`,
     );
 
     // Create OpenAI-compatible provider via AI SDK
@@ -398,18 +470,6 @@ export class StandaloneLLMRunner implements LLMRunner {
     // AI SDK 的 openai-compatible provider 不会把 thinking 序列化进请求体
     // （providerOptions 路径实测 thinking=undefined），因此改在 fetch 层直接
     // 改写 JSON body 注入 thinking:{type:"disabled"}。
-    const wantsDisableThinking = resolveDisableThinking(this.config.disableThinking);
-    // 2026-10-20：部分厂商模型**要求** adaptive thinking（如 MiniMax-M3 系列，
-    // 探针实测：带 thinking:{type:"disabled"} → 400 invalid params「requires
-    // adaptive thinking」；不带 → 200 正常）。对这类模型不注入 thinking 参数
-    // ——其思考由模型自适应决定，「关思考」对其语义上无效（显式 warn 以免静默）。
-    const modelRequiresAdaptiveThinking = /minimax/i.test(this.model ?? "");
-    if (wantsDisableThinking && modelRequiresAdaptiveThinking) {
-      this.logger?.warn?.(
-        `${TAG} 模型 ${this.model} 要求 adaptive thinking，忽略 disableThinking（不注入 thinking 参数）`,
-      );
-    }
-    const injectThinking = wantsDisableThinking && !modelRequiresAdaptiveThinking;
     // fetch 覆写**始终安装**（2026-10-20）：三件事都在这里做——
     //   ① 需要关思考的模型：注入 thinking:{type:"disabled"}（v2 移植行为不变）；
     //   ② 要求 adaptive thinking 的模型（MiniMax 系）：**主动剥离** thinking /
@@ -430,13 +490,14 @@ export class StandaloneLLMRunner implements LLMRunner {
         const patchBody = (
           reqInit: RequestInit | undefined,
           mode: "inject" | "strip",
+          inject?: Record<string, unknown>,
         ): { init?: RequestInit; stripped: string[] } => {
           if (typeof reqInit?.body !== "string") return { init: reqInit, stripped: [] };
           try {
             const body = JSON.parse(reqInit.body) as Record<string, unknown>;
             const stripped: string[] = [];
             if (mode === "inject") {
-              body.thinking = { type: "disabled" };
+              Object.assign(body, inject ?? {});
             } else {
               for (const k of ["thinking", "reasoning_effort", "reasoning"]) {
                 if (body[k] !== undefined) {
@@ -453,8 +514,8 @@ export class StandaloneLLMRunner implements LLMRunner {
         };
 
         const first =
-          injectThinking || !modelRequiresAdaptiveThinking
-            ? { init, stripped: [] as string[] }
+          !levelPatch || !modelRequiresAdaptiveThinking
+            ? { init: levelPatch ? patchBody(init, "inject", levelPatch).init : init, stripped: [] as string[] }
             : patchBody(init, "strip");
         if (first.stripped.length > 0) {
           this.logger?.warn?.(

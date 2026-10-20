@@ -24,7 +24,7 @@ import type { ConversationMessage } from "../core/conversation/l0-recorder.js";
 import { CheckpointManager } from "./checkpoint.js";
 import type { PipelineSessionState } from "./checkpoint.js";
 import { createStoreBundle } from "../core/store/factory.js";
-import { resolveDisableThinking } from "../adapters/standalone/llm-runner.js";
+import { resolveDisableThinking, resolveThinkingLevel} from "../adapters/standalone/llm-runner.js";
 import type { IMemoryStore } from "../core/store/types.js";
 import { memoryPromptResolveKey, resolveMemoryPrompts } from "../core/memory-prompt/resolver.js";
 import {
@@ -450,7 +450,7 @@ export function createL1Runner(opts: {
       `maxConcurrency=${cfg.llm?.maxConcurrency ?? "(default)"}, ` +
       `callDeadlineMs=${cfg.llm?.callDeadlineMs ?? "(default)"}, ` +
       `dedupRecallRerank=${cfg.extraction.dedupRecallRerank ?? "none"}, ` +
-      `disableThinking=${resolveDisableThinking(cfg.llm?.layers?.l1?.disableThinking)}, ` +
+      `thinkingLevel=${resolveThinkingLevel(cfg.llm?.layers?.l1?.thinkingLevel, cfg.llm?.layers?.l1?.disableThinking)}, ` +
       `l2l3DeadlineMs=${l2Deadline ?? "(default)"}, l2l3Stream=${l2Stream === undefined ? "(global)" : l2Stream ? "on" : "off"}`,
     );
     logger.info(
