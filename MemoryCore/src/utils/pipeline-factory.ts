@@ -25,6 +25,7 @@ import { CheckpointManager } from "./checkpoint.js";
 import type { PipelineSessionState } from "./checkpoint.js";
 import { createStoreBundle } from "../core/store/factory.js";
 import { resolveDisableThinking, resolveThinkingLevel} from "../adapters/standalone/llm-runner.js";
+import { getInvalidThinkingLevels } from "../gateway/config.js";
 import type { IMemoryStore } from "../core/store/types.js";
 import { memoryPromptResolveKey, resolveMemoryPrompts } from "../core/memory-prompt/resolver.js";
 import {
@@ -453,6 +454,14 @@ export function createL1Runner(opts: {
       `thinkingLevel=${resolveThinkingLevel(cfg.llm?.layers?.l1?.thinkingLevel, cfg.llm?.layers?.l1?.disableThinking)}, ` +
       `l2l3DeadlineMs=${l2Deadline ?? "(default)"}, l2l3Stream=${l2Stream === undefined ? "(global)" : l2Stream ? "on" : "off"}`,
     );
+    // 非法 thinkingLevel 告警（2026-10-20）：静默忽略会让该层回落到 env 兜底，
+    // 与用户写的意图相反 → 必须显式说出来。
+    for (const bad of getInvalidThinkingLevels()) {
+      logger.warn(
+        `${TAG} [l1] 非法思考等级：layers.${bad.layer}.thinkingLevel='${bad.value}' 不是合法值` +
+          `（default/disabled/enabled/low/high/max），已忽略该键并回落默认档`,
+      );
+    }
     logger.info(
       `${TAG} [l1] Session ${sessionKey}: l1_cursor=${runnerState.last_l1_cursor || "(start)"}`,
     );

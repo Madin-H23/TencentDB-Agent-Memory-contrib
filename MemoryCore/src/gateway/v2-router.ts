@@ -861,6 +861,8 @@ async function handleConversationQuery(body: unknown, _auth: V2AuthContext, requ
     const messages: ConversationItem[] = result.rows.map((r) => ({
       id: r.record_id,
       session_id: r.session_id,
+      // 来源客户端直传（2026-10-20）：面板按行判来源需要它，sid 会被多客户端共用
+      session_key: r.session_key,
       team_id: r.team_id,
       user_id: r.user_id,
       agent_id: r.agent_id,
@@ -888,6 +890,7 @@ async function handleConversationQuery(body: unknown, _auth: V2AuthContext, requ
   const messages: ConversationItem[] = page.map((r) => ({
     id: r.record_id,
     session_id: r.session_id,
+    session_key: r.session_key,
     team_id: r.team_id,
     user_id: r.user_id,
     agent_id: r.agent_id,
@@ -1153,6 +1156,8 @@ async function handleAtomicQuery(body: unknown, _auth: V2AuthContext, requestId:
       id: r.record_id, type: r.type, content: r.content,
       background: r.scene_name || undefined,
       version: r.version ?? 0,
+      // 来源客户端直传（2026-10-20）
+      session_key: r.session_key,
       team_id: r.team_id,
       user_id: r.user_id,
       agent_id: r.agent_id,
@@ -1178,6 +1183,7 @@ async function handleAtomicQuery(body: unknown, _auth: V2AuthContext, requestId:
     id: r.record_id, type: r.type, content: r.content,
     background: r.scene_name || undefined,
     version: r.version ?? 0,
+    session_key: r.session_key,
     team_id: r.team_id,
     user_id: r.user_id,
     agent_id: r.agent_id,

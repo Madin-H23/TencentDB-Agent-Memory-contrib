@@ -84,6 +84,12 @@ import type {
 export interface ConversationItem extends GeneratedConversationItem {
   /** L0 session isolation dimension returned by query/search responses. */
   session_id?: string;
+  /**
+   * 来源客户端（sessionKey，2026-10-20）：L0 行的客户端归属。
+   * 此前查询响应只回 session_id，而 sid 会被多个客户端共用（如 default），
+   * 面板无法判行级来源 → 面板侧反查会大面积错标。此处由网关直传。
+   */
+  session_key?: string;
   /** Team ownership dimension. */
   team_id?: string;
   /** L0 user isolation dimension returned by query/search responses. */
@@ -150,6 +156,8 @@ export type CoreCountRequest = z.infer<typeof coreCountRequestSchema>;
 export interface AtomicDetail extends GeneratedAtomicDetail {
   /** Monotonic L1 memory version, starts from 0 and increments on update/merge. */
   version: number;
+  /** 来源客户端（sessionKey，2026-10-20）：L1 记录的客户端归属，由网关直传。 */
+  session_key?: string;
   team_id?: string;
   user_id?: string;
   agent_id?: string;

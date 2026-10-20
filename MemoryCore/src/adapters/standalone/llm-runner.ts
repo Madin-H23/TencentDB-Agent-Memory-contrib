@@ -199,11 +199,15 @@ export function resolveDisableThinking(explicit?: boolean): boolean {
  *   enabled   明确开启（不受 env 影响）→ 不注入，由上游默认思考
  *   low/high  强度档 → reasoning_effort:low|high
  *   max       最高档 → reasoning_effort:high + thinking:{type:"enabled"}
+ *              （两套方言并存；上游只认其一时由 400 定向剥离重试兜底）
  * 旧三态 disableThinking 无损映射：true→disabled / false→enabled / 缺省→default。
  */
 export type ThinkingLevel = "default" | "disabled" | "enabled" | "low" | "high" | "max";
 
 export const THINKING_LEVELS: readonly ThinkingLevel[] = ["default", "disabled", "enabled", "low", "high", "max"];
+
+/** 请求体里承载"思考"语义的键（注入/剥离都按这套） */
+export const THINK_PARAM_KEYS: readonly string[] = ["thinking", "reasoning_effort", "reasoning"];
 
 export function isThinkingLevel(v: unknown): v is ThinkingLevel {
   return typeof v === "string" && (THINKING_LEVELS as readonly string[]).includes(v);
@@ -449,7 +453,11 @@ export class StandaloneLLMRunner implements LLMRunner {
     // 探针实测：带 thinking:{type:"disabled"} → 400 invalid params「requires
     // adaptive thinking」；不带 → 200 正常）。对这类模型不注入任何思考参数
     // ——其思考由模型自适应决定，等级对其语义上无效（显式 warn 以免静默）。
-    const modelRequiresAdaptiveThinking = /minimax/i.test(this.model ?? "");
+    // 2026-10-20 收窄：此前用 /minimax/i 一刀切——把**不涉及思考**的 minimax 模型
+    // （如 minimax-text-01）也判成"要求 adaptive"，等级被无谓丢弃。
+    // 改为只预判**推理型 M 系**（minimax-m3 / minimax-m2…）；
+    // 其余厂商一律走"先带参发 → 400 再定向剥离重试"的统一路径兜底。
+    const modelRequiresAdaptiveThinking = /minimax[-_.]?m\d/i.test(this.model ?? "");
     if (levelPatch && modelRequiresAdaptiveThinking) {
       this.logger?.warn?.(
         `${TAG} 模型 ${this.model} 要求 adaptive thinking，忽略思考等级 ${thinkingLevel}（不注入思考参数）`,
@@ -491,6 +499,7 @@ export class StandaloneLLMRunner implements LLMRunner {
           reqInit: RequestInit | undefined,
           mode: "inject" | "strip",
           inject?: Record<string, unknown>,
+          onlyKeys?: string[],
         ): { init?: RequestInit; stripped: string[] } => {
           if (typeof reqInit?.body !== "string") return { init: reqInit, stripped: [] };
           try {
@@ -499,7 +508,10 @@ export class StandaloneLLMRunner implements LLMRunner {
             if (mode === "inject") {
               Object.assign(body, inject ?? {});
             } else {
-              for (const k of ["thinking", "reasoning_effort", "reasoning"]) {
+              // onlyKeys 给了就**只删被点名的参数**（保住另一套方言的参数）；
+              // 没给就全删（自适应约束场景：thinking 与 reasoning_effort 一起不合法）。
+              const keys = onlyKeys?.length ? onlyKeys : [...THINK_PARAM_KEYS];
+              for (const k of keys) {
                 if (body[k] !== undefined) {
                   stripped.push(k);
                   delete body[k];
@@ -524,15 +536,30 @@ export class StandaloneLLMRunner implements LLMRunner {
         }
         const res = await fetch(url as Parameters<typeof fetch>[0], first.init ?? init);
         if (res.status !== 400) return res;
-        // 兜底：未知厂商若同样因 thinking 参数被拒，去掉 thinking/reasoning 重试一次
+        // 兜底：上游因思考类参数被拒时，剥离后重试一次。
+        // 2026-10-20 放宽判定 + 定向剥离：
+        //   · 原正则只认 "requires adaptive thinking" 一类措辞，遇
+        //     "Unrecognized request argument supplied: reasoning_effort" /
+        //     "Unknown parameter: thinking" / "thinking is not supported" 等就漏判
+        //     → 硬 400 整层挂掉（且切厂商只清 model、保留等级 → 必炸）；
+        //   · 定向剥离只删**错误体点名**的参数（保住另一套方言的参数），
+        //     两者都不合法（自适应约束）时才整套删。
         const text = await res.clone().text().catch(() => "");
-        if (!/requires adaptive thinking|thinking[^"]{0,40}invalid|invalid[^"]{0,40}thinking|reasoning[^"]{0,40}not allowed/i.test(text)) {
+        const named = THINK_PARAM_KEYS.filter((k) => text.toLowerCase().includes(k.toLowerCase()));
+        const adaptiveRejected =
+          /requires?\s+adaptive\s+thinking|adaptive\s+thinking[^"]{0,40}(invalid|not\s+allowed|required)|thinking[^"]{0,40}(is\s+)?not\s+allowed/i.test(text);
+        const paramRejected =
+          /(invalid|unsupported|unknown|unrecognized|not\s+supported|not\s+allowed)[^"]{0,80}(parameter|argument|field|reasoning|thinking)|(thinking|reasoning)[^"]{0,60}(is\s+not\s+supported|not\s+supported|unknown|unrecognized|invalid|not\s+allowed)/i.test(text);
+        if (!adaptiveRejected && !paramRejected) {
           return res;
         }
+        // 点名了哪个参数就只删哪个；都没点名（自适应约束）就整套思考参数都删
+        const onlyKeys = named.length > 0 && !adaptiveRejected ? named : undefined;
         this.logger?.warn?.(
-          `${TAG} 上游拒绝 thinking 参数（adaptive thinking 约束），剥离后重试一次`,
+          `${TAG} 上游拒绝思考类参数（${adaptiveRejected ? "adaptive thinking 约束" : "参数不被支持"}），` +
+            `剥离 ${onlyKeys ? onlyKeys.join(",") : "thinking/reasoning_effort/reasoning"} 后重试一次`,
         );
-        const retry = patchBody(first.init ?? init, "strip");
+        const retry = patchBody(first.init ?? init, "strip", undefined, onlyKeys);
         return fetch(url as Parameters<typeof fetch>[0], retry.init ?? init);
       },
     });

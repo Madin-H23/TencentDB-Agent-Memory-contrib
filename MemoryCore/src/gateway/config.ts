@@ -75,6 +75,17 @@ export type FileStoreOthersMode = "local" | "cos" | "mongofs";
  * the legacy global-mode branches (R1 缓解：保留旧分支开关). Invalid values
  * fail fast, consistent with {@link resolveFileStoreMode}.
  */
+/**
+ * 非法 thinkingLevel 收集（2026-10-20）：yaml 写错值时**不再静默忽略**——
+ * 静默忽略会让该层回落到 env 兜底（多半是 disabled），与用户写的意图正好相反。
+ */
+const invalidThinkingLevels: Array<{ layer: string; value: string }> = [];
+
+/** 读取本次加载发现的非法 thinkingLevel（启动锚点告警用） */
+export function getInvalidThinkingLevels(): ReadonlyArray<{ layer: string; value: string }> {
+  return invalidThinkingLevels;
+}
+
 export function resolveBackendResolverFlag(raw: string | undefined): boolean {
   if (raw === undefined) return true;
   const v = raw.trim().toLowerCase();
@@ -695,6 +706,8 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
   // 蒸馏分层覆盖（v2 llm.layers 移植，2026-10-15）：l1|l2|l3 五标量字段，
   // 未配置的层不产出键。面板「分层配置编辑」写入的即是本结构。
   const layersRaw = obj(llmConfig, "layers");
+  /** 非法 thinkingLevel 收集（启动锚点告警用；2026-10-20）——必须先于使用处声明 */
+  invalidThinkingLevels.length = 0;
   const parseLlmLayer = (name: "l1" | "l2" | "l3"): LlmLayerOverride | undefined => {
     const g = obj(layersRaw, name);
     const layer: LlmLayerOverride = {};
@@ -706,10 +719,16 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
     if (timeoutMs !== undefined) layer.timeoutMs = timeoutMs;
     const disableThinking = bool(g, "disableThinking");
     if (disableThinking !== undefined) layer.disableThinking = disableThinking;
-    // 思考等级（2026-10-20）：新键优先于旧三态 disableThinking；非法值忽略
+    // 思考等级（2026-10-20）：新键优先于旧三态 disableThinking。
+    // 非法值**不再静默忽略**：收集到 invalidThinkingLevels，交启动锚点告警——
+    // 静默忽略会让该层回落到 env 兜底（多半是 disabled），与用户写的意图正好相反。
     const thinkingLevelRaw = str(g, "thinkingLevel");
-    if (thinkingLevelRaw && isThinkingLevel(thinkingLevelRaw)) {
-      layer.thinkingLevel = thinkingLevelRaw;
+    if (thinkingLevelRaw) {
+      if (isThinkingLevel(thinkingLevelRaw)) {
+        layer.thinkingLevel = thinkingLevelRaw;
+      } else {
+        invalidThinkingLevels.push({ layer: name, value: thinkingLevelRaw });
+      }
     }
     const callDeadlineMs = num(g, "callDeadlineMs");
     if (callDeadlineMs !== undefined) layer.callDeadlineMs = callDeadlineMs;
