@@ -399,6 +399,24 @@ export class StandaloneLLMRunner implements LLMRunner {
     // （providerOptions 路径实测 thinking=undefined），因此改在 fetch 层直接
     // 改写 JSON body 注入 thinking:{type:"disabled"}。
     const wantsDisableThinking = resolveDisableThinking(this.config.disableThinking);
+    // 2026-10-20：部分厂商模型**要求** adaptive thinking（如 MiniMax-M3 系列，
+    // 探针实测：带 thinking:{type:"disabled"} → 400 invalid params「requires
+    // adaptive thinking」；不带 → 200 正常）。对这类模型不注入 thinking 参数
+    // ——其思考由模型自适应决定，「关思考」对其语义上无效（显式 warn 以免静默）。
+    const modelRequiresAdaptiveThinking = /minimax/i.test(this.model ?? "");
+    if (wantsDisableThinking && modelRequiresAdaptiveThinking) {
+      this.logger?.warn?.(
+        `${TAG} 模型 ${this.model} 要求 adaptive thinking，忽略 disableThinking（不注入 thinking 参数）`,
+      );
+    }
+    const injectThinking = wantsDisableThinking && !modelRequiresAdaptiveThinking;
+    // fetch 覆写**始终安装**（2026-10-20）：三件事都在这里做——
+    //   ① 需要关思考的模型：注入 thinking:{type:"disabled"}（v2 移植行为不变）；
+    //   ② 要求 adaptive thinking 的模型（MiniMax 系）：**主动剥离** thinking /
+    //      reasoning_effort——实测 AI SDK 的 openai-compatible provider 也会在
+    //      body 里带 thinking/reasoning_effort，仅靠「不注入」不够；
+    //   ③ 兜底：上游 400 且错误含 thinking 相关 invalid params → 剥离后重试一次
+    //      （覆盖未知厂商的同类约束）。
     const provider = createOpenAI({
       baseURL: this.config.baseUrl,
       apiKey: this.config.apiKey,
@@ -408,22 +426,54 @@ export class StandaloneLLMRunner implements LLMRunner {
       ...(this.config.headers && Object.keys(this.config.headers).length > 0
         ? { headers: this.config.headers }
         : {}),
-      ...(wantsDisableThinking
-        ? {
-            fetch: async (url: unknown, init?: RequestInit) => {
-              if (typeof init?.body === "string") {
-                try {
-                  const body = JSON.parse(init.body) as Record<string, unknown>;
-                  body.thinking = { type: "disabled" };
-                  init = { ...init, body: JSON.stringify(body) };
-                } catch {
-                  // body 非 JSON 时保持原样
+      fetch: async (url: unknown, init?: RequestInit) => {
+        const patchBody = (
+          reqInit: RequestInit | undefined,
+          mode: "inject" | "strip",
+        ): { init?: RequestInit; stripped: string[] } => {
+          if (typeof reqInit?.body !== "string") return { init: reqInit, stripped: [] };
+          try {
+            const body = JSON.parse(reqInit.body) as Record<string, unknown>;
+            const stripped: string[] = [];
+            if (mode === "inject") {
+              body.thinking = { type: "disabled" };
+            } else {
+              for (const k of ["thinking", "reasoning_effort", "reasoning"]) {
+                if (body[k] !== undefined) {
+                  stripped.push(k);
+                  delete body[k];
                 }
               }
-              return fetch(url as Parameters<typeof fetch>[0], init);
-            },
+            }
+            return { init: { ...reqInit, body: JSON.stringify(body) }, stripped };
+          } catch {
+            // body 非 JSON 时保持原样
+            return { init: reqInit, stripped: [] };
           }
-        : {}),
+        };
+
+        const first =
+          injectThinking || !modelRequiresAdaptiveThinking
+            ? { init, stripped: [] as string[] }
+            : patchBody(init, "strip");
+        if (first.stripped.length > 0) {
+          this.logger?.warn?.(
+            `${TAG} 模型 ${this.model} 要求 adaptive thinking，已剥离请求中的 ${first.stripped.join(", ")}`,
+          );
+        }
+        const res = await fetch(url as Parameters<typeof fetch>[0], first.init ?? init);
+        if (res.status !== 400) return res;
+        // 兜底：未知厂商若同样因 thinking 参数被拒，去掉 thinking/reasoning 重试一次
+        const text = await res.clone().text().catch(() => "");
+        if (!/requires adaptive thinking|thinking[^"]{0,40}invalid|invalid[^"]{0,40}thinking|reasoning[^"]{0,40}not allowed/i.test(text)) {
+          return res;
+        }
+        this.logger?.warn?.(
+          `${TAG} 上游拒绝 thinking 参数（adaptive thinking 约束），剥离后重试一次`,
+        );
+        const retry = patchBody(first.init ?? init, "strip");
+        return fetch(url as Parameters<typeof fetch>[0], retry.init ?? init);
+      },
     });
 
     // Select tools based on mode + storage
