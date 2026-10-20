@@ -11,6 +11,8 @@ import { generateSceneNavigation, stripSceneNavigation } from "../scene/scene-na
 import { buildPersonaPrompt } from "../prompts/persona-generation.js";
 import { BackupManager } from "../../utils/backup.js";
 import { escapeXmlTags } from "../../utils/sanitize.js";
+import { redactPii } from "../../utils/pii-redact.js";
+import { personaBodyUnchanged, sanitizePersonaBody } from "./persona-sanitize.js";
 import { report } from "../report/reporter.js";
 import { reportL3LatencyMetrics } from "../report/metric-tracking-l3-latency.js";
 import type { LLMRunner, Logger, TraceContext } from "../types.js";
@@ -260,16 +262,20 @@ export class PersonaGenerator {
     }
 
     // 10. Strip any navigation the LLM might have added + sanitize for safe injection
-    personaText = escapeXmlTags(stripSceneNavigation(personaText).trim());
+    //
+    // PII 脱敏（2026-10-20 批次 1.1 补）：escapeXmlTags 只转义 XML 注入边界，
+    // **不是**隐私过滤——LLM 写的正文里的私有邮箱/手机号会原样落进 persona.md，
+    // 并经 /v2/core/read 与 rowfs 读时重渲染对外可见（实测 body 段 1 处邮箱）。
+    // nav 段已在 scene-navigation.ts 侧脱敏，body 段在这里补齐，两条出口对齐。
+    personaText = sanitizePersonaBody(personaText);
 
     if (!personaText) {
       this.logger?.error(`${TAG} LLM wrote empty ${targetFile} — skipping`);
       return "failed";
     }
 
-    const personaUnchanged =
-      existingPersona !== undefined &&
-      personaText === escapeXmlTags(existingPersona);
+    // 比较基准同样要过同一套净化，否则「内容无变化」的判定会因脱敏前后的差异恒假。
+    const personaUnchanged = personaBodyUnchanged(personaText, existingPersona);
 
     // 11. Append fresh scene navigation and write final content
     const nav = generateSceneNavigation(index, undefined, false);
