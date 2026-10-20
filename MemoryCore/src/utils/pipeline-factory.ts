@@ -731,7 +731,8 @@ export function createL1Runner(opts: {
       // extraction.model > llm.layers.l1.model > llm.model，与锚点/extractor 同源）。
       logger.info(
         `${TAG} [l1] L1 complete: extracted=${totalExtracted}, stored=${totalStored} (${groups.length} group(s)), ` +
-        `model=${l1Model ?? "unknown"}, sids=[${groups.map((g) => g.sessionId || "(empty)").join(",")}]`,
+        `model=${l1Model ?? "unknown"}, provider=${cfg.llm?.providerLabel ?? "unknown"}, ` +
+        `sids=[${groups.map((g) => g.sessionId || "(empty)").join(",")}]`,
       );
 
       return { processedCount: totalMessages, storedCount: totalStored, hasMore, hasFullBacklog, profileScopes: Array.from(profileScopes) };
@@ -1054,7 +1055,11 @@ export function createL2Runner(opts: {
         anchor_memory_id: changedProfiles[0]?.id,
         input_refs: groupRecords.map((record) => ({ layer: "l1", record_id: record.id })),
         output_refs: changedProfiles.map((profile) => ({ layer: "l2", record_id: profile.id })),
-        model: cfg.persona.model,
+        // 模型归属解析口径与 L1 锚点同源：persona.model > llm.layers.l2.model > llm.model。
+        // 此前只读 cfg.persona.model，而 yaml 的 persona 块没有该键 → 恒 undefined
+        // → 面板对 L2 记录永远显示不出模型（2026-10-20 批次 2.3）。
+        model: cfg.persona.model ?? cfg.llm?.layers?.l2?.model ?? cfg.llm?.model,
+        provider: cfg.llm?.providerLabel,
         prompt_mode: cfg.persona.promptMode,
         started_at_ms: l2StartMs,
         finished_at_ms: l2FinishedAt,
@@ -1359,7 +1364,9 @@ export function createL3Runner(opts: {
         anchor_memory_id: changedProfiles[0]?.id,
         input_refs: sceneIndex.map((scene) => ({ layer: "l2", record_id: scene.filename })),
         output_refs: changedProfiles.map((profile) => ({ layer: "l3", record_id: profile.id })),
-        model: cfg.persona.model,
+        // 同 L2：persona.model > llm.layers.l3.model > llm.model（yaml 无 persona.model 键）。
+        model: cfg.persona.model ?? cfg.llm?.layers?.l3?.model ?? cfg.llm?.model,
+        provider: cfg.llm?.providerLabel,
         prompt_mode: cfg.persona.promptMode,
         started_at_ms: l3StartMs,
         finished_at_ms: l3FinishedAt,

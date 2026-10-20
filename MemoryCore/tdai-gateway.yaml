@@ -102,17 +102,25 @@ memory:
     dedupTimeoutMs: 240000
     # 用户身份白名单（v2 在役值承接）：仅这些姓名可保留在「用户（X）」里，
     # 其余（第三方姓名/角色标签/路径数字/状语）入库前归一为「用户」
+    # 2026-10-20 批次 2.1 增补 Madin-H23：模型常写「用户（Weijian He / GitHub
+    # Madin-H23）」这类同一身份的多写法，复合标签按分段匹配后需白名单覆盖到
+    # 该署名，否则用户本人的别名会被误判成第三方姓名而丢弃。
     userIdentityNames:
       - 何伟健
       - heweijian
       - Weijian He
+      - Madin-H23
     # D2 召回轻修（2026-10-14 灰度开启）：lexical=查重候选超额召回+词汇相似度重排；
     # 回退=改 none+重启
     dedupRecallRerank: lexical
 
   persona:
     triggerEveryN: 50
-    maxScenes: 20
+    # 场景数上限（2026-10-20 批次 2.3：20 -> 15，恢复上游默认）。此前调到 20
+    # 关掉了上游唯一的减压阀：scene-extractor 的三级预警（黄/红/拒绝新建）只管
+    # **文件个数**，而现场恰有 15 个场景文件，连黄色预警都不触发，场景块体积
+    # 持续膨胀无阻。回落到 15 后，场景数触顶会真正触发上游的保护逻辑。
+    maxScenes: 15
     triggerMode: current
 
   pipeline:

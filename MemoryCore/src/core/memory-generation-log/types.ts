@@ -33,6 +33,14 @@ export interface MemoryGenerationLog {
   input_refs: MemoryGenerationRef[];
   output_refs: MemoryGenerationRef[];
   model?: string;
+  /**
+   * 厂商归属（llm.providerLabel）。
+   *
+   * 2026-10-20 批次 2.3 增补：此前 L2/L3 的日志恒缺 provider、L1 日志也从不
+   * 落 provider 字段，导致面板的「(厂商: 模型)」归属对 100% 的蒸馏记录不可用
+   * （面板 DataTabs.tsx 读 `d.provider && d.model`，provider 缺失即整段不显示）。
+   */
+  provider?: string;
   prompt_mode?: string;
   started_at_ms: number;
   finished_at_ms: number;

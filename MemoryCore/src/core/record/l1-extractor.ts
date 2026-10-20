@@ -440,6 +440,7 @@ export async function extractL1Memories(params: {
         embeddingService: options.embeddingService,
         storage,
         dedupRecallRerank: options.dedupRecallRerank,
+        userIdentityNames,
       });
 
     } catch (err) {
@@ -454,7 +455,7 @@ export async function extractL1Memories(params: {
       throw new L1ExtractionFailure("dedup_failed", `L1 dedup failed: ${msg}${pmSuffix}`);
     }
   } else {
-    storedRecords = await storeAllDirectly(memoriesWithIds, baseDir, sessionKey, sessionId, taskId, teamId, userId, agentId, logger, options.vectorStore, options.embeddingService, storage);
+    storedRecords = await storeAllDirectly(memoriesWithIds, baseDir, sessionKey, sessionId, taskId, teamId, userId, agentId, logger, options.vectorStore, options.embeddingService, storage, userIdentityNames);
   }
 
   const logStorage = storage ?? new StorageAdapter(new LocalStorageBackend(baseDir));
@@ -476,6 +477,7 @@ export async function extractL1Memories(params: {
     input_refs: newMessages.map((message) => ({ layer: "l0", record_id: message.id })),
     output_refs: storedRecords.map((record) => ({ layer: "l1", record_id: record.id })),
     model: options.model,
+    provider: options.providerLabel,
     prompt_mode: options.promptMode ?? "chat",
     started_at_ms: l1StartMs,
     finished_at_ms: generationFinishedAt,
@@ -851,8 +853,14 @@ async function applyDecisions(params: {
   storage?: StorageAdapter;
   /** D2 开关（写入前指纹兜底仅 lexical 下启用，v2 4db48bf 语义）。 */
   dedupRecallRerank?: DedupRecallRerank;
+  /**
+   * 用户身份白名单（批次 2.1）：写库层归一护栏据此判定「用户（X）」的归属。
+   * 抽取层已归一过一次，这里再传一份是为了覆盖 merged_content 与 scene_name
+   * 这两条抽取层够不到的路径。
+   */
+  userIdentityNames?: string[];
 }): Promise<MemoryRecord[]> {
-  const { memoriesWithIds, decisions, baseDir, sessionKey, sessionId, taskId, teamId, userId, agentId, logger, vectorStore, embeddingService, storage, dedupRecallRerank } = params;
+  const { memoriesWithIds, decisions, baseDir, sessionKey, sessionId, taskId, teamId, userId, agentId, logger, vectorStore, embeddingService, storage, dedupRecallRerank, userIdentityNames } = params;
   const storedRecords: MemoryRecord[] = [];
 
   // Build a map from record_id → decision
@@ -906,6 +914,7 @@ async function applyDecisions(params: {
         vectorStore,
         embeddingService,
         storage,
+        userIdentityNames,
       });
 
       if (record) {
@@ -937,6 +946,7 @@ async function storeAllDirectly(
   vectorStore?: IMemoryStore,
   embeddingService?: EmbeddingService,
   storage?: StorageAdapter,
+  userIdentityNames?: string[],
 ): Promise<MemoryRecord[]> {
   const storedRecords: MemoryRecord[] = [];
 
@@ -960,6 +970,7 @@ async function storeAllDirectly(
         vectorStore,
         embeddingService,
         storage,
+        userIdentityNames,
       });
       if (record) {
         storedRecords.push(record);

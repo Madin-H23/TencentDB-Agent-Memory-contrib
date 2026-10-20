@@ -2,7 +2,7 @@
  * Scene Index: maintains a JSON index of all scene blocks for quick lookup.
  */
 
-import { parseSceneBlock } from "./scene-format.js";
+import { normalizeSceneSummary, parseSceneBlock } from "./scene-format.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import { StoragePaths } from "../storage/types.js";
 
@@ -142,7 +142,10 @@ export async function syncSceneIndex(dataDir: string, storage?: StorageAdapter):
       const block = parseSceneBlock(raw, file);
       entries.push({
         filename: file,
-        summary: block.meta.summary,
+        // 索引视图规范化：脱敏 + 截断。场景文件本体不改（写路径裁剪属上游
+        // PR #1591 的不可逆操作，另行处置），但进提示词与 nav 段的摘要必须
+        // 有上界——原样透传时每次 L2 抽取固定携带 129,629 B 载荷。
+        summary: normalizeSceneSummary(block.meta.summary),
         heat: block.meta.heat,
         created: block.meta.created,
         updated: block.meta.updated,

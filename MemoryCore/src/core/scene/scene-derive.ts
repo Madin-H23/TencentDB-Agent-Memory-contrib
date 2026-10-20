@@ -15,7 +15,7 @@
 import type { ProfileIsolation } from "../profile/profile-scope.js";
 import { profileScopeFilter } from "../profile/profile-scope.js";
 import type { ProfileRowCapableStore } from "../store/types.js";
-import { parseSceneBlock } from "./scene-format.js";
+import { normalizeSceneSummary, parseSceneBlock } from "./scene-format.js";
 import type { SceneIndexEntry } from "./scene-index.js";
 
 /**
@@ -41,7 +41,9 @@ export async function deriveSceneIndexFromProfiles(
       const { meta } = parseSceneBlock(row.content, row.filename);
       return {
         filename: row.filename,
-        summary: meta.summary,
+        // 与文件路径的 syncSceneIndex 保持同一套规范化（脱敏 + 截断），
+        // 否则两条索引路径会给出不同的摘要长度与 PII 状态。
+        summary: normalizeSceneSummary(meta.summary),
         heat: meta.heat,
         created: meta.created,
         updated: meta.updated,

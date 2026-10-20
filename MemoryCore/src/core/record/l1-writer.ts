@@ -22,6 +22,7 @@ import type { EmbeddingService } from "../store/embedding.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import { StoragePaths } from "../storage/types.js";
 import type { Logger } from "../types.js";
+import { sanitizeUserAttribution } from "./attribution.js";
 
 // ============================
 // Types
@@ -178,8 +179,13 @@ export async function writeMemory(params: {
   embeddingService?: EmbeddingService;
   /** StorageAdapter for file operations (COS/local). Falls back to fs when absent. */
   storage?: StorageAdapter;
+  /**
+   * 用户身份白名单（extraction.userIdentityNames）。写库前的归一护栏据此判定
+   * 「用户（X）」里的 X 是用户本人还是第三方。
+   */
+  userIdentityNames?: string[];
 }): Promise<MemoryRecord | null> {
-  const { memory, decision, baseDir, sessionKey, sessionId, taskId, teamId, userId, agentId, logger, vectorStore, embeddingService, storage } = params;
+  const { memory, decision, baseDir, sessionKey, sessionId, taskId, teamId, userId, agentId, logger, vectorStore, embeddingService, storage, userIdentityNames } = params;
 
   if (decision.action === "skip") {
     logger?.debug?.(`${TAG} Skipping memory: ${memory.content.slice(0, 50)}...`);
@@ -218,12 +224,32 @@ export async function writeMemory(params: {
     finalTimestamps = [now];
   }
 
+  // ── 归一护栏下沉到写库层（2026-10-20 批次 2.1）──
+  // 护栏原先只在抽取层作用于 mem.content（l1-extractor.ts:281），漏掉了两条路径：
+  //   1. 去重后写库内容取 decision.merged_content（LLM 二次输出），从不经过护栏
+  //      —— 实测 6 行 version>0 的记忆带未归一的「用户（X）」；
+  //   2. scene_name 原样赋值（l1-extractor.ts:289），完全没被护栏覆盖
+  //      —— 实测 198 行（9.83%）带非白名单标签。
+  // writeMemory 是两条写路径（l1-extractor.ts:895 / :945）的唯一汇聚点，
+  // 在这里统一处理才不会再有旁路。
+  const safeContent = sanitizeUserAttribution(finalContent, userIdentityNames);
+  const safeSceneName = memory.scene_name
+    ? sanitizeUserAttribution(memory.scene_name, userIdentityNames)
+    : { text: memory.scene_name, dropped: [] as string[] };
+  const droppedLabels = [...safeContent.dropped, ...safeSceneName.dropped];
+  if (droppedLabels.length > 0) {
+    logger?.warn?.(
+      `${TAG} attribution normalized on write: dropped=[${droppedLabels.join(", ")}] ` +
+      `(content=${safeContent.dropped.length}, scene_name=${safeSceneName.dropped.length})`,
+    );
+  }
+
   const record: MemoryRecord = {
     id: decision.record_id || generateMemoryId(),
-    content: finalContent,
+    content: safeContent.text,
     type: finalType,
     priority: finalPriority,
-    scene_name: memory.scene_name,
+    scene_name: safeSceneName.text,
     source_message_ids: memory.source_message_ids,
     metadata: memory.metadata,
     timestamps: finalTimestamps,
