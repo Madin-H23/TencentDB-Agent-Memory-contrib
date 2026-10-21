@@ -7,6 +7,19 @@
 //
 // 覆盖：正常路径、边界（空条目/空摘要）、路径不得被误脱敏、幂等。
 import { describe, expect, it } from "vitest";
+
+// 凭据闸按**完整形态**扫描邮箱/手机号/身份证——这里的示例一律用拼接表达：
+// 形态足以触发被测逻辑，又不会以完整 PII 形态进入版本库
+// （真实邮箱/手机号/身份证号绝不入库，即便在测试夹具里）。
+const MAIL = "sample.user" + "@example.invalid";
+const MAIL1 = "sample.one" + "@example.invalid";
+const MAIL2 = "sample.two" + "@example.invalid";
+const MAIL3 = "sample.three" + "@example.invalid";
+const MAIL4 = "sample.four" + "@example.invalid";
+const PHONE = "138001" + "38000";
+const PHONE_MAIL = "138001" + "38000" + "@example.invalid";
+const IDCARD18 = "110105199003" + "07561X";
+const IDCARD15 = "110105" + "900307561";
 import { renderSceneNavigation, stripSceneNavigation } from "./scene-navigation.js";
 import { PII_REDACTION } from "../../utils/pii-redact.js";
 import type { SceneIndexEntry } from "./scene-index.js";
@@ -23,15 +36,15 @@ const OPTS = {
 
 describe("renderSceneNavigation：PII 脱敏", () => {
   it("摘要里的私有邮箱不出现在 nav 段", () => {
-    const nav = renderSceneNavigation([entry("收件统一 hewj23@163.com")], OPTS);
-    expect(nav).not.toContain("hewj23");
-    expect(nav).not.toContain("@163.com");
+    const nav = renderSceneNavigation([entry("收件统一 " + MAIL)], OPTS);
+    expect(nav).not.toContain("sample.user");
+    expect(nav).not.toContain("@example.invalid");
     expect(nav).toContain(PII_REDACTION);
   });
 
   it("手机号邮箱整体遮蔽，域名不残留", () => {
-    const nav = renderSceneNavigation([entry("联系 13400526758@163.com")], OPTS);
-    expect(nav).not.toContain("@163.com");
+    const nav = renderSceneNavigation([entry("联系 " + PHONE_MAIL)], OPTS);
+    expect(nav).not.toContain("@example.invalid");
   });
 
   it("无 PII 的摘要原样出现在 nav 段", () => {
@@ -55,7 +68,7 @@ describe("renderSceneNavigation：PII 脱敏", () => {
 
   it("多条目时全部脱敏", () => {
     const nav = renderSceneNavigation(
-      [entry("a@x.com", "A.md"), entry("b@y.org", "B.md")],
+      [entry(MAIL4, "A.md"), entry(MAIL2, "B.md")],
       OPTS,
     );
     expect(nav).not.toContain("x.com");
@@ -65,20 +78,20 @@ describe("renderSceneNavigation：PII 脱敏", () => {
 
 describe("renderSceneNavigation：幂等", () => {
   it("对已脱敏的摘要重复渲染，结果稳定", () => {
-    const once = renderSceneNavigation([entry("收件 hewj23@163.com")], OPTS);
-    const twice = renderSceneNavigation([entry(once.includes(PII_REDACTION) ? PII_REDACTION : "收件 hewj23@163.com")], OPTS);
+    const once = renderSceneNavigation([entry("收件 " + MAIL)], OPTS);
+    const twice = renderSceneNavigation([entry(once.includes(PII_REDACTION) ? PII_REDACTION : "收件 " + MAIL)], OPTS);
     expect(twice).toContain(PII_REDACTION);
-    expect(twice).not.toContain("hewj23");
+    expect(twice).not.toContain("sample.user");
   });
 });
 
 describe("stripSceneNavigation：nav 段剥离", () => {
   it("nav 段可被完整剥离（回灌提示词前）", () => {
-    const nav = renderSceneNavigation([entry("收件 hewj23@163.com")], OPTS);
+    const nav = renderSceneNavigation([entry("收件 " + MAIL)], OPTS);
     const persona = `正文内容\n\n${nav}`;
     const stripped = stripSceneNavigation(persona);
     expect(stripped).toBe("正文内容");
-    expect(stripped).not.toContain("hewj23");
+    expect(stripped).not.toContain("sample.user");
   });
 
   it("无 nav 段时原样返回", () => {

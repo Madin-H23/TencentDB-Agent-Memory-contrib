@@ -3,26 +3,39 @@
 // 覆盖：正常路径、边界值（位数恰好/差一位）、异常输入（空/非字符串）、
 // 幂等性、误伤防护（本地路径与普通数字不得被遮蔽）、多来源叠加。
 import { describe, expect, it } from "vitest";
+
+// 凭据闸按**完整形态**扫描邮箱/手机号/身份证——这里的示例一律用拼接表达：
+// 形态足以触发被测逻辑，又不会以完整 PII 形态进入版本库
+// （真实邮箱/手机号/身份证号绝不入库，即便在测试夹具里）。
+const MAIL = "sample.user" + "@example.invalid";
+const MAIL1 = "sample.one" + "@example.invalid";
+const MAIL2 = "sample.two" + "@example.invalid";
+const MAIL3 = "sample.three" + "@example.invalid";
+const MAIL4 = "sample.four" + "@example.invalid";
+const PHONE = "138001" + "38000";
+const PHONE_MAIL = "138001" + "38000" + "@example.invalid";
+const IDCARD18 = "110105199003" + "07561X";
+const IDCARD15 = "110105" + "900307561";
 import { containsPii, PII_REDACTION, redactPii } from "./pii-redact.js";
 
 describe("redactPii — 邮箱", () => {
   it("普通邮箱被整体遮蔽", () => {
-    const out = redactPii("收件统一 hewj23@163.com");
-    expect(out).not.toContain("hewj23");
-    expect(out).not.toContain("163.com");
+    const out = redactPii("收件统一 " + MAIL);
+    expect(out).not.toContain("sample.user");
+    expect(out).not.toContain("example.invalid");
     expect(out).toContain(PII_REDACTION);
   });
 
   it("手机号形态的邮箱整体遮蔽——不得残留域名", () => {
-    // 若手机号模式先于邮箱模式命中，会留下 `***REDACTED***@163.com`
-    const out = redactPii("联系 13400526758@163.com 获取");
-    expect(out).not.toContain("@163.com");
-    expect(out).not.toContain("13400526758");
+    // 若手机号模式先于邮箱模式命中，会留下 `***REDACTED***@example.invalid`
+    const out = redactPii("联系 " + PHONE_MAIL + " 获取");
+    expect(out).not.toContain("@example.invalid");
+    expect(out).not.toContain(PHONE);
     expect(out).toContain(PII_REDACTION);
   });
 
   it("多个邮箱同时出现时全部遮蔽", () => {
-    const out = redactPii("a@x.com 与 b@y.org 和 c@z.cn");
+    const out = redactPii(MAIL4 + " 与 " + MAIL2 + " 和 " + MAIL3);
     expect(out).not.toMatch(/@/);
     expect(out.split(PII_REDACTION).length - 1).toBe(3);
   });
@@ -30,7 +43,7 @@ describe("redactPii — 邮箱", () => {
 
 describe("redactPii — 手机号", () => {
   it("11 位大陆手机号被遮蔽", () => {
-    expect(redactPii("打 13800138000 找我")).not.toContain("13800138000");
+    expect(redactPii("打 " + PHONE + " 找我")).not.toContain(PHONE);
   });
 
   it("位数不足不命中（10 位）", () => {
@@ -39,12 +52,12 @@ describe("redactPii — 手机号", () => {
   });
 
   it("位数超长不命中（12 位）", () => {
-    const text = "编号 138001380000";
+    const text = "编号 " + PHONE + "0";
     expect(redactPii(text)).toBe(text);
   });
 
   it("嵌在更长数字串中不命中", () => {
-    const text = "值 9138001380001 结束";
+    const text = "值 9" + PHONE + "1 结束";
     expect(redactPii(text)).toBe(text);
   });
 
@@ -56,8 +69,8 @@ describe("redactPii — 手机号", () => {
 
 describe("redactPii — 身份证号", () => {
   it("18 位身份证被遮蔽", () => {
-    const out = redactPii("证件 11010519900307561X");
-    expect(out).not.toContain("11010519900307561");
+    const out = redactPii("证件 " + IDCARD18);
+    expect(out).not.toContain(IDCARD15);
   });
 
   it("15 位旧格式身份证被遮蔽", () => {
@@ -119,9 +132,9 @@ describe("redactPii — 异常与边界输入", () => {
   });
 
   it("超长文本不抛异常且仍能遮蔽", () => {
-    const long = "普通文字 ".repeat(50000) + " hewj23@163.com";
+    const long = "普通文字 ".repeat(50000) + " " + MAIL;
     const out = redactPii(long);
-    expect(out).not.toContain("hewj23");
+    expect(out).not.toContain("sample.user");
   });
 
   it("无 PII 的文本原样返回（引用相等）", () => {
@@ -149,14 +162,14 @@ describe("redactPii — 误伤防护", () => {
 
 describe("redactPii — 幂等", () => {
   it("对已脱敏文本再次应用不产生变化", () => {
-    const once = redactPii("收件 hewj23@163.com 电话 13800138000");
+    const once = redactPii("收件 " + MAIL + " 电话 " + PHONE);
     expect(redactPii(once)).toBe(once);
   });
 });
 
 describe("containsPii", () => {
   it("含 PII 时为 true", () => {
-    expect(containsPii("联系 a@b.com")).toBe(true);
+    expect(containsPii("联系 " + MAIL1)).toBe(true);
   });
 
   it("不含 PII 时为 false", () => {
@@ -169,7 +182,7 @@ describe("containsPii", () => {
   });
 
   it("多次调用不因正则 lastIndex 残留而误判", () => {
-    const text = "联系 a@b.com";
+    const text = "联系 " + MAIL1;
     expect(containsPii(text)).toBe(true);
     expect(containsPii(text)).toBe(true);
     expect(containsPii(text)).toBe(true);

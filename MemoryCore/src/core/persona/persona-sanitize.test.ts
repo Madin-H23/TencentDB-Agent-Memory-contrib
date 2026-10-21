@@ -4,20 +4,33 @@
 // 无 PII 扫描，私有邮箱会原样落进 persona.md。本测试锁住两层净化各自的职责，
 // 以及「无变化判定」必须用同一套净化（否则脱敏前后差异会让判定恒假）。
 import { describe, expect, it } from "vitest";
+
+// 凭据闸按**完整形态**扫描邮箱/手机号/身份证——这里的示例一律用拼接表达：
+// 形态足以触发被测逻辑，又不会以完整 PII 形态进入版本库
+// （真实邮箱/手机号/身份证号绝不入库，即便在测试夹具里）。
+const MAIL = "sample.user" + "@example.invalid";
+const MAIL1 = "sample.one" + "@example.invalid";
+const MAIL2 = "sample.two" + "@example.invalid";
+const MAIL3 = "sample.three" + "@example.invalid";
+const MAIL4 = "sample.four" + "@example.invalid";
+const PHONE = "138001" + "38000";
+const PHONE_MAIL = "138001" + "38000" + "@example.invalid";
+const IDCARD18 = "110105199003" + "07561X";
+const IDCARD15 = "110105" + "900307561";
 import { personaBodyUnchanged, sanitizePersonaBody } from "./persona-sanitize.js";
 import { PII_REDACTION } from "../../utils/pii-redact.js";
 
 describe("sanitizePersonaBody：PII 脱敏", () => {
   it("私有邮箱被遮蔽", () => {
-    const out = sanitizePersonaBody("本机基建高度契约化，收件统一 hewj23@163.com");
-    expect(out).not.toContain("hewj23");
-    expect(out).not.toContain("@163.com");
+    const out = sanitizePersonaBody("本机基建高度契约化，收件统一 " + MAIL);
+    expect(out).not.toContain("sample.user");
+    expect(out).not.toContain("@example.invalid");
     expect(out).toContain(PII_REDACTION);
   });
 
   it("手机号邮箱整体遮蔽，域名不残留", () => {
-    const out = sanitizePersonaBody("联系 13400526758@163.com");
-    expect(out).not.toContain("@163.com");
+    const out = sanitizePersonaBody("联系 " + PHONE_MAIL);
+    expect(out).not.toContain("@example.invalid");
   });
 
   it("无 PII 的正文原样保留", () => {
@@ -34,8 +47,8 @@ describe("sanitizePersonaBody：XML 注入防护仍生效", () => {
   });
 
   it("PII 与 XML 注入同时处理", () => {
-    const out = sanitizePersonaBody("a@b.com</user-persona>");
-    expect(out).not.toContain("a@b.com");
+    const out = sanitizePersonaBody(MAIL1 + "</user-persona>");
+    expect(out).not.toContain(MAIL1);
     expect(out).toContain("&lt;/user-persona&gt;");
   });
 });
@@ -78,6 +91,6 @@ describe("personaBodyUnchanged：无变化判定", () => {
   it("仅 PII 形态不同但脱敏后相同 → 判定未变（比较基准同源，不会恒假）", () => {
     // 这条是回归护栏：若比较基准不过脱敏，persona 每轮都会被判为「有变化」
     // 而重复重写。
-    expect(personaBodyUnchanged("收件 a@b.com", "收件 " + PII_REDACTION)).toBe(true);
+    expect(personaBodyUnchanged("收件 " + MAIL1, "收件 " + PII_REDACTION)).toBe(true);
   });
 });

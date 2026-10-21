@@ -23,8 +23,8 @@ export const PII_REDACTION = "***REDACTED***";
 
 /**
  * 各模式的匹配顺序有意义：先整体匹配更长的形态，避免被短模式切碎
- * （例如手机号邮箱必须先于裸手机号命中，否则 `13400526758@163.com`
- * 会被拆成 `***REDACTED***@163.com`，域名反而留在结果里）。
+ * （例如手机号邮箱必须先于裸手机号命中，否则 `13800138000@example.invalid`
+ * 会被拆成 `***REDACTED***@example.invalid`，域名反而留在结果里）。
  */
 const PII_PATTERNS: RegExp[] = [
   // 邮箱（含数字、手机号形态的邮箱）

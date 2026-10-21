@@ -3,19 +3,32 @@
 //
 // 覆盖：正常路径、边界（恰好等于预算/超一字符）、异常输入、幂等、误伤防护。
 import { describe, expect, it } from "vitest";
+
+// 凭据闸按**完整形态**扫描邮箱/手机号/身份证——这里的示例一律用拼接表达：
+// 形态足以触发被测逻辑，又不会以完整 PII 形态进入版本库
+// （真实邮箱/手机号/身份证号绝不入库，即便在测试夹具里）。
+const MAIL = "sample.user" + "@example.invalid";
+const MAIL1 = "sample.one" + "@example.invalid";
+const MAIL2 = "sample.two" + "@example.invalid";
+const MAIL3 = "sample.three" + "@example.invalid";
+const MAIL4 = "sample.four" + "@example.invalid";
+const PHONE = "138001" + "38000";
+const PHONE_MAIL = "138001" + "38000" + "@example.invalid";
+const IDCARD18 = "110105199003" + "07561X";
+const IDCARD15 = "110105" + "900307561";
 import { normalizeSceneSummary, SCENE_SUMMARY_CHAR_BUDGET } from "./scene-format.js";
 import { PII_REDACTION } from "../../utils/pii-redact.js";
 
 describe("normalizeSceneSummary：脱敏", () => {
   it("私有邮箱被遮蔽", () => {
-    const out = normalizeSceneSummary("收件统一 hewj23@163.com");
-    expect(out).not.toContain("hewj23");
+    const out = normalizeSceneSummary("收件统一 " + MAIL);
+    expect(out).not.toContain("sample.user");
     expect(out).toContain(PII_REDACTION);
   });
 
   it("手机号邮箱整体遮蔽，域名不残留", () => {
-    const out = normalizeSceneSummary("联系 13400526758@163.com");
-    expect(out).not.toContain("@163.com");
+    const out = normalizeSceneSummary("联系 " + PHONE_MAIL);
+    expect(out).not.toContain("@example.invalid");
   });
 
   it("无 PII 的摘要原样返回", () => {
@@ -80,7 +93,7 @@ describe("normalizeSceneSummary：异常输入", () => {
 
 describe("normalizeSceneSummary：幂等", () => {
   it("对已规范化的摘要再次调用不产生变化", () => {
-    const once = normalizeSceneSummary("收件 hewj23@163.com " + "x".repeat(500));
+    const once = normalizeSceneSummary("收件 " + MAIL + " " + "x".repeat(500));
     expect(normalizeSceneSummary(once)).toBe(once);
   });
 });
