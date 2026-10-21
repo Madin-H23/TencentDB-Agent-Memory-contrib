@@ -1122,12 +1122,13 @@ export function createL2Runner(opts: {
       // 必须在推进 cursor **之前**上抛：cursor 取全部 records 的最大 updatedAt，
       // 若带着失败推进，失败组的 L1 记录会被静默跳过（10-21 修复的隐蔽丢数口）。
       const detail = failedGroups.map((f) => `${f.scope}: ${f.error}`).join(" | ");
-      // 归属后缀（同 L1 的 pmSuffix 契约，2026-10-21）：面板按 "(model=…, provider=…)"
-      // 解析厂商:模型归属；缺后缀 ⇒ 面板该列空白。
+      // 归属后缀（同 L1 的 pmSuffix 契约，2026-10-21）：面板按 "(model=…, provider=…)" 解析
+      // 厂商:模型归属；本批再补 session= 让面板能答"哪个会话的记录出错"。
+      // L2 的 runner 入参 sessionKey 就是**那条会话**（L2 任务按会话排；L1 任务才按 client key）。
       throw new Error(
         `${TAG} [L2] 场景抽取失败 ${failedGroups.length}/${grouped.size} 组 — ${detail}` +
           ` (model=${cfg.persona.model ?? cfg.llm?.layers?.l2?.model ?? cfg.llm?.model ?? "unknown"},` +
-          ` provider=${cfg.llm?.providerLabel ?? "unknown"})`,
+          ` provider=${cfg.llm?.providerLabel ?? "unknown"}, session=${sessionKey ?? "unknown"})`,
       );
     }
 

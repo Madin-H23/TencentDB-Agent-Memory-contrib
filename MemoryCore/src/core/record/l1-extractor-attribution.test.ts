@@ -39,3 +39,37 @@ describe("extractL1Memories：入库前白名单归一", () => {
     expect(r.records[0]!.content).toBe("用户要求修改；用户同意");
   });
 });
+
+// 2026-10-21（面板需求「增加是哪个会话的记录出错」）：失败消息尾部带
+// (model=…, provider=…, session=…)——面板 PM_SUFFIX_RE 按此解析厂商:模型与**会话**。
+// session= 就是出错那条会话（抽取器逐 sid 分组跑，sessionId 即该组 sid）。
+describe("extractL1Memories：失败消息带归属与会话", () => {
+  it("上游失败 → 错误消息含 (model, provider, session) 后缀", async () => {
+    const llm = {
+      run: async () => {
+        throw new Error("upstream boom");
+      },
+    } as unknown as LLMRunner;
+    const baseDir = mkdtempSync(join(tmpdir(), "extractor-session-"));
+    try {
+      await expect(
+        extractL1Memories({
+          messages: [{ id: "m1", role: "user" as const, content: "触发消息", timestamp: T }],
+          sessionKey: "zcode-default",
+          sessionId: "sess-attr",
+          baseDir,
+          config: {},
+          options: {
+            enableDedup: false,
+            promptMode: "chat",
+            llmRunner: llm,
+            model: "minimax-m3.1-flash-free",
+            providerLabel: "opencode-go",
+          },
+        }),
+      ).rejects.toThrow(/\(model=minimax-m3\.1-flash-free, provider=opencode-go, session=sess-attr\)/);
+    } finally {
+      rmSync(baseDir, { recursive: true, force: true });
+    }
+  });
+});

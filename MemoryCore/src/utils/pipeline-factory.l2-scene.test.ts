@@ -159,7 +159,9 @@ describe("L2 场景抽取：失败必须上抛（不再被吞成 Task completed�
         logger: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} } as never,
         llmRunner: { run: async () => "" } as never,
       });
-      await expect(runner(SESSION_KEY)).rejects.toThrow(/\(model=deepseek-v4-flash, provider=opencode-go\)$/);
+      await expect(runner(SESSION_KEY)).rejects.toThrow(
+        /\(model=deepseek-v4-flash, provider=opencode-go, session=zcode-default\)$/,
+      );
     } finally {
       rmSync(baseDir, { recursive: true, force: true });
     }

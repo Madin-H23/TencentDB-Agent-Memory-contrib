@@ -186,7 +186,12 @@ export async function extractL1Memories(params: {
   // （面板 COMPLETE_RE/DEFERRED_RE/PM_SUFFIX_RE 的契约，缺即面板归属列空白）。
   const pmModel = options.model ?? "unknown";
   const pmProvider = options.providerLabel ?? "unknown";
-  const pmSuffix = ` (model=${pmModel}, provider=${pmProvider})`;
+  // 2026-10-21：失败消息补会话（面板要能答"哪个会话的记录出错"）。抽取器**逐 sid 分组**跑，
+  // 这里的 sessionId 就是出问题的那条会话（zcode-default 这类 client key 在日志行里另带）。
+  // 面板 PM_SUFFIX_RE 同步扩展为可选第三段；旧的两段式消息继续解析。
+  const pmSuffix =
+    ` (model=${pmModel}, provider=${pmProvider}` +
+    `${sessionId ? `, session=${sessionId}` : ""})`;
 
   if (messages.length === 0) {
     logger?.debug?.(`${TAG} No messages to extract from`);
