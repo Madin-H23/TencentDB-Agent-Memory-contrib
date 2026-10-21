@@ -144,6 +144,27 @@ describe("L2 场景抽取：失败必须上抛（不再被吞成 Task completed�
     }
   });
 
+  it("失败消息带归属后缀 (model=…, provider=…)——面板按此解析厂商:模型", async () => {
+    // 2026-10-21：面板 PM_SUFFIX_RE 契约（L1 既有口径）。缺后缀 ⇒ 面板归属列空白。
+    const baseDir = mkdtempSync(join(tmpdir(), "l2-fail-suffix-"));
+    try {
+      const runner = createL2Runner({
+        pluginDataDir: baseDir,
+        cfg: {
+          persona: { maxScenes: 15, promptMode: "chat", sceneBackupCount: 3 },
+          llm: { layers: { l2: { model: "deepseek-v4-flash" } }, providerLabel: "opencode-go" },
+        } as never,
+        openclawConfig: undefined,
+        vectorStore: makeStore([makeRow()]),
+        logger: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} } as never,
+        llmRunner: { run: async () => "" } as never,
+      });
+      await expect(runner(SESSION_KEY)).rejects.toThrow(/\(model=deepseek-v4-flash, provider=opencode-go\)$/);
+    } finally {
+      rmSync(baseDir, { recursive: true, force: true });
+    }
+  });
+
   it("抽取成功但空抽取（emptyExtraction）→ 不得上抛（防误伤）", async () => {
     const baseDir = mkdtempSync(join(tmpdir(), "l2-fail-empty-"));
     try {

@@ -1122,8 +1122,12 @@ export function createL2Runner(opts: {
       // 必须在推进 cursor **之前**上抛：cursor 取全部 records 的最大 updatedAt，
       // 若带着失败推进，失败组的 L1 记录会被静默跳过（10-21 修复的隐蔽丢数口）。
       const detail = failedGroups.map((f) => `${f.scope}: ${f.error}`).join(" | ");
+      // 归属后缀（同 L1 的 pmSuffix 契约，2026-10-21）：面板按 "(model=…, provider=…)"
+      // 解析厂商:模型归属；缺后缀 ⇒ 面板该列空白。
       throw new Error(
-        `${TAG} [L2] 场景抽取失败 ${failedGroups.length}/${grouped.size} 组 — ${detail}`,
+        `${TAG} [L2] 场景抽取失败 ${failedGroups.length}/${grouped.size} 组 — ${detail}` +
+          ` (model=${cfg.persona.model ?? cfg.llm?.layers?.l2?.model ?? cfg.llm?.model ?? "unknown"},` +
+          ` provider=${cfg.llm?.providerLabel ?? "unknown"})`,
       );
     }
 
@@ -1344,7 +1348,13 @@ export function createL3Runner(opts: {
           personaAfterHash: await readPersonaBodyHash(scopedDir, scopedStore),
           scopeStartedAt, jevAddedLockMs,
         });
-        throw new Error(`${TAG} [L3] Persona generation failed (scope=${scope})`);
+        // 归属后缀（同 L1 的 pmSuffix 契约，2026-10-21）：面板按 "(model=…, provider=…)"
+        // 解析厂商:模型归属；缺后缀 ⇒ 面板该列空白。
+        throw new Error(
+          `${TAG} [L3] Persona generation failed (scope=${scope})` +
+            ` (model=${cfg.persona.model ?? cfg.llm?.layers?.l3?.model ?? cfg.llm?.model ?? "unknown"},` +
+            ` provider=${cfg.llm?.providerLabel ?? "unknown"})`,
+        );
       }
       if (genResult === "unchanged") {
         logger.info(`${TAG} [L3] Persona generation skipped (no changes, scope=${scope})`);
