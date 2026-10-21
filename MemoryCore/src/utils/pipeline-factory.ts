@@ -875,6 +875,9 @@ export function createL2Runner(opts: {
 
     let processedTotal = 0;
     let anyEmptyExtraction = false;
+    // 场景抽取失败的分组（2026-10-21）：循环结束后统一上抛，
+    // 让 worker 记 Task failed（重试 → 死信），且 cursor 不推进。
+    const failedGroups: Array<{ scope: string; error: string }> = [];
     const l2PromptTargets = [...grouped.values()].map((groupRecords) => ({
       teamId: groupRecords[0]?.teamId,
       agentId: groupRecords[0]?.agentId,
@@ -903,6 +906,13 @@ export function createL2Runner(opts: {
         })),
         maxScenes: cfg.persona.maxScenes,
         sceneBackupCount: cfg.persona.sceneBackupCount,
+        // L2 场景抽取超时（2026-10-21）：此前工厂**不传** timeoutMs → 抽取器内部
+        // 回落硬编码 300s（scene-extractor.ts `opts.timeoutMs ?? 300_000`）并以该
+        // 值覆盖层配置 ⇒ yaml 的 llm.layers.l2.timeoutMs（600000）对场景抽取
+        // **从不生效**，形成 300s 硬帽（2026-10-21 实测：当日 22 次 L2 抽取失败
+        // 里 16 次卡在这条线上）。改为取 L2 层配置；层未配置时留 undefined，
+        // 仍回落抽取器自带 300s（行为不变）。
+        timeoutMs: cfg.llm?.layers?.l2?.timeoutMs,
         logger,
         instanceId,
         llmRunner,
@@ -929,7 +939,21 @@ export function createL2Runner(opts: {
         layer: "l2",
       }));
       const extractResult = await extractor.extract(memories);
-      if (!(extractResult.success && extractResult.memoriesProcessed > 0)) continue;
+      if (!extractResult.success) {
+        // 场景抽取失败必须上抛（2026-10-21）：抽取器把错误放进返回值
+        // （success:false + error），此前这里 continue 吞掉 → worker 记
+        // "Task completed: L2"：失败既不重试也不进死信、在面板上完全不可见；
+        // 更糟的是 cursor 按**全部** records 的最大 updatedAt 推进（见下方
+        // latestCursor），"一组成功、一组失败"时失败组的 L1 记录会被静默
+        // 跳过、永不再抽。现在：记录失败、继续跑其余组，循环结束后统一上抛
+        // ⇒ worker 走重试/死信口径，且 cursor 不推进 ⇒ 失败组会被重跑。
+        failedGroups.push({
+          scope: groupScope,
+          error: extractResult.error ?? "unknown error",
+        });
+        continue;
+      }
+      if (extractResult.memoriesProcessed <= 0) continue;
       if (extractResult.emptyExtraction) {
         anyEmptyExtraction = true;
         logger.warn(`${TAG} [L2] Extraction produced no file changes (empty run), skipping checkpoint increment`);
@@ -1092,6 +1116,15 @@ export function createL2Runner(opts: {
       await checkpoint.incrementScenesProcessed();
       await checkpoint.incrementMemoriesSincePersona(extractResult.memoriesProcessed);
       processedTotal += extractResult.memoriesProcessed;
+    }
+
+    if (failedGroups.length > 0) {
+      // 必须在推进 cursor **之前**上抛：cursor 取全部 records 的最大 updatedAt，
+      // 若带着失败推进，失败组的 L1 记录会被静默跳过（10-21 修复的隐蔽丢数口）。
+      const detail = failedGroups.map((f) => `${f.scope}: ${f.error}`).join(" | ");
+      throw new Error(
+        `${TAG} [L2] 场景抽取失败 ${failedGroups.length}/${grouped.size} 组 — ${detail}`,
+      );
     }
 
     if (processedTotal > 0) {
