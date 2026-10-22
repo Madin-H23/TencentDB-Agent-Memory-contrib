@@ -1351,8 +1351,14 @@ export function createL3Runner(opts: {
         });
         // 归属后缀（同 L1 的 pmSuffix 契约，2026-10-21）：面板按 "(model=…, provider=…)"
         // 解析厂商:模型归属；缺后缀 ⇒ 面板该列空白。
+        // 失败原因（2026-10-22）：generateLocalPersona 以**状态串**报失败，真实原因
+        // 只落在 generator 内部日志 ⇒ 面板该行只剩包装文案、无法归因（实测 5 连败
+        // 全是 opencode.ai 不可达，面板却只显示 "Persona generation failed"）。
+        // 现把 generator 捕获的原因带进任务级消息（同 L2 的契约），截 300 字防爆。
+        const l3FailureReason =
+          (generator.getLastFailureReason() ?? "unknown failure").slice(0, 300);
         throw new Error(
-          `${TAG} [L3] Persona generation failed (scope=${scope})` +
+          `${TAG} [L3] Persona generation failed (scope=${scope}): ${l3FailureReason}` +
             ` (model=${cfg.persona.model ?? cfg.llm?.layers?.l3?.model ?? cfg.llm?.model ?? "unknown"},` +
             ` provider=${cfg.llm?.providerLabel ?? "unknown"})`,
         );

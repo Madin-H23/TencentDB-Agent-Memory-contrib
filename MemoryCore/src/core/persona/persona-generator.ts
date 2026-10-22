@@ -34,6 +34,8 @@ export class PersonaGenerator {
   private instanceId: string | undefined;
   private storage: StorageAdapter | undefined;
   private traceContext: TraceContext | undefined;
+  /** 最近一次生成失败的简短原因（成功/未跑时为 undefined；供上游把原因带进任务级错误消息） */
+  private lastFailureReason: string | undefined;
 
   constructor(opts: {
     dataDir: string;
@@ -76,11 +78,17 @@ export class PersonaGenerator {
     this.logger?.debug?.(`${TAG} Generator created: model=${opts.model ?? "(default)"}, promptMode=${this.promptMode}, dataDir=${opts.dataDir}`);
   }
 
+  /** 最近一次生成失败的简短原因（供 pipeline-factory 拼进任务级失败消息） */
+  getLastFailureReason(): string | undefined {
+    return this.lastFailureReason;
+  }
+
   /**
    * Execute local persona generation without advancing checkpoint.
    */
   async generateLocalPersona(triggerReason?: string): Promise<"generated" | "unchanged" | "failed"> {
     const startMs = Date.now();
+    this.lastFailureReason = undefined;
     this.logger?.debug?.(`${TAG} Starting generation: reason="${triggerReason ?? "none"}"`);
 
     const cpManager = new CheckpointManager(this.dataDir, this.logger, this.storage);
@@ -224,7 +232,9 @@ export class PersonaGenerator {
       this.logger?.debug?.(`${TAG} LLM runner completed`);
     } catch (err) {
       const elapsedMs = Date.now() - startMs;
-      this.logger?.error(`${TAG} Persona generation failed after ${elapsedMs}ms: ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
+      const reason = err instanceof Error ? err.message : String(err);
+      this.logger?.error(`${TAG} Persona generation failed after ${elapsedMs}ms: ${err instanceof Error ? err.stack ?? reason : reason}`);
+      this.lastFailureReason = reason.slice(0, 300);
       return "failed";
     }
     const personaWriteMarkerAfter = await readPersonaWriteMarker(
@@ -248,6 +258,7 @@ export class PersonaGenerator {
     } catch {
       // LLM failed to write persona.md — treat as failure
       this.logger?.error(`${TAG} LLM did not write ${targetFile} — file not found after runner completed`);
+      this.lastFailureReason = `LLM did not write ${targetFile} — file not found after runner completed`;
       return "failed";
     }
     if (
@@ -258,6 +269,7 @@ export class PersonaGenerator {
       this.logger?.error(
         `${TAG} LLM completed without writing ${targetFile}; preserving checkpoint for retry`,
       );
+      this.lastFailureReason = `LLM completed without writing ${targetFile} (write marker unchanged)`;
       return "failed";
     }
 
@@ -271,6 +283,7 @@ export class PersonaGenerator {
 
     if (!personaText) {
       this.logger?.error(`${TAG} LLM wrote empty ${targetFile} — skipping`);
+      this.lastFailureReason = `LLM wrote empty ${targetFile}`;
       return "failed";
     }
 
