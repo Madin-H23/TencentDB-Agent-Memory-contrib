@@ -122,6 +122,16 @@ memory:
     # 持续膨胀无阻。回落到 15 后，场景数触顶会真正触发上游的保护逻辑。
     maxScenes: 15
     triggerMode: current
+    # L2 单批记忆上限（2026-10-22，用户令「先做 N=50（yaml 可配、随时调）」）。
+    # 此前 L2 把"游标之后的全部 L1 记录"塞进一次提示词 ⇒ 积压时单轮 4,041 条
+    # ≈ 40 万字符 ⇒ 必然撞上下文（400 context window exceeds limit）+ 内存尖峰
+    # （15:13 网关进程被系统直接杀，提交量只剩 0.9G）；且 L2 长时间占住 profile 级
+    # checkpoint 锁 ⇒ 56 个会话的 L1/L2/L3 任务全被 park ⇒ L1 游标不前进
+    # ⇒ 积压更大（自增强回路）。
+    # 限量后单轮提示词 ≈ 50×390 ≈ 2 万字符，游标按**本批**推进（剩余记录下一轮再抽）。
+    # 调大前先看：L2 提示词规模（gateway.out 的 "prompt built: N chars"）与
+    # 锁冲突次数（"Parked after lock conflict"）。
+    maxL2Batch: 50
 
   pipeline:
     everyNConversations: 5

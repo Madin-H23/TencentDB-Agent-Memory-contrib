@@ -105,6 +105,14 @@ export interface PersonaConfig {
   backupCount: number;
   /** Scene blocks backup count (default: 10) */
   sceneBackupCount: number;
+  /**
+   * L2 场景抽取的单批记忆上限（default: 50）。
+   * 此前 L2 把"游标之后的全部 L1 记录"塞进一次提示词 ⇒ 积压时单轮可达 40 万字符
+   * ⇒ 必然撞上下文（400）+ 内存尖峰（进程被系统杀），且长时间占住 profile 级锁
+   * ⇒ 56 个会话的 L1/L2/L3 任务全被 park ⇒ L1 游标不前进 ⇒ 积压更大（自增强回路）。
+   * 限量后单轮提示词约 N×390 字符；yaml `persona.maxL2Batch` 可随时调。
+   */
+  maxL2Batch: number;
   /** LLM model for persona generation, format: "provider/model" (falls back to OpenClaw default model when omitted) */
   model?: string;
   /** Prompt family for L2/L3 prompts (default: chat; code prompts will be wired as they are added). */
@@ -728,6 +736,7 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       maxScenes: num(personaGroup, "maxScenes") ?? 15,
       backupCount: num(personaGroup, "backupCount") ?? 3,
       sceneBackupCount: num(personaGroup, "sceneBackupCount") ?? 10,
+      maxL2Batch: num(personaGroup, "maxL2Batch") ?? 50,
       model: optStr(personaGroup, "model"),
       promptMode: normalizePromptMode(str(personaGroup, "promptMode"), globalPromptMode),
       triggerMode,

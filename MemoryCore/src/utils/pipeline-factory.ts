@@ -823,6 +823,12 @@ export function createL2Runner(opts: {
 
     if (vectorStore && !vectorStore.isDegraded()) {
       const { queryMemoryRecords } = await import("../core/record/l1-reader.js");
+      // 批次上限（2026-10-22，persona.maxL2Batch，缺省 50）：此前一次把"游标之后的
+      // 全部记录"塞进提示词 ⇒ 积压时单轮 40 万字符（必然 400 + 内存尖峰 ⇒ 进程被系统杀），
+      // 且长时间占住 profile 级锁 ⇒ 其它会话的 L1/L2/L3 任务全被 park ⇒ 积压更大。
+      // 限量后**本批**记录即为后续游标推进的依据（latestCursor 取本批最大 updatedAt），
+      // 剩余记录留待下一轮；读取侧对"同毫秒兄弟"扩边，保证不丢记录。
+      const l2BatchLimit = cfg.persona?.maxL2Batch ?? 50;
       const memRecords = await queryMemoryRecords(vectorStore, profileFilter ? {
         teamId: profileFilter.teamId,
         userId: profileFilter.userId,
@@ -832,7 +838,7 @@ export function createL2Runner(opts: {
       } : {
         sessionKey,
         updatedAfter: cursor,
-      }, logger);
+      }, logger, { limit: l2BatchLimit });
 
       if (memRecords.length === 0) {
         logger.debug?.(

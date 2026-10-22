@@ -42,6 +42,7 @@ export async function queryMemoryRecords(
   vectorStore: IMemoryStore | null | undefined,
   filter?: L1QueryFilter,
   logger?: Logger,
+  opts?: QueryMemoryRecordsOptions,
 ): Promise<MemoryRecord[]> {
   if (!vectorStore) {
     logger?.warn(`${TAG} queryMemoryRecords: no VectorStore available, returning empty`);
@@ -49,7 +50,35 @@ export async function queryMemoryRecords(
   }
 
   const rows = await vectorStore.queryL1Records(filter);
-  return rows.map(rowToMemoryRecord);
+  const records = rows.map(rowToMemoryRecord);
+  return applyBatchLimit(records, opts?.limit);
+}
+
+/** `queryMemoryRecords` 的批次上限选项 */
+export interface QueryMemoryRecordsOptions {
+  /**
+   * 批次上限：按 `updatedAt` **升序**取前 N 条（最旧的先消化，游标才能稳步推进）。
+   * 并对"与本批最后一条同 `updatedAt`"的兄弟记录**扩边**——游标是 `updatedAfter`（严格大于）
+   * 语义，不扩边会把同毫秒的兄弟整组跳过（实测 L1 记录里同值最多一组 39 条）⇒ 丢数据。
+   * 不设（undefined/≤0）＝不限，行为与既有完全一致。
+   */
+  limit?: number;
+}
+
+/** 按批次上限裁剪记录（升序 + 同值扩边）；无上限时原样返回。 */
+export function applyBatchLimit(records: MemoryRecord[], limit?: number): MemoryRecord[] {
+  if (!limit || limit <= 0) return records; // 无上限：保持存储原序（既有行为不变）
+  const sorted = [...records].sort((a, b) => {
+    if (a.updatedAt !== b.updatedAt) return a.updatedAt < b.updatedAt ? -1 : 1;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0; // 同值按 id 稳定排序
+  });
+  if (sorted.length <= limit) return sorted;
+  const batch = sorted.slice(0, limit);
+  const lastUpdatedAt = batch[batch.length - 1]?.updatedAt;
+  if (lastUpdatedAt === undefined) return batch;
+  let end = batch.length;
+  while (end < sorted.length && sorted[end].updatedAt === lastUpdatedAt) end++;
+  return sorted.slice(0, end);
 }
 
 /**
