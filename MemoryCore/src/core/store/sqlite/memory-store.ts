@@ -26,6 +26,7 @@ import { mkdirSync, existsSync } from "node:fs";
 import path from "node:path";
 import type { DatabaseSync, StatementSync, SQLInputValue } from "node:sqlite";
 import type { MemoryRecord } from "../../record/l1-writer.js";
+import { fingerprintOf } from "../../../utils/fingerprint.js";
 import type { EmbeddingProviderInfo } from "../embedding.js";
 import type {
   IMemoryStore,
@@ -402,6 +403,76 @@ export class VectorStore implements IMemoryStore {
   }
 
   /**
+   * 归一化口径版本（2026-10-23）：改 normalizeForFingerprint 口径时必须同步 bump，
+   * 启动回填会检测到不一致并「全量置 NULL 重算」——否则旧行指纹永远不再匹配，
+   * 且失效没有任何信号（双轴审查 P2-4）。
+   */
+  private static readonly L1_FP_ALGO = "v1";
+
+  /**
+   * 存量回填 content_fingerprint（2026-10-23）：NULL 严格等于「未回填」，幂等；
+   * 归一化为空的文本（纯标点/空白）写哨兵 ''（已处理、永不参与等值），否则
+   * IS NULL 会永远选中它们、每次启动重复扫描+写事务（双轴审查 P2）。
+   * 分块回填（5000/块）：十万行时不至于把全部 content 一次性读进内存。
+   * 独立 try/catch——回填失败只让写入前指纹守卫降级，绝不抛给 init() 的
+   * degrade 入口（否则一次迁移失败会让整个 VectorStore 变 no-op）。
+   */
+  private backfillL1Fingerprints(): void {
+    const startedAt = Date.now();
+    try {
+      // 口径版本检查：存量标记与当前实现不一致 → 旧指纹全部作废重算
+      let storedAlgo: string | undefined;
+      try {
+        const row = this.db
+          .prepare("SELECT value FROM embedding_meta WHERE key='l1_fingerprint_algo'")
+          .get() as { value: string } | undefined;
+        storedAlgo = row?.value;
+      } catch { /* meta 表异常：按未迁移处理，走全量回填 */ }
+      if (storedAlgo !== undefined && storedAlgo !== VectorStore.L1_FP_ALGO) {
+        this.db.exec("UPDATE l1_records SET content_fingerprint = NULL");
+        this.logger?.warn(
+          `${TAG} l1 fingerprint algo changed (${storedAlgo} → ${VectorStore.L1_FP_ALGO}): full re-backfill`,
+        );
+      }
+
+      const sel = this.db
+        .prepare("SELECT record_id, content FROM l1_records WHERE content_fingerprint IS NULL LIMIT 5000");
+      const upd = this.db.prepare(
+        "UPDATE l1_records SET content_fingerprint = ? WHERE record_id = ? AND content_fingerprint IS NULL",
+      );
+      let done = 0;
+      for (;;) {
+        const todo = sel.all() as Array<{ record_id: string; content: string }>;
+        if (todo.length === 0) break;
+        this.db.exec("BEGIN");
+        try {
+          for (const r of todo) upd.run(fingerprintOf(r.content) ?? "", r.record_id);
+          this.db.exec("COMMIT");
+        } catch (err) {
+          this.db.exec("ROLLBACK");
+          throw err;
+        }
+        done += todo.length;
+        if (todo.length < 5000) break;
+      }
+      if (done > 0) {
+        this.logger?.info(`${TAG} l1 fingerprint backfill: ${done} rows (${Date.now() - startedAt}ms)`);
+      }
+
+      // 口径标记：值不变就不写（否则每次启动多写一页，双轴审查 P2）。
+      this.db
+        .prepare(
+          "INSERT INTO embedding_meta (key, value) VALUES ('l1_fingerprint_algo', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value <> excluded.value",
+        )
+        .run(VectorStore.L1_FP_ALGO);
+    } catch (err) {
+      this.logger?.warn(
+        `${TAG} l1 fingerprint backfill failed (non-fatal, guard degrades): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
    * Internal schema initialization — separated from init() so we can
    * catch errors at the top level and degrade gracefully.
    */
@@ -499,7 +570,8 @@ export class VectorStore implements IMemoryStore {
         timestamp_end TEXT DEFAULT '',
         created_time TEXT DEFAULT '',
         updated_time TEXT DEFAULT '',
-        metadata_json TEXT DEFAULT '{}'
+        metadata_json TEXT DEFAULT '{}',
+        content_fingerprint TEXT
       )
     `);
 
@@ -510,11 +582,34 @@ export class VectorStore implements IMemoryStore {
     try { this.db.exec("ALTER TABLE l1_records ADD COLUMN agent_id TEXT NOT NULL DEFAULT 'default'"); } catch { /* exists */ }
     try { this.db.exec("ALTER TABLE l1_records ADD COLUMN task_id TEXT DEFAULT ''"); } catch { /* exists */ }
     try { this.db.exec("ALTER TABLE l1_records ADD COLUMN version INTEGER NOT NULL DEFAULT 0"); } catch { /* exists */ }
+    // 写入前指纹兜底列（2026-10-23）：可空、无默认值。v2 回滚仓对同一库写入走
+    // 显式列清单，加 NOT NULL/DEFAULT 会让 v2 写入失败；缺省 NULL 由下方回填补齐。
+    try { this.db.exec("ALTER TABLE l1_records ADD COLUMN content_fingerprint TEXT"); } catch { /* exists */ }
     this.db.prepare("UPDATE l1_records SET team_id = ? WHERE team_id = '' OR team_id IS NULL").run(DEFAULT_ISOLATION_ID);
     this.db.prepare("UPDATE l1_records SET user_id = ? WHERE user_id = '' OR user_id IS NULL").run(DEFAULT_ISOLATION_ID);
     this.db.prepare("UPDATE l1_records SET agent_id = ? WHERE agent_id = '' OR agent_id IS NULL").run(DEFAULT_ISOLATION_ID);
     this.db.prepare("UPDATE l1_records SET session_id = ? WHERE session_id = '' OR session_id IS NULL").run(DEFAULT_ISOLATION_ID);
     this.db.exec("UPDATE l1_records SET version = 0 WHERE version IS NULL OR version < 0");
+
+    // 指纹兜底列：先回填存量、再建索引；二者都单独 try/catch——索引缺失只让
+    // 守卫退化为全表扫（仍正确），绝不能把整个 store 拖进 degrade（双轴审查 P1-1
+    // 实测：建索引失败经 init() 顶层 catch 会变成全库 no-op）。
+    this.backfillL1Fingerprints();
+    try {
+      this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_content_fp ON l1_records(content_fingerprint)");
+      // 无 sqlite_stat1 时等值代价打平，SQLite 计划器按建索引顺序决胜：全新库会
+      // 选租户索引（10 万行实测 9.43ms/次 vs 指纹索引 0.02ms，双轴审查 P1-2）。
+      // 跑一次 ANALYZE 打破平局；已有统计信息则不重复跑（10 万行约 100-200ms）。
+      let hasStats = false;
+      try {
+        hasStats = !!this.db.prepare("SELECT 1 AS ok FROM sqlite_stat1 WHERE tbl='l1_records' LIMIT 1").get();
+      } catch { /* sqlite_stat1 表不存在 = 从未 ANALYZE */ }
+      if (!hasStats) this.db.exec("ANALYZE l1_records");
+    } catch (err) {
+      this.logger?.warn(
+        `${TAG} l1 fingerprint index/stat init failed (non-fatal, guard degrades to table scan): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
 
     // Indexes for common queries
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_type ON l1_records(type)");
@@ -556,10 +651,11 @@ export class VectorStore implements IMemoryStore {
         record_id, content, type, priority, scene_name, session_key, session_id,
         team_id, task_id, version, timestamp_str, timestamp_start, timestamp_end,
         created_time, updated_time, metadata_json,
-        user_id, agent_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        user_id, agent_id, content_fingerprint
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(record_id) DO UPDATE SET
         content=excluded.content,
+        content_fingerprint=excluded.content_fingerprint,
         type=excluded.type,
         priority=excluded.priority,
         scene_name=excluded.scene_name,
@@ -1259,6 +1355,10 @@ export class VectorStore implements IMemoryStore {
           JSON.stringify(record.metadata),
           (record as MemoryRecord & { userId?: string }).userId || DEFAULT_ISOLATION_ID,
           (record as MemoryRecord & { agentId?: string }).agentId || DEFAULT_ISOLATION_ID,
+          // 指纹在写入口内部派生（不读调用方字段）：v2-router 的 atomic update 等
+          // 旁路也会走这里，调用方传参漏填会让该行对守卫永久隐身。归一化为空
+          // （纯标点）写哨兵 ''（= 已处理），保持 NULL 严格等于「未回填」。
+          fingerprintOf(record.content) ?? "",
         );
 
         if (!skipVec) {
@@ -2999,32 +3099,52 @@ export class VectorStore implements IMemoryStore {
   }
 
   /**
-   * 写入前指纹兜底（D2 第三件套，v2 4db48bf 移植）：按内容前缀直查活库，供
-   * applyDecisions 在 store 决策写入前做同文存在性检查（组间竞态双入库的
-   * 确定性防线，v2 2026-10-13 拍板）。
+   * 写入前指纹兜底（D2 第三件套，v2 4db48bf 移植；2026-10-23 修复）：按
+   * `content_fingerprint`（归一化文本的 sha1）**等值**直查，供 applyDecisions
+   * 在 store 决策写入前做同文存在性检查（组间竞态双入库的确定性防线）。
    *
-   * 前缀是**归一化**文本的前 N 字符（调用方传入）；对原始 content 做前缀匹配
-   * （原始内容通常以同类字符开头，标点差异在中段，不影响前缀命中），再由调用方
-   * 做完整归一化确认。LIKE 通配符（% _ \）在此转义。全表扫描 ~2ms（N≈1800），
-   * 写入路径每条一次，可接受。任何错误返回空数组（不阻塞写入）。
+   * 修复前实现把「归一化前缀」交给原始 content 的 LIKE：原始内容前 16 字内
+   * 只要有空格/标点就永远失配（活库实测 88.4% 的行如此），且 `LIMIT 5` 无
+   * ORDER BY 会截断同前缀桶里的真双胞胎（最大桶 56 行）。指纹列等值查询走
+   * `idx_l1_content_fp`（实测 0.0095ms，旧 LIKE 全表扫描 2.9ms）。
    *
-   * 注：v2 实现查 content_original 列；v3 的 l1_records 无该列（v2 进程跑 v3 库
-   * 时报 "no such column: content_original" 即此），故查 content。
+   * filter 与 batchDedup 的隔离边界一致（team/user/agent/task，缺省=不限制），
+   * 避免修好守卫后把「跨租户同文」从永不触发变成常态误杀。
+   * 任何错误返回空数组（不阻塞写入）。
    */
-  findByContentPrefix(prefix: string, limit = 5): Array<{ record_id: string; content: string; type: string; priority: number }> {
-    if (this.degraded || !prefix) return [];
+  findByContentFingerprint(
+    fingerprint: string,
+    limit = 5,
+    filter?: { teamId?: string; userId?: string; agentId?: string; taskId?: string },
+  ): Array<{ record_id: string; content: string; type: string; priority: number }> {
+    if (this.degraded || !fingerprint) return [];
     try {
-      const escaped = prefix.replace(/([%_\\])/g, "\\$1");
+      const where: string[] = ["content_fingerprint = ?"];
+      const args: SQLInputValue[] = [fingerprint];
+      // '' 视为等值收窄（与 isolation.ts buildIsolationWhere / rowMatchesIsolation
+      // 同口径）：调用方传 taskId:'' 时守卫不得比 batchDedup 更宽（双轴审查 P3）。
+      for (const [col, val] of [
+        ["team_id", filter?.teamId],
+        ["user_id", filter?.userId],
+        ["agent_id", filter?.agentId],
+        ["task_id", filter?.taskId],
+      ] as const) {
+        if (val !== undefined && val !== null) {
+          where.push(`${col} = ?`);
+          args.push(val);
+        }
+      }
+      args.push(limit);
       const rows = this.db
         .prepare(
           `SELECT record_id, content, type, priority
-           FROM l1_records WHERE content LIKE ? ESCAPE '\\' LIMIT ?`,
+           FROM l1_records WHERE ${where.join(" AND ")} LIMIT ?`,
         )
-        .all(`${escaped}%`, limit) as Array<{ record_id: string; content: string; type: string; priority: number }>;
+        .all(...args) as Array<{ record_id: string; content: string; type: string; priority: number }>;
       return rows;
     } catch (err) {
       this.logger?.warn(
-        `${TAG} [L1-content-prefix] FAILED (non-fatal, returning empty): ${err instanceof Error ? err.message : String(err)}`,
+        `${TAG} [L1-content-fingerprint] FAILED (non-fatal, returning empty): ${err instanceof Error ? err.message : String(err)}`,
       );
       return [];
     }

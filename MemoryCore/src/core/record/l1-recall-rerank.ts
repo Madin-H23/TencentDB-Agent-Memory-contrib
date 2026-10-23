@@ -15,24 +15,16 @@
  * 不引入 embedding 供应商、不做向量 RRF（无 embedding 配置下为空操作，一审裁定）。
  */
 
-import { createHash } from "node:crypto";
+import { normalizeForFingerprint } from "../../utils/fingerprint.js";
+
+// 2026-10-23：实现外移到 utils/fingerprint.ts（store 写路径也要派生指纹，
+// 避免 store → record 运行时依赖）；此处保留同名导出，既有调用方零改动。
+export { normalizeForFingerprint, fingerprintOf } from "../../utils/fingerprint.js";
 
 /** D2 召回轻修开关：none=旧行为（召回序 slice topK）；lexical=超额召回+词汇重排。 */
 export type DedupRecallRerank = "none" | "lexical";
 
 const NGRAM = 4;
-
-/** 归一化：去空白与中英文标点。与 scripts/l1_pairs.py 的 normalize() 同口径。 */
-export function normalizeForFingerprint(content: string): string {
-  return String(content ?? "").replace(/[\s，。；：、！？!?:;,.'"（）()\-—_/·]+/g, "");
-}
-
-/** 内容指纹：归一化后 sha1 hex；归一化为空（空/纯标点）→ null（不参与直查）。 */
-export function fingerprintOf(content: string): string | null {
-  const norm = normalizeForFingerprint(content);
-  if (!norm) return null;
-  return createHash("sha1").update(norm, "utf8").digest("hex");
-}
 
 function ngrams(t: string): Set<string> {
   return t.length >= NGRAM

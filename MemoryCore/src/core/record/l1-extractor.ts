@@ -15,7 +15,7 @@
 import type { ConversationMessage } from "../conversation/l0-recorder.js";
 import { formatExtractionPrompt, getExtractMemoriesSystemPrompt, type MemoryPromptMode } from "../prompts/l1-extraction.js";
 import { batchDedup } from "./l1-dedup.js";
-import { normalizeForFingerprint, type DedupRecallRerank } from "./l1-recall-rerank.js";
+import { normalizeForFingerprint, fingerprintOf, type DedupRecallRerank } from "./l1-recall-rerank.js";
 import { writeMemory, generateMemoryId } from "./l1-writer.js";
 import type { ExtractedMemory, MemoryRecord, MemoryType, DedupDecision } from "./l1-writer.js";
 import { CleanContextRunner } from "../../utils/clean-context-runner.js";
@@ -45,6 +45,16 @@ import {
 } from "../memory-generation-log/types.js";
 
 const TAG = "[memory-tdai][l1-extractor]";
+
+/**
+ * 进程内 in-flight 指纹（2026-10-23 双轴审查 P1-3）：写入前守卫的 check-then-write
+ * 窗口实际覆盖「两次文件 append + 一次 embedding 网络调用」（秒级，组间并行池=3），
+ * 仅靠 DB 等值查询挡不住两个并发组同时通过检查（活库 10-14 的 24ms 同文对即此形态）。
+ * 登记必须发生在 await 之前：检查通过即入集、写完（含失败）在 finally 释放，
+ * 并发组在各自 await 前就能互相看见。进程崩溃/重启即清空；跨进程（v2 回滚仓）
+ * 竞态仍由月度审计兜底。
+ */
+const inFlightFingerprints = new Set<string>();
 
 // ============================
 // Types
@@ -883,52 +893,73 @@ async function applyDecisions(params: {
 
     // 写入前指纹兜底（D2 第三件套，v2 4db48bf 移植）：组间有界并行下，A 组的新
     // 记录写入前 B 组的 batchDedup 可能已跑完（B 的候选里没有 A 的产出——同批
-    // 互斥+写入时序），B 判 store 直接写 → 同事实双入库。check-then-write 非
-    // 原子，但把双入库窗口从整个判定周期缩到两次写之间，剩余竞态由月度审计兜底。
+    // 互斥+写入时序），B 判 store 直接写 → 同事实双入库。
+    // 2026-10-23 修复：①改查 content_fingerprint 等值索引（旧实现把归一化前缀交给
+    // 原始 content 的 LIKE，88% 的内容失配、守卫长期空转）；②filter 与 batchDedup
+    // 的隔离边界一致，避免跨租户同文被误杀；③进程内 in-flight 登记（见
+    // inFlightFingerprints 注释）关闭并发组的 check-then-write 窗口。
     // store 无此方法的实现自动跳过（行为不变）。
-    if (
-      dedupRecallRerank === "lexical" &&
-      decision.action === "store" &&
-      typeof vectorStore?.findByContentPrefix === "function"
-    ) {
-      const norm = normalizeForFingerprint(memoryWithId.content);
-      if (norm) {
-        const hits = await vectorStore.findByContentPrefix(norm.slice(0, 16), 5);
-        const twin = hits.find((h) => normalizeForFingerprint(h.content) === norm);
-        if (twin) {
-          logger?.warn?.(
-            `${TAG} l1-dedup-fingerprint-skip record=${memoryWithId.record_id} twin=${twin.record_id} — 写入前指纹命中，转 skip（组间竞态双入库兜底）`,
-          );
-          continue;
+    let inFlight: string | null = null;
+    try {
+      if (
+        dedupRecallRerank === "lexical" &&
+        decision.action === "store" &&
+        typeof vectorStore?.findByContentFingerprint === "function"
+      ) {
+        const norm = normalizeForFingerprint(memoryWithId.content);
+        const fp = norm ? fingerprintOf(memoryWithId.content) : null;
+        if (fp) {
+          if (inFlightFingerprints.has(fp)) {
+            logger?.warn?.(
+              `${TAG} l1-dedup-fingerprint-skip record=${memoryWithId.record_id} twin=in-flight len=${norm.length} — 写入前指纹命中（并发组在途），转 skip`,
+            );
+            continue;
+          }
+          inFlightFingerprints.add(fp);
+          inFlight = fp;
+          const filter =
+            teamId || userId || agentId || taskId
+              ? { teamId, userId, agentId, taskId }
+              : undefined;
+          const hits = await vectorStore.findByContentFingerprint(fp, 5, filter);
+          const twin = hits.find((h) => fingerprintOf(h.content) === fp);
+          if (twin) {
+            logger?.warn?.(
+              `${TAG} l1-dedup-fingerprint-skip record=${memoryWithId.record_id} twin=${twin.record_id} len=${norm.length} — 写入前指纹命中，转 skip（组间竞态双入库兜底）`,
+            );
+            continue;
+          }
         }
       }
-    }
 
-    try {
-      const record = await writeMemory({
-        memory: memoryWithId,
-        decision,
-        baseDir,
-        sessionKey,
-        sessionId,
-        taskId,
-        teamId,
-        userId,
-        agentId,
-        logger,
-        vectorStore,
-        embeddingService,
-        storage,
-        userIdentityNames,
-      });
+      try {
+        const record = await writeMemory({
+          memory: memoryWithId,
+          decision,
+          baseDir,
+          sessionKey,
+          sessionId,
+          taskId,
+          teamId,
+          userId,
+          agentId,
+          logger,
+          vectorStore,
+          embeddingService,
+          storage,
+          userIdentityNames,
+        });
 
-      if (record) {
-        storedRecords.push(record);
+        if (record) {
+          storedRecords.push(record);
+        }
+      } catch (err) {
+        logger?.warn?.(
+          `${TAG} Write failed for memory "${memoryWithId.content.slice(0, 50)}...": ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
-    } catch (err) {
-      logger?.warn?.(
-        `${TAG} Write failed for memory "${memoryWithId.content.slice(0, 50)}...": ${err instanceof Error ? err.message : String(err)}`,
-      );
+    } finally {
+      if (inFlight) inFlightFingerprints.delete(inFlight);
     }
   }
 

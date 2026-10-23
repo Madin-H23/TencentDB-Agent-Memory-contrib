@@ -699,13 +699,21 @@ export interface IMemoryStore extends MemoryPromptStore, MemoryGenerationRefStor
   isFtsAvailable(): boolean;
 
   /**
-   * 写入前指纹兜底（D2 第三件套，v2 4db48bf 移植）：按归一化内容前缀直查活库，
+   * 写入前指纹兜底（D2 第三件套，v2 4db48bf 移植；2026-10-23 修复）：
+   * 按「归一化内容的 sha1 指纹」等值直查（content_fingerprint 列 + 索引），
    * 供 applyDecisions 在 store 决策写入前做同文存在性检查（组间竞态双入库的
-   * 确定性防线）。前缀是归一化文本的前 N 字符（调用方传入）；实现方负责 LIKE
-   * 转义，返回最小字段集（指纹确认只需 record_id/content）。无此方法的 store
-   * 跳过指纹检查（行为不变）。
+   * 确定性防线）。**旧实现把归一化前缀交给原始 content 的 LIKE——88% 的内容
+   * （前 16 字含标点/空白）结构性失配、且 LIMIT 5 无 ORDER BY 会截断真双胞胎，
+   * 实测守卫命中长期为 0（2026-10-23 观测报告 §4.1）。**
+   * filter 与 batchDedup 的隔离边界一致（team/user/agent/task，缺省=不限制）；
+   * 返回最小字段集（指纹复核只需 record_id/content）。
+   * 无此方法的 store（mongodb/tcvdb）跳过指纹检查（行为不变）。
    */
-  findByContentPrefix?(prefix: string, limit?: number): MaybePromise<Array<{ record_id: string; content: string; type: string; priority: number }>>;
+  findByContentFingerprint?(
+    fingerprint: string,
+    limit?: number,
+    filter?: { teamId?: string; userId?: string; agentId?: string; taskId?: string },
+  ): MaybePromise<Array<{ record_id: string; content: string; type: string; priority: number }>>;
 
   // ── v2 API: Paginated queries (optional — added for Gateway v2) ──
 

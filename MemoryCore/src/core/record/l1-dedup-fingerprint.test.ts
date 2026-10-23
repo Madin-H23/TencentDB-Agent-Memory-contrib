@@ -40,13 +40,15 @@ const TWIN_ROW = {
   priority: 80,
 };
 
-/** 竞态 mock：FTS 候选空（双胞胎还没进索引/被同批过滤），但内容直查能命中。 */
+/** 竞态 mock：FTS 候选空（双胞胎还没进索引/被同批过滤），但指纹直查能命中。 */
 function makeStore(withTwin: boolean) {
   return {
     countL1: async () => 5,
     isFtsAvailable: () => true,
     searchL1Fts: async () => [],
-    findByContentPrefix: async () => (withTwin ? [TWIN_ROW] : []),
+    // 2026-10-23：守卫改查指纹等值（原 findByContentPrefix 前缀 LIKE 长期空转）。
+    // 本 mock 只验证接线；真实 SQL/列/索引契约由 l1-fingerprint-guard.test.ts 覆盖。
+    findByContentFingerprint: async () => (withTwin ? [TWIN_ROW] : []),
   } as unknown as IMemoryStore;
 }
 
@@ -92,7 +94,7 @@ describe("D2：写入前指纹存在性检查（组间竞态兜底，v3 移植�
     expect(r.storedCount).toBe(1);
   });
 
-  it("store 无 findByContentPrefix 方法 → 跳过检查照常写入（行为不变）", async () => {
+  it("store 无 findByContentFingerprint 方法 → 跳过检查照常写入（行为不变）", async () => {
     const llm = { run: async () => RESPONSE } as unknown as LLMRunner;
     const baseDir = mkdtempSync(join(tmpdir(), "d2-fp-v3-"));
     lines.length = 0;
