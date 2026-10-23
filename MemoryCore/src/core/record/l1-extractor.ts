@@ -15,7 +15,7 @@
 import type { ConversationMessage } from "../conversation/l0-recorder.js";
 import { formatExtractionPrompt, getExtractMemoriesSystemPrompt, type MemoryPromptMode } from "../prompts/l1-extraction.js";
 import { batchDedup } from "./l1-dedup.js";
-import { normalizeForFingerprint, fingerprintOf, type DedupRecallRerank } from "./l1-recall-rerank.js";
+import { normalizeForFingerprint, fingerprintOf, fingerprintOfNormalized, type DedupRecallRerank } from "./l1-recall-rerank.js";
 import { writeMemory, generateMemoryId } from "./l1-writer.js";
 import type { ExtractedMemory, MemoryRecord, MemoryType, DedupDecision } from "./l1-writer.js";
 import { CleanContextRunner } from "../../utils/clean-context-runner.js";
@@ -907,7 +907,9 @@ async function applyDecisions(params: {
         typeof vectorStore?.findByContentFingerprint === "function"
       ) {
         const norm = normalizeForFingerprint(memoryWithId.content);
-        const fp = norm ? fingerprintOf(memoryWithId.content) : null;
+        // 2026-10-24 去冗余：归一化只做一次——旧写法 fingerprintOf(content) 内部会再归一化；
+        // fingerprintOfNormalized(norm) 与旧路径恒等（utils/fingerprint.test.ts 等价性钉子）。
+        const fp = norm ? fingerprintOfNormalized(norm) : null;
         if (fp) {
           if (inFlightFingerprints.has(fp)) {
             logger?.warn?.(

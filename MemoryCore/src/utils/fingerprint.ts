@@ -15,9 +15,17 @@ export function normalizeForFingerprint(content: string): string {
   return String(content ?? "").replace(/[\s，。；：、！？!?:;,.'"（）()\-—_/·]+/g, "");
 }
 
-/** 内容指纹：归一化后 sha1 hex；归一化为空（空/纯标点）→ null（不参与直查）。 */
-export function fingerprintOf(content: string): string | null {
-  const norm = normalizeForFingerprint(content);
+/**
+ * 归一化文本 → sha1 hex 指纹；空（空/纯标点）→ null（不参与直查）。
+ * 供已持有归一化结果的调用方（如 l1-extractor 写入前守卫）免二次归一化；
+ * 与 fingerprintOf 恒等：fingerprintOfNormalized(normalizeForFingerprint(c)) === fingerprintOf(c)。
+ */
+export function fingerprintOfNormalized(norm: string): string | null {
   if (!norm) return null;
   return createHash("sha1").update(norm, "utf8").digest("hex");
+}
+
+/** 内容指纹：归一化后 sha1 hex；归一化为空（空/纯标点）→ null（不参与直查）。 */
+export function fingerprintOf(content: string): string | null {
+  return fingerprintOfNormalized(normalizeForFingerprint(content));
 }

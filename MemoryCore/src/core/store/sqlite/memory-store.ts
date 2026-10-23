@@ -410,6 +410,14 @@ export class VectorStore implements IMemoryStore {
   private static readonly L1_FP_ALGO = "v1";
 
   /**
+   * 行数护栏告警阈值（2026-10-24 补做；出处：2026-10-23 指纹守卫修复审查遗留
+   * 「>2 万行护栏告警未做（ANALYZE 已消掉主要退化路径，P3）」）。启动时
+   * l1_records 行数超过该值则打一行 WARN，提示指纹回填 + 索引/ANALYZE 的
+   * 启动成本随规模增长；仅告警，不改变行为（回填与 ANALYZE 照常执行）。
+   */
+  private static readonly L1_FP_BACKFILL_WARN_ROWS = 20_000;
+
+  /**
    * 存量回填 content_fingerprint（2026-10-23）：NULL 严格等于「未回填」，幂等；
    * 归一化为空的文本（纯标点/空白）写哨兵 ''（已处理、永不参与等值），否则
    * IS NULL 会永远选中它们、每次启动重复扫描+写事务（双轴审查 P2）。
@@ -420,6 +428,14 @@ export class VectorStore implements IMemoryStore {
   private backfillL1Fingerprints(): void {
     const startedAt = Date.now();
     try {
+      // 行数护栏告警（审查遗留 P3）：仅提示规模，不改变后续任何行为
+      const rowCount = (this.db.prepare("SELECT COUNT(*) AS c FROM l1_records").get() as { c: number }).c;
+      if (rowCount > VectorStore.L1_FP_BACKFILL_WARN_ROWS) {
+        this.logger?.warn(
+          `${TAG} l1_records rows=${rowCount} > threshold=${VectorStore.L1_FP_BACKFILL_WARN_ROWS}: fingerprint backfill + index/ANALYZE startup cost scales with row count — monitor growth or schedule offline maintenance`,
+        );
+      }
+
       // 口径版本检查：存量标记与当前实现不一致 → 旧指纹全部作废重算
       let storedAlgo: string | undefined;
       try {

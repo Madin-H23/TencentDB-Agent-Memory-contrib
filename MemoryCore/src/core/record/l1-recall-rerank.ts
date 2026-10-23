@@ -19,7 +19,7 @@ import { normalizeForFingerprint } from "../../utils/fingerprint.js";
 
 // 2026-10-23：实现外移到 utils/fingerprint.ts（store 写路径也要派生指纹，
 // 避免 store → record 运行时依赖）；此处保留同名导出，既有调用方零改动。
-export { normalizeForFingerprint, fingerprintOf } from "../../utils/fingerprint.js";
+export { normalizeForFingerprint, fingerprintOf, fingerprintOfNormalized } from "../../utils/fingerprint.js";
 
 /** D2 召回轻修开关：none=旧行为（召回序 slice topK）；lexical=超额召回+词汇重排。 */
 export type DedupRecallRerank = "none" | "lexical";
