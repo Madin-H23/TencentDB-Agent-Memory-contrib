@@ -22,6 +22,7 @@
 import type {
   HostAdapter,
   Logger,
+  LLMRunner,
   LLMRunnerFactory,
   RecallResult,
   CaptureResult,
@@ -115,6 +116,100 @@ export interface SkillAssetHooks {
   }) => Promise<void>;
   onSkillAccessed?: (skill: Skill) => void;
   onSkillArchived?: (params: { skill_id: string; team_id?: string }) => void;
+}
+
+// ============================
+// 票04 v2（2026-10-24）：layers.l2/l3.stream 假旋钮接真
+// ============================
+
+/**
+ * resolveRuntimeLlm 的产物形状（= StandaloneLLMConfig 全字段，层覆盖已解析）。
+ * 与 `TdaiCore.resolveRuntimeLlm` 的返回类型同构；抽别名避免在助手签名里重复展开。
+ */
+export interface L2l3RuntimeLlmConfig {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  maxTokens: number;
+  timeoutMs: number;
+  stream: boolean;
+  disableThinking?: boolean;
+  thinkingLevel?: ThinkingLevel;
+  maxConcurrency?: number;
+  callDeadlineMs?: number;
+  headers?: Record<string, string>;
+}
+
+/**
+ * 层流式 runner 的「键判定 + 构造参数」可测缝隙（模块级导出，deps 注入；
+ * `TdaiCore.l2l3StreamRunnerFor` 为其私有薄封装）。
+ *
+ * v1 教训（安全审查 3×P1，2026-10-24）——本助手逐条闭环：
+ *   - F1 enableTools 必须 true：SceneExtractor 文档明言 `Must be configured with
+ *     enableTools: true`（scene-extractor.ts:~92），PersonaGenerator 靠模型工具
+ *     直写 L3 文件（persona-generator.ts:213）；v1 的 enableTools:false 翻键即断
+ *     L2 场景块落盘与 L3 生成。（见 defaultL2l3StreamWrapFactory）
+ *   - F2 config 必须来自 resolveRuntimeLlm(layer) 解析链：v1 用原始 cfg.llm 构造，
+ *     绕过 proxy 形态的 baseUrl 重写与系统 key 换装（鉴权旁路），并发闸门分桶分裂。
+ *   - F3 层覆盖必须生效：v1 回落全局 llm.timeoutMs=120000（L3 依赖层解析 600s →
+ *     死信回归）、thinkingLevel=max 丢失（修复动机本身失效）。本助手经
+ *     resolveRuntimeLlm(layer) 逐字段重建后仅覆写 stream:true。
+ *   - b214c15 前科复核：ai@6.0.305 源码证实 DelayedPromise/consumeStream 已结构性
+ *     消除「流式异常 → 未处理拒绝 → 进程死」机制；enableTools:true 的流式风险
+ *     降级为可见死信（fail-fast 链路在）。
+ *
+ * 行为契约：键 `cfg.llm.layers?.[layer]?.stream !== true` 或 base 缺省 → 原样返回
+ * base（零行为变化）；键 true → 构造独立流式层 runner 并打一行 INFO（含层名、
+ * model、timeoutMs 生效值——INFO 兼作部署验证锚点）。
+ */
+export function resolveL2l3StreamRunner(
+  layer: "l2" | "l3",
+  base: LLMRunner | undefined,
+  deps: {
+    cfg: MemoryTdaiConfig;
+    resolveRuntimeLlm: (layer?: "l1" | "l2" | "l3") => L2l3RuntimeLlmConfig;
+    logger: Logger;
+    getInstanceId: () => string | undefined;
+    wrapFactory: (opts: {
+      config: L2l3RuntimeLlmConfig;
+      logger: Logger;
+      getInstanceId: () => string | undefined;
+    }) => LLMRunner;
+  },
+): LLMRunner | undefined {
+  // N2 守卫（v2 复审遗留，2026-10-24）：llm.enabled=false 表示用户显式关闭
+  // standalone LLM，cfg.llm 的其余字段不可信——对齐 shouldOverrideRunnerFactory
+  // 在 !enabled 时拒绝的既有判定；enabled 缺省视为 true（!== false 宽松口径）。
+  const on = deps.cfg.llm.enabled !== false && deps.cfg.llm.layers?.[layer]?.stream === true;
+  // 键缺省/false、或 base 缺省（host runner 形态）→ 原样返回，零行为变化。
+  if (!on || !base) return base;
+  // F2/F3：层解析链产物 + stream 强制 true（逐字段重建，漏字段即静默失效的
+  // 装配链教训仍适用——resolveRuntimeLlm 已保证透传面完整）。
+  const config: L2l3RuntimeLlmConfig = { ...deps.resolveRuntimeLlm(layer), stream: true };
+  deps.logger.info(
+    `${TAG} [${layer.toUpperCase()}] layers.${layer}.stream=on → 构造独立流式 runner: ` +
+      `model=${config.model}, timeoutMs=${config.timeoutMs}ms, enableTools=true, MetricTracking 包装`,
+  );
+  return deps.wrapFactory({ config, logger: deps.logger, getInstanceId: deps.getInstanceId });
+}
+
+/**
+ * 生产 wrapFactory（票04 v2）：StandaloneLLMRunnerFactory + MetricTrackingRunnerFactory
+ * 组装，createRunner 固定 enableTools:true。
+ *   - F1：enableTools:true —— SceneExtractor 文档明言 Must be configured with
+ *     enableTools: true（scene-extractor.ts:~92），PersonaGenerator 靠模型工具直写
+ *     L3 文件；false 即断 L2/L3 工具写盘链路。
+ *   - F4：经 MetricTrackingRunnerFactory 装饰 —— 否则 credit/token 指标恒 0。
+ * innerFactory 为测试缝（缺省生产组装）：enableTools 断言经注入 spy 实证。
+ */
+export function defaultL2l3StreamWrapFactory(opts: {
+  config: L2l3RuntimeLlmConfig;
+  logger: Logger;
+  getInstanceId: () => string | undefined;
+  innerFactory?: LLMRunnerFactory;
+}): LLMRunner {
+  const inner = opts.innerFactory ?? new StandaloneLLMRunnerFactory({ config: opts.config, logger: opts.logger });
+  return new MetricTrackingRunnerFactory(inner, opts.getInstanceId).createRunner({ enableTools: true });
 }
 
 // ============================
@@ -678,6 +773,24 @@ export class TdaiCore {
   }
 
   /**
+   * 票04 v2（2026-10-24）：layers.l2/l3.stream 装配点助手——resolveL2l3StreamRunner
+   * 的薄封装。应用于全部 4 个装配点（wirePipelineRunners 的 setL2Runner/setL3Runner
+   * 闭包、runL2WithStore、runL3WithStore）：键 `layers.<layer>.stream !== true` 或
+   * base 缺省时原样返回 base（零行为变化）；键 true 时为该层构造独立流式 runner
+   * （enableTools:true、经 MetricTracking 包装、层解析 config）。设计教训与契约见
+   * resolveL2l3StreamRunner doc。
+   */
+  private l2l3StreamRunnerFor(layer: "l2" | "l3", base: LLMRunner | undefined): LLMRunner | undefined {
+    return resolveL2l3StreamRunner(layer, base, {
+      cfg: this.cfg,
+      resolveRuntimeLlm: (l) => this.resolveRuntimeLlm(l),
+      logger: this.logger,
+      getInstanceId: () => this.instanceId,
+      wrapFactory: defaultL2l3StreamWrapFactory,
+    });
+  }
+
+  /**
    * Whether this call site must override the host-provided runner factory
    * with a `StandaloneLLMRunnerFactory` built from `cfg.llm`.
    *
@@ -786,7 +899,8 @@ export class TdaiCore {
         vectorStore: this.vectorStore,
         logger: this.logger,
         instanceId: this.instanceId,
-        llmRunner: l2l3LlmRunner,
+        // 票04 v2：layers.l2.stream=true 时换独立流式层 runner（否则原共享 runner 原样）。
+        llmRunner: this.l2l3StreamRunnerFor("l2", l2l3LlmRunner),
         storage: this.storage,
       });
       return l2Runner(sessionKey, cursor);
@@ -801,7 +915,8 @@ export class TdaiCore {
         vectorStore: this.vectorStore,
         logger: this.logger,
         instanceId: this.instanceId,
-        llmRunner: l2l3LlmRunner,
+        // 票04 v2：layers.l3.stream=true 时换独立流式层 runner（否则原共享 runner 原样）。
+        llmRunner: this.l2l3StreamRunnerFor("l3", l2l3LlmRunner),
         storage: this.storage,
       });
       await l3Runner();
@@ -1179,6 +1294,9 @@ export class TdaiCore {
     const llmRunner = useStandaloneRunner
       ? trackingFactory.createRunner({ enableTools: true })
       : undefined;
+    // 票04 v2：layers.l2.stream=true 时换独立流式层 runner，否则原样返回共享 runner。
+    // credit 读取随实际生效 runner（层 runner 亦为 MetricTrackingRunner）。
+    const effectiveL2Runner = this.l2l3StreamRunnerFor("l2", llmRunner);
 
     const runner = createL2Runner({
       pluginDataDir: this.dataDir,
@@ -1187,13 +1305,13 @@ export class TdaiCore {
       vectorStore: store,
       logger: this.logger,
       instanceId: this.instanceId,
-      llmRunner,
+      llmRunner: effectiveL2Runner,
       storage: storage ?? this.getStorage(),
       executionContext,
       checkpointLock,
     });
     const runnerResult = await runner(sessionKey, cursor);
-    const creditUsed: number = (llmRunner as any)?.accumulatedCredit ?? 0;
+    const creditUsed: number = (effectiveL2Runner as any)?.accumulatedCredit ?? 0;
     // L2 runner returns undefined when no new L1 records, or { skipped: true } on empty extraction
     const skipped = (runnerResult === undefined && creditUsed === 0) || (runnerResult?.skipped === true);
     return {
@@ -1235,6 +1353,9 @@ export class TdaiCore {
     const llmRunner = useStandaloneRunner
       ? trackingFactory.createRunner({ enableTools: true })
       : undefined;
+    // 票04 v2：layers.l3.stream=true 时换独立流式层 runner，否则原样返回共享 runner。
+    // credit 读取随实际生效 runner（层 runner 亦为 MetricTrackingRunner）。
+    const effectiveL3Runner = this.l2l3StreamRunnerFor("l3", llmRunner);
 
     const runner = createL3Runner({
       pluginDataDir: this.dataDir,
@@ -1243,12 +1364,12 @@ export class TdaiCore {
       vectorStore: store,
       logger: this.logger,
       instanceId: this.instanceId,
-      llmRunner,
+      llmRunner: effectiveL3Runner,
       storage: storage ?? this.getStorage(),
       checkpointLock,
     });
     await runner(executionContext);
-    const creditUsed: number = (llmRunner as any)?.accumulatedCredit ?? 0;
+    const creditUsed: number = (effectiveL3Runner as any)?.accumulatedCredit ?? 0;
     return { creditUsed };
   }
 
