@@ -18,9 +18,10 @@
  * 4. 四指标（abMetrics，公式沿用 scripts/golden-ab.ts；error 行按票面约束
  *    「不进指标分母」剔出分母，仅计入 errors 计数）+ 预注册三条件判定
  *    （preregConditions，逐字沿用 golden-ab.ts）+ degraded 标记（isDegraded）。
- * 5. 断点续跑（resumeKey / resumeSkip，跳过已判 (pid,mode)）。
+ * 5. 断点续跑（resumeKey / resumeSkip，票 05 起跳过键扩为
+ *    (pid,mode,topk,thinking,promptVariant)，两参旧形态保持向后兼容）。
  *
- * 全部纯函数、零 IO，可直测（golden-ab5-metrics.test.ts）。
+ * 全部纯函数、零 IO，可直测（golden-ab5-metrics.test.ts / golden-ab5-knobs.test.ts）。
  */
 
 import type { IMemoryStore } from "../store/types.js";
@@ -31,7 +32,7 @@ import { rerankCandidatesBySimilarity, type DedupRecallRerank } from "./l1-recal
 /** A/B 两臂（= 生产 dedupRecallRerank 开关值）。 */
 export type Arm = DedupRecallRerank;
 
-/** harness JSONL 结果行（一行一个 (pid,mode) 判定）。 */
+/** harness JSONL 结果行（一行一个 (pid,mode,topk,thinking,promptVariant) 判定）。 */
 export interface Ab5Row {
   pid: string;
   mode: string;
@@ -43,6 +44,40 @@ export interface Ab5Row {
   twin_source: string;
   twin_rank: number | null;
   error?: string;
+  // ── 票 05 消融旋钮（harness 写行恒携带；旧行缺字段由 rowKnobs 回落默认）──
+  /** 判定候选数（batchDedup conflictRecallTopK 实际生效值） */
+  topk?: number;
+  /** 注入的 thinking 档位；未注入 = "" */
+  thinking?: string;
+  /** prompt 变体名；生产 prompt = "base" */
+  promptVariant?: string;
+}
+
+/** 消融旋钮三元组（归一化形状：thinking 空串=不注入；promptVariant "base"=生产 prompt）。 */
+export interface Ab5Knobs {
+  topk: number;
+  thinking: string;
+  promptVariant: string;
+}
+
+/** 缺省旋钮 = 票 02 基线复刻（topk=5、无 thinking 注入、生产 prompt）。 */
+export const AB5_DEFAULT_KNOBS: Ab5Knobs = { topk: 5, thinking: "", promptVariant: "base" };
+
+/** 旋钮分组键（resumeKey 后缀与聚合 (arm×变体) 分组共用同一口径）。 */
+export function knobKey(knobs: Ab5Knobs): string {
+  return `topk=${knobs.topk}|thinking=${knobs.thinking || "none"}|variant=${knobs.promptVariant}`;
+}
+
+/**
+ * JSONL 行字段 → 归一化旋钮：旧行（票 02 时代，无新字段）逐字段回落默认——
+ * 因此默认旋钮（topk=5/不注入/base）的 --resume 能无缝续跑历史基线行。
+ */
+export function rowKnobs(row: Pick<Ab5Row, "topk" | "thinking" | "promptVariant">): Ab5Knobs {
+  return {
+    topk: typeof row.topk === "number" ? row.topk : AB5_DEFAULT_KNOBS.topk,
+    thinking: typeof row.thinking === "string" ? row.thinking : AB5_DEFAULT_KNOBS.thinking,
+    promptVariant: typeof row.promptVariant === "string" ? row.promptVariant : AB5_DEFAULT_KNOBS.promptVariant,
+  };
 }
 
 // ── finalPoolFor：两臂最终池选择（复刻生产 findCandidates）──────────────
@@ -361,9 +396,12 @@ export function isDegraded(rows: readonly Ab5Row[]): boolean {
 
 // ── 断点续跑 ────────────────────────────────────────────────────────────
 
-/** 已判记录键：pid|mode（JSONL 复原已判集与任务队列共用）。 */
-export function resumeKey(pid: string, mode: string): string {
-  return `${pid}|${mode}`;
+/**
+ * 已判记录键：pid|mode（票 02 形态，两参调用保持不变）；带旋钮时扩为
+ * pid|mode|topk=N|thinking=X|variant=Y（票 05：不同消融臂互不误跳）。
+ */
+export function resumeKey(pid: string, mode: string, knobs?: Ab5Knobs): string {
+  return knobs ? `${pid}|${mode}|${knobKey(knobs)}` : `${pid}|${mode}`;
 }
 
 export interface ResumeSkipResult<T> {
@@ -371,15 +409,15 @@ export interface ResumeSkipResult<T> {
   skipped: number;
 }
 
-/** 已判 (pid,mode) 集合 × 任务队列 → 待跑任务（跳过已判）。 */
-export function resumeSkip<T extends { pid: string; mode: string }>(
+/** 已判 (pid,mode,旋钮) 集合 × 任务队列 → 待跑任务（跳过已判；任务不带旋钮沿用旧键）。 */
+export function resumeSkip<T extends { pid: string; mode: string; knobs?: Ab5Knobs }>(
   judged: ReadonlySet<string>,
   tasks: readonly T[],
 ): ResumeSkipResult<T> {
   const pending: T[] = [];
   let skipped = 0;
   for (const t of tasks) {
-    if (judged.has(resumeKey(t.pid, t.mode))) skipped++;
+    if (judged.has(resumeKey(t.pid, t.mode, t.knobs))) skipped++;
     else pending.push(t);
   }
   return { pending, skipped };
