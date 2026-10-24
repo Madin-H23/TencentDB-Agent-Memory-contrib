@@ -20,6 +20,7 @@ import { writeMemory, generateMemoryId } from "./l1-writer.js";
 import type { ExtractedMemory, MemoryRecord, MemoryType, DedupDecision } from "./l1-writer.js";
 import { CleanContextRunner } from "../../utils/clean-context-runner.js";
 import { sanitizeJsonForParse, shouldExtractL1 } from "../../utils/sanitize.js";
+import { escapeStrayQuotesInStrings } from "../../utils/json-repair.js";
 import { sanitizeUserAttribution } from "./attribution.js";
 import type { IMemoryStore } from "../store/types.js";
 import type { EmbeddingService } from "../store/embedding.js";
@@ -794,48 +795,10 @@ function parseExtractionResult(raw: string, logger?: Logger): ParseExtractionOut
 }
 
 /**
- * B1（2026-10-16）：字符串感知的未转义引号修复。LLM 常把英文双引号裸写进
- * 字符串值（10-15 PARSE_FAIL 实证：content 里 `...SSH over 443，"Everything
- * up-to-date"需ls-remote...`，parse 在第一个裸引号后即崩，整轮作废）。逐字符
- * 扫描跟踪字符串上下文：字符串内的 `"` 若后续（跳过空白）不是结构字符
- * （, } ] :）或输入结束，则视为内容一部分，转义为 \"。
- * 安全底线：合法 JSON 串内不存在裸引号（引号必以 \" 出现或即闭合），故合法
- * 输入经本函数逐字节原样返回——幂等性有专测（b1-stray-quote-repair.test.ts）。
+ * B1（2026-10-16）裸引号修复核心已上移 `utils/json-repair.ts` 共享（票18：查重链
+ * 同款接入）——本文件保留抽取形状专属的 composite（priority 矫正 + 尾逗号清除），
+ * 逻辑逐字节不变，幂等性仍由 b1-stray-quote-repair.test.ts 全链钉。
  */
-function escapeStrayQuotesInStrings(json: string): string {
-  let out = "";
-  let inString = false;
-  for (let i = 0; i < json.length; i++) {
-    const ch = json[i]!;
-    if (!inString) {
-      out += ch;
-      if (ch === '"') inString = true;
-      continue;
-    }
-    if (ch === "\\") {
-      // 转义序列（\" \\ \n 等）：反斜杠+下一字符原样保留
-      out += ch + (json[i + 1] ?? "");
-      i++;
-      continue;
-    }
-    if (ch === '"') {
-      // 真闭合 vs 裸引号：看后续第一个非空白字符
-      let j = i + 1;
-      while (j < json.length && /\s/.test(json[j]!)) j++;
-      const next = json[j];
-      if (next === undefined || next === "," || next === "}" || next === "]" || next === ":") {
-        inString = false;
-        out += ch;
-      } else {
-        out += '\\"'; // 内容里的裸引号 → 转义，内容不丢
-      }
-      continue;
-    }
-    out += ch;
-  }
-  return out;
-}
-
 function repairExtractionJson(json: string): string {
   return escapeStrayQuotesInStrings(json)
     .replace(

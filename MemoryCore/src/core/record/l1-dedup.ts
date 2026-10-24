@@ -26,6 +26,7 @@ import type { LLMRunner, Logger, TraceContext } from "../types.js";
 import { buildTraceParams } from "../types.js";
 import { recallL1Candidates } from "../tools/l1-candidate-recall.js";
 import { rerankCandidatesBySimilarity, type DedupRecallRerank } from "./l1-recall-rerank.js";
+import { escapeStrayQuotesInStrings, extractJsonArraySpans, salvageJsonArrayTail } from "../../utils/json-repair.js";
 
 const TAG = "[memory-tdai][l1-dedup]";
 
@@ -153,8 +154,11 @@ export async function batchDedup(params: {
 
 /**
  * Phase 2: Run batch LLM judgment on candidate matches.
+ * 票18（2026-10-25）：解析失败不再直接整批免检——预算闸内重试一次，仍失败则按
+ * salvage 前缀（truncated_partial）→ 整批 fallback 的次序收口；每步打结构摘要锚点。
+ * 导出仅供测试（parse-hardening 套件直测预算闸与重试锚点）。
  */
-async function runLlmJudgment(
+export async function runLlmJudgment(
   matches: CandidateMatch[],
   memories: Array<ExtractedMemory & { record_id: string }>,
   config: unknown,
@@ -171,44 +175,88 @@ async function runLlmJudgment(
   const llmTimeoutMs = timeoutMs ?? 180_000;
   logger?.debug?.(`${TAG} Running batch conflict detection for ${memories.length} memories (promptMode=${promptMode})`);
 
-  try {
-    const userPrompt = formatBatchConflictPrompt(matches);
-    const systemPrompt = getConflictDetectionSystemPrompt(promptMode);
-    let result: string;
+  const userPrompt = formatBatchConflictPrompt(matches);
+  const systemPrompt = getConflictDetectionSystemPrompt(promptMode);
+  // langfuse trace 语义：见 l1-extractor.ts 里的说明。dedup 是 L1 的子步骤，
+  // 用独立 name 便于在 UI 上区分 "抽取阶段" vs "去重判定阶段"。
+  const traceParams = buildTraceParams("memory.l1-dedup", traceContext);
 
-    // langfuse trace 语义：见 l1-extractor.ts 里的说明。dedup 是 L1 的子步骤，
-    // 用独立 name 便于在 UI 上区分 "抽取阶段" vs "去重判定阶段"。
-    const traceParams = buildTraceParams("memory.l1-dedup", traceContext);
-
+  const callOnce = (taskId: string): Promise<string> => {
     if (llmRunner) {
       // Use the host-neutral LLMRunner interface
-      result = await llmRunner.run({
+      return llmRunner.run({
         prompt: userPrompt,
         systemPrompt,
-        taskId: "l1-conflict-detection",
-        timeoutMs: llmTimeoutMs,
-        ...traceParams,
-      });
-    } else {
-      // Fallback: create CleanContextRunner (OpenClaw path)
-      const runner = new CleanContextRunner({
-        config,
-        modelRef: model,
-        enableTools: false,
-        logger,
-      });
-
-      result = await runner.run({
-        prompt: userPrompt,
-        systemPrompt,
-        taskId: "l1-conflict-detection",
+        taskId,
         timeoutMs: llmTimeoutMs,
         ...traceParams,
       });
     }
+    // Fallback: create CleanContextRunner (OpenClaw path)
+    const runner = new CleanContextRunner({
+      config,
+      modelRef: model,
+      enableTools: false,
+      logger,
+    });
+    return runner.run({
+      prompt: userPrompt,
+      systemPrompt,
+      taskId,
+      timeoutMs: llmTimeoutMs,
+      ...traceParams,
+    });
+  };
 
-    const decisions = parseBatchResult(result, memories, logger);
-    return decisions;
+  try {
+    const t0 = Date.now();
+    const result = await callOnce("l1-conflict-detection");
+    let outcome = parseBatchResult(result, memories, logger, "first");
+
+    // 票18 B：解析失败（非调用失败——调用失败走下方 catch 的 fail-fast 语义）且首调用
+    // 耗时 ≤ timeoutMs/2 时重试一次。口径：callDeadline 每次 run 独享，重试不撞首调
+    // deadline；本闸的真实作用是相位延迟上界（有闸 ≤timeoutMs/2 + callDeadline）。
+    if (!outcome.ok) {
+      const elapsed = Date.now() - t0;
+      if (elapsed <= llmTimeoutMs / 2) {
+        logger?.warn?.(
+          `${TAG} l1-dedup-retry elapsed=${elapsed}ms — 判定解析失败（${outcome.reason}），预算内重试一次`,
+        );
+        let retryOutcome: DedupParseOutcome | null = null;
+        try {
+          const retryResult = await callOnce("l1-conflict-detection-retry");
+          retryOutcome = parseBatchResult(retryResult, memories, logger, "second");
+        } catch (retryErr) {
+          // 重试调用失败没有重试响应文本——回退首次响应的 salvage（审查 P1-3）
+          logger?.warn?.(
+            `${TAG} l1-dedup-retry call-failed: ${retryErr instanceof Error ? retryErr.message : String(retryErr)} — 回退首次响应`,
+          );
+        }
+        if (retryOutcome?.ok) return retryOutcome.decisions;
+      } else {
+        logger?.warn?.(
+          `${TAG} l1-dedup-retry skipped elapsed=${elapsed}ms — 超预算（>timeoutMs/2），不重试`,
+        );
+      }
+    }
+
+    // 收口次序：truncated_partial（前缀已判定、尾部按条免检）→ 整批 fallback。
+    // 免检锚点在此按最终事实打（审查 P1-1：重试可能整批救回 truncated_partial，
+    // 在 parse 内先打会出假 kill-switch 与双计）。
+    if (!outcome.ok) {
+      if (outcome.reason === "truncated_partial" && outcome.decisions) {
+        logger?.warn?.(
+          `${TAG} l1-dedup-fallback-silent reason=truncated_partial — ${outcome.tailCount ?? 0} memory(ies) stored without dedup judgment`,
+        );
+        return outcome.decisions;
+      }
+      return fallbackStoreAll(
+        memories,
+        outcome.reason as "no_json_array" | "not_array" | "parse_error",
+        logger,
+      );
+    }
+    return outcome.decisions;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (dedupFailFast) {
@@ -342,118 +390,207 @@ const VALID_TYPES: MemoryType[] = ["persona", "episodic", "instruction", "work_f
  * Parse the LLM's batch conflict detection JSON response.
  *
  * Expected format: [{record_id, action, target_ids, merged_content, merged_type, merged_priority, merged_timestamps}]
+ *
+ * 票18（2026-10-25）：产出语义改为 DedupParseOutcome（失败不再在函数内整批免检，
+ * 由 runLlmJudgment 按 salvage→retry→fallback 次序收口）。处理链：
+ * think-strip → 围栏剥离 → A1 多候选均衡扫描（utils/json-repair）→ sanitize →
+ * B1' 裸引号修复（失败时）→ JSON.parse → 全失败则 A2 截断 salvage → 仍无则
+ * no_json_array/parse_error。每个失败转折点打 `l1-dedup-parse-digest` 结构摘要
+ * （仅长度/布尔/计数，零内容字符——PII-free；对照：抽取侧 [l1-debug] PARSE_FAIL
+ * 的 rawFull 全文转储是既有 PII-in-logs 问题，本锚点刻意不复制该形态）。
  */
-function parseBatchResult(
+export type DedupParseOutcome =
+  | { ok: true; decisions: DedupDecision[] }
+  | {
+      ok: false;
+      reason: "no_json_array" | "not_array" | "parse_error" | "truncated_partial";
+      /** truncated_partial：前缀 salvage 的判定 + 尾部按条 store（尾部免检锚点已在函数内打） */
+      decisions?: DedupDecision[];
+      tailCount?: number;
+    };
+
+export function parseBatchResult(
   raw: string,
   memories: Array<ExtractedMemory & { record_id: string }>,
   logger?: Logger,
-): DedupDecision[] {
-  try {
-    // ── Strip inline reasoning wrappers (A₂-style thinking models) ───────
-    // Mirror of l1-extractor.ts@ccaa5dc3: A₂ models (minimax-m3 / GLM-4-
-    // thinking / qwq-32b / some vLLM DeepSeek-R1) inline reasoning as
-    // `<think>…</think>` inside `content`. Their think prose here frequently
-    // contains stray `[` (candidate id refs like `[rec_a1]`, JSON preview
-    // sketches, priority tags), which fatally derails the greedy
-    // `/\[[\s\S]*\]/` array-match below by anchoring it inside the think
-    // section. So we peel `<think>` blocks BEFORE the array-match fires.
-    //
-    // Same safeguards as l1-extractor:
-    //   • non-greedy `*?` + explicit `</think>` requirement — truncated
-    //     think tags (max_tokens cap) fall through as-is instead of eating
-    //     the rest of the response, and the fallbackStoreAll safety net in
-    //     the caller then quietly stores everything (dedup no-op).
-    //   • `g` flag — multi-segment thinking is fully stripped.
-    //   • Preserve untouched `raw` for the [l1-dedup-debug] log path so
-    //     ops can still see original wire content when they need to debug
-    //     a novel A₂ variant.
-    //
-    // A₁ models (minimax-m2.7 / deepseek-v4-pro / o1 / o3 / Claude thinking
-    // API) put reasoning in a separate reasoning_content field, so `content`
-    // never has <think> here — the replace is a no-op (backward-compatible,
-    // per [[default-no-config-backward-compat]]).
-    const stripped = raw.replace(/<think>[\s\S]*?<\/think>\s*/g, "");
+  /** A3 摘要的重试相位标记（first/second），由 runLlmJudgment 传入 */
+  attemptTag: "first" | "second" = "first",
+): DedupParseOutcome {
+  const stripped = raw.replace(/<think>[\s\S]*?<\/think>\s*/g, "");
 
-    // Strip markdown code block wrappers
-    let cleaned = stripped.trim();
-    if (cleaned.startsWith("```")) {
-      cleaned = cleaned.replace(/^```(?:json)?\s*\n?/, "").replace(/\n?```\s*$/, "");
+  // Strip markdown code block wrappers
+  let cleaned = stripped.trim();
+  if (cleaned.startsWith("```")) {
+    cleaned = cleaned.replace(/^```(?:json)?\s*\n?/, "").replace(/\n?```\s*$/, "");
+  }
+
+  const logDigest = (spanCount: number, errPos: number): void => {
+    let braceBalance = 0;
+    for (const ch of cleaned) {
+      if (ch === "{" || ch === "[") braceBalance++;
+      else if (ch === "}" || ch === "]") braceBalance--;
     }
+    const endsWith = cleaned.length > 0 ? cleaned[cleaned.length - 1]! : "";
+    logger?.warn?.(
+      `${TAG} l1-dedup-parse-digest rawLen=${raw.length} strippedLen=${cleaned.length} spanFound=${spanCount > 0} spanCount=${spanCount} braceBalance=${braceBalance} endsWith=${JSON.stringify(endsWith)} errPos=${errPos} retry=${attemptTag} — 无正文`,
+    );
+  };
 
-    // Extract JSON array
-    const arrayMatch = cleaned.match(/\[[\s\S]*\]/);
-    if (!arrayMatch) {
-      logger?.warn?.(`${TAG} No JSON array found in conflict detection response`);
-      return fallbackStoreAll(memories, "no_json_array", logger);
-    }
+  const errPosOf = (msg: string): number => {
+    const m = msg.match(/position (\d+)/);
+    return m ? Number(m[1]) : -1;
+  };
 
-    // Sanitize control characters inside JSON string literals that LLM may produce
-    const sanitized = sanitizeJsonForParse(arrayMatch[0]);
-    const parsed = JSON.parse(sanitized) as unknown[];
-
-    if (!Array.isArray(parsed)) {
-      logger?.warn?.(`${TAG} Conflict detection response is not an array`);
-      return fallbackStoreAll(memories, "not_array", logger);
-    }
-
-    // Build decisions from LLM output
-    const decisions: DedupDecision[] = [];
-    const validActions = ["store", "update", "merge", "skip"];
-
-    for (const item of parsed) {
-      if (!item || typeof item !== "object") continue;
-      const d = item as Record<string, unknown>;
-
-      const recordId = String(d.record_id ?? "");
-      // Skip entries with empty/missing record_id — they are LLM hallucinations
-      if (!recordId) {
-        logger?.debug?.(`${TAG} Skipping decision with empty record_id`);
+  // A1：多候选均衡扫描——行文括号/多预览/字符串内括号不再带偏；截断 think 含
+  // 真数组时多候选举到可解析者（审查 P1-1：单候选语义取不到，已改多候选）。
+  const spans = extractJsonArraySpans(cleaned, 8);
+  const allowed = new Set(memories.map((m) => m.record_id));
+  let lastErrPos = -1;
+  for (const span of spans) {
+    const candidate = cleaned.slice(span.start, span.end + 1);
+    const sanitized = sanitizeJsonForParse(candidate);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(sanitized);
+    } catch (err) {
+      lastErrPos = errPosOf(err instanceof Error ? err.message : String(err));
+      // B1'：裸引号修复（与抽取链同源核心，utils/json-repair 共享）——合法 JSON 幂等原样
+      const repaired = escapeStrayQuotesInStrings(sanitized);
+      if (repaired === sanitized) continue;
+      try {
+        parsed = JSON.parse(repaired);
+        logger?.warn?.(
+          `${TAG} Repaired non-strict dedup response JSON: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      } catch (err2) {
+        lastErrPos = errPosOf(err2 instanceof Error ? err2.message : String(err2));
         continue;
       }
-      const action = String(d.action ?? "store");
+    }
+    // 接受判据（票18 实测补）：解析成功 ≠ 判定数组——截断响应的内层字段数组
+    // （如 target_ids 的 ["m_0"]）也合法可解析，必须要求至少一个对象携带批内
+    // record_id 才接受，否则继续下一候选。
+    const looksLikeDecisions =
+      Array.isArray(parsed) &&
+      parsed.some(
+        (it) =>
+          it &&
+          typeof it === "object" &&
+          typeof (it as Record<string, unknown>).record_id === "string" &&
+          allowed.has(String((it as Record<string, unknown>).record_id)),
+      );
+    if (!looksLikeDecisions) continue;
+    if (!Array.isArray(parsed)) continue; // 防御：looksLikeDecisions 已含数组判定
+    return { ok: true, decisions: buildDecisions(parsed, memories, logger) };
+  }
 
-      if (!validActions.includes(action)) {
-        logger?.warn?.(`${TAG} Invalid action "${action}" for record ${recordId}, defaulting to store`);
-      }
+  // A2：截断 salvage——覆盖两个失败分支（span 全失败 / no_json_array 即未闭合数组形态）；
+  // 输入=cleaned 全文（salvage 自带多候选 `[` 行走，行文噪声容错）。产出按批内
+  // record_id 白名单过滤（顺带封 LLM 幻觉条目，审查 P1-3）。
+  const salvaged = salvageJsonArrayTail(cleaned);
+  if (salvaged && salvaged.length > 0) {
+    // 注意：salvage 路径不走 buildDecisions 的 fill-missing——尾部缺失记忆必须留到
+    // 这里按条计免检（truncated_partial 的 tailCount 语义），否则尾部免检会被静默
+    // 藏进「defaulting to store」。
+    const salvagedDecisions = buildDecisions(salvaged, memories, logger, { fillMissing: false });
+    const decided = new Set(salvagedDecisions.map((d) => d.record_id));
+    const tail = memories.filter((m) => !decided.has(m.record_id));
+    // 免检锚点不在 parse 内打（审查 P1-1）：truncated_partial 可被 B 重试整批救回，
+    // 锚点须在 runLlmJudgment 收口处按最终事实打——否则「重试全成」会打假
+    // kill-switch、「双截断」会双计。本函数只返回 tailCount。
+    logDigest(spans.length, lastErrPos);
+    return {
+      ok: false,
+      reason: "truncated_partial",
+      decisions: [
+        ...salvagedDecisions,
+        ...tail.map((m) => ({
+          record_id: m.record_id,
+          action: "store" as const,
+          target_ids: [],
+        })),
+      ],
+      tailCount: tail.length,
+    };
+  }
 
+  logDigest(spans.length, lastErrPos);
+  return { ok: false, reason: spans.length === 0 ? "no_json_array" : "parse_error" };
+}
+
+/**
+ * 按解析出的数组构建决策（票18 抽出共享：正常路径与 salvage 路径同构）。
+ * 白名单过滤：record_id 不在批内的条目是 LLM 幻觉，直接跳过（审查 P1-3——原实现
+ * 不滤，salvage 路径会把行文噪声对象当决策带入）。
+ */
+function buildDecisions(
+  parsed: unknown[],
+  memories: Array<ExtractedMemory & { record_id: string }>,
+  logger?: Logger,
+  opts?: { fillMissing?: boolean },
+): DedupDecision[] {
+  const decisions: DedupDecision[] = [];
+  const validActions = ["store", "update", "merge", "skip"];
+  const allowed = new Set(memories.map((m) => m.record_id));
+
+  for (const item of parsed) {
+    if (!item || typeof item !== "object") continue;
+    const d = item as Record<string, unknown>;
+
+    const recordId = String(d.record_id ?? "");
+    // Skip entries with empty/missing record_id — they are LLM hallucinations
+    if (!recordId) {
+      logger?.debug?.(`${TAG} Skipping decision with empty record_id`);
+      continue;
+    }
+    if (!allowed.has(recordId)) {
+      // 票18：批外 id = 幻觉条目（正常路径本就查不到它们，salvage 路径则会误带入）
+      logger?.debug?.(`${TAG} Skipping decision for unknown record_id ${recordId}`);
+      continue;
+    }
+    const action = String(d.action ?? "store");
+
+    if (!validActions.includes(action)) {
+      logger?.warn?.(`${TAG} Invalid action "${action}" for record ${recordId}, defaulting to store`);
+    }
+
+    decisions.push({
+      record_id: recordId,
+      action: validActions.includes(action) ? (action as DedupDecision["action"]) : "store",
+      target_ids: Array.isArray(d.target_ids) ? d.target_ids.map(String) : [],
+      merged_content: typeof d.merged_content === "string" ? d.merged_content : undefined,
+      merged_type: VALID_TYPES.includes(d.merged_type as MemoryType) ? (d.merged_type as MemoryType) : undefined,
+      merged_priority: typeof d.merged_priority === "number" ? d.merged_priority : undefined,
+      merged_timestamps: Array.isArray(d.merged_timestamps) ? d.merged_timestamps.map(String) : undefined,
+    });
+  }
+
+  // Ensure all memories have a decision (fill missing with "store")
+  // （票18：salvage 路径关掉 fill-missing——尾部免检由 truncated_partial 分支按条计数）
+  if (opts?.fillMissing === false) return decisions;
+  const decidedIds = new Set(decisions.map((d) => d.record_id));
+  for (const mem of memories) {
+    if (!decidedIds.has(mem.record_id)) {
+      logger?.debug?.(`${TAG} No decision for record ${mem.record_id}, defaulting to store`);
       decisions.push({
-        record_id: recordId,
-        action: validActions.includes(action) ? (action as DedupDecision["action"]) : "store",
-        target_ids: Array.isArray(d.target_ids) ? d.target_ids.map(String) : [],
-        merged_content: typeof d.merged_content === "string" ? d.merged_content : undefined,
-        merged_type: VALID_TYPES.includes(d.merged_type as MemoryType) ? (d.merged_type as MemoryType) : undefined,
-        merged_priority: typeof d.merged_priority === "number" ? d.merged_priority : undefined,
-        merged_timestamps: Array.isArray(d.merged_timestamps) ? d.merged_timestamps.map(String) : undefined,
+        record_id: mem.record_id,
+        action: "store",
+        target_ids: [],
       });
     }
-
-    // Ensure all memories have a decision (fill missing with "store")
-    const decidedIds = new Set(decisions.map((d) => d.record_id));
-    for (const mem of memories) {
-      if (!decidedIds.has(mem.record_id)) {
-        logger?.debug?.(`${TAG} No decision for record ${mem.record_id}, defaulting to store`);
-        decisions.push({
-          record_id: mem.record_id,
-          action: "store",
-          target_ids: [],
-        });
-      }
-    }
-
-    return decisions;
-  } catch (err) {
-    logger?.warn?.(`${TAG} Failed to parse conflict detection result: ${err instanceof Error ? err.message : String(err)}`);
-    return fallbackStoreAll(memories, "parse_error", logger);
   }
+
+  return decisions;
 }
 
 /**
  * Fallback: store all memories when parsing fails.
  *
- * reason 三值对应 parseBatchResult 的三条路径。WARN 锚点（P0-Fix1 随迁，
- * v2 f0ad3cc 语义）：「全 store」这个动作必须有独立可 grep 的日志行——
- * parse 失败静默免检入库是 L1 重复的历史新增源，切回 think 类厂商时重复
- * 暴涨会被误记为其它原因。此锚点即 kill-switch：出现即该轮查重空转。
+ * reason 闭集对应 parseBatchResult 的终态失败路径（票18：truncated_partial 不走此
+ * 函数——其前缀判定+尾部按条免检在 parse 内完成并打独立锚点）。WARN 锚点（P0-Fix1
+ * 随迁，v2 f0ad3cc 语义）：「全 store」这个动作必须有独立可 grep 的日志行——parse
+ * 失败静默免检入库是 L1 重复的历史新增源，切回 think 类厂商时重复暴涨会被误记为
+ * 其它原因。此锚点即 kill-switch：出现即该轮查重对整批空转。
  */
 function fallbackStoreAll(
   memories: Array<ExtractedMemory & { record_id: string }>,
