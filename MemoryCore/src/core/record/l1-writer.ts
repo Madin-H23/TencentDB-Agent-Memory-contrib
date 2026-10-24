@@ -304,8 +304,13 @@ export async function writeMemory(params: {
     // by memory-cleaner (which reconciles against VectorStore as source of truth).
     if (vectorStore) {
       try {
-        const deleteFilter = teamId || userId || agentId || sessionId
-          ? { teamId, userId, agentId, sessionId: sessionId || undefined, sessionKey }
+        // 票15（2026-10-24）：删除过滤收窄到租户三维（teamId/userId/agentId），
+        // 与 dedup 召回读边界对齐（召回刻意跨会话，P2-④ 并行安全）。此前过滤
+        // 含 sessionId/sessionKey，跨会话合并的目标删不掉（读跨会话/删不跨会话
+        // 不对称）→ 合并半生效：合并版入库、目标残留、重复堆积（票12 审计实证
+        // 48 目标 29 存活）。跨租户保护不变（rowMatchesIsolation 对租户字段照常拦截）。
+        const deleteFilter = teamId || userId || agentId
+          ? { teamId, userId, agentId }
           : undefined;
         if (deleteFilter) {
           await vectorStore.deleteL1Batch(decision.target_ids, deleteFilter);
