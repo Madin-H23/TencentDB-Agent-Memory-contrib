@@ -954,6 +954,15 @@ async function applyDecisions(params: {
 
         if (record) {
           storedRecords.push(record);
+          // 票11（2026-10-24）：误合观测锚点——判定层治理的线上观测面（用户拍板
+          // 「增加这个指标」）。D2 重复率只测漏合方向；merge/update 是静默误合面
+          // （金标难负例条件误合 60%，D2 指标看不到），此锚点使其可回溯——票12
+          // 污染审计的增量数据源。只打 id/动作/长度，不打正文（防 PII 进日志）。
+          if (decision.action === "merge" || decision.action === "update") {
+            logger?.info(
+              `${TAG} l1-dedup-merge-decision record=${decision.record_id} action=${decision.action} targets=${decision.target_ids.join(",") || "(none)"} contentLen=${memoryWithId.content.length} — 合并/更新决策落库（误合观测锚点）`,
+            );
+          }
         }
       } catch (err) {
         logger?.warn?.(
