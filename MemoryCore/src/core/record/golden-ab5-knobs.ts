@@ -6,7 +6,8 @@
  *
  * 1. `parseAb5Knobs`：--topk=N（默认 5，上限 50=数据集最大池深）/ --thinking=<level>
  *    （缺省不注入，合法值与生产 StandaloneLLMConfig 同源：default/disabled/
- *    enabled/low/high/max）/ --prompt-variant=<name>（缺省 base=生产 prompt）。
+ *    enabled/low/high/max）/ --prompt-variant=<name>（缺省 base=生产 prompt；
+ *    strict=追加收紧段，fewshot=票 09 追加收紧段+判定示例小节）。
  *    非法值显式抛错。
  * 2. prompt 变体常量（**harness 侧集中，不动生产 prompts/**）：变体 = 系统
  *    提示词收紧段；`withPromptVariant` / `variantWrappedRunner` 在 runner 边界
@@ -37,9 +38,31 @@ import { AB5_DEFAULT_KNOBS } from "./golden-ab5-metrics.js";
 export const AB5_STRICT_PROMPT_SUFFIX =
   "判定纪律：只有当新记忆与某候选表达同一事实/规则/偏好/事件（不同措辞或互补阶段）时才可 merge/update；同主题但事实、对象或时间点不同的独立记忆必须 store；无法确定时宁可 store，不要合并。";
 
+/**
+ * fewshot 变体的「判定示例：」小节（票 09，编译期常量；fewshot 追加段 =
+ * strict 收紧段 + 空行 + 本小节，组合在 PROMPT_VARIANTS.fewshot）。
+ *
+ * 设计依据（票 09 取证，2026-10-24 金标明细重算）：误合 95% 判成 merge 且全集中在
+ * neg 难负例带——模型做「词面相似度反应」而非「事实同一性」判定；skip 泛滥侧应合
+ * 被弃集中在 0.70-0.85/0.85+ 中高相似带——合并勇气不足。两示例逐一对应：
+ * 负例（同主题不同事实 → store）钉误合侧、正例（同一偏好演进 → merge）钉 skip 侧。
+ * 防「教模型背答案」：示例内容全部合成，领域避开金标实际内容域（装机目录/代理
+ * 网络/面板开发/记忆系统等不可用；正例原用「AI 汇报格式」域，票09 审查 P1 判与
+ * 金标内容域相交 g055/g120/g134/g065 而换为「出行方式」域，负例「编辑器外观」
+ * 经查干净保留）；合成性由 golden-ab5-fewshot.test.ts 对金标 fixture 的零重叠
+ * 断言固化。字符约束：小节 ≤600 字符（票面「总增量 ≤600」）。
+ */
+export const AB5_FEWSHOT_EXAMPLES =
+  "判定示例：\n" +
+  "例一：候选=「用户偏好深色主题」；新记忆=「用户换了新机械键盘」——同属编辑器外观话题。\n" +
+  "→ store：主题偏好与外设更换是两个独立事实，同主题不同事实不得合并。\n" +
+  "例二：候选=「要求以后出差优先坐高铁」；新记忆=「确认出差交通标准固定为高铁二等座」——同一出行偏好的演进。\n" +
+  "→ merge：同一偏好从粗到细的演进阶段，可合并更新。";
+
 /** 候选变体表（变体名 → 追加段）；base=生产 prompt 不追加，故不在表中。 */
 export const PROMPT_VARIANTS: Readonly<Record<string, string>> = {
   strict: AB5_STRICT_PROMPT_SUFFIX,
+  fewshot: `${AB5_STRICT_PROMPT_SUFFIX}\n\n${AB5_FEWSHOT_EXAMPLES}`,
 };
 
 /** 缺省变体名 = 生产 prompt（不追加任何段落）。 */
@@ -102,11 +125,12 @@ export function parseAb5Knobs(argv: readonly string[]): Ab5Knobs {
 // ── prompt 变体注入点（runner 边界，生产链路零改动）─────────────────────
 
 /**
- * 按变体改写单次 run 参数：strict 把收紧段追加到系统提示词末尾（原文在前、
- * 追加段在后，中间空行分隔）；base 原样返回（同一引用）。变体有追加段但
- * params.systemPrompt 缺失时显式抛错——不允许静默降级成 base（未来调用面
- * 变更若不再传 systemPrompt，strict 消融臂会失真成基线而不自知）。
- * 纯函数，不改写入参。
+ * 按变体改写单次 run 参数：strict 把收紧段追加到系统提示词末尾、fewshot 把
+ * 「收紧段+判定示例小节」组合追加（原文在前、追加段在后，中间空行分隔，追加
+ * 段整体即 PROMPT_VARIANTS[variant]，注入机制对全部变体同一）；base 原样返回
+ * （同一引用）。变体有追加段但 params.systemPrompt 缺失时显式抛错——不允许
+ * 静默降级成 base（未来调用面变更若不再传 systemPrompt，消融臂会失真成基线
+ * 而不自知）。纯函数，不改写入参。
  */
 export function withPromptVariant(params: LLMRunParams, variant: string): LLMRunParams {
   const suffix = PROMPT_VARIANTS[variant];
