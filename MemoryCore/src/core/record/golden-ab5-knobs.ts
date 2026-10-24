@@ -13,14 +13,22 @@
  *    追加，生产 batchDedup/prompts 零改动。
  * 3. `thinkingConfigPatch`：thinking → StandaloneLLMConfig.thinkingLevel 注入
  *    映射（对齐生产 l1=low 消融臂；不注入时返回空补丁，runner config 不变）。
+ * 4. 判定模型旋钮（票 07）：`parseAb5ModelKnobs`（--model / --provider 解析）、
+ *    `resolveAb5ModelKnobs`（raw + yaml 全局 model → 生效值）、provider 预设表
+ *    `AB5_PROVIDER_PRESETS`（opencode-go 条目对齐 tdai-panel vendorCatalog.ts）
+ *    与 `providerLlmPatch`（runner config 组装：opencode 换 baseUrl + key 只取
+ *    env + 注入 x-opencode-session 随机会话头；openai=yaml 原样）。
  *
  * 零生产影响：本模块只被 harness 导入；topk 经 batchDedup 既有 conflictRecallTopK
- * 参数透传（l1-dedup.ts），不新增生产代码路径。可直测（golden-ab5-knobs.test.ts）。
+ * 参数透传（l1-dedup.ts），provider/model 只改 harness 侧 runner config 组装，
+ * 不新增生产代码路径。可直测（golden-ab5-knobs.test.ts / golden-ab5-model.test.ts）。
  */
+
+import { randomUUID } from "node:crypto";
 
 import type { LLMRunner, LLMRunParams } from "../types.js";
 import { THINKING_LEVELS, isThinkingLevel, type ThinkingLevel } from "../../adapters/standalone/llm-runner.js";
-import type { Ab5Knobs } from "./golden-ab5-metrics.js";
+import { AB5_DEFAULT_PROVIDER, type Ab5Knobs, type Ab5ModelKnobs } from "./golden-ab5-metrics.js";
 import { AB5_DEFAULT_KNOBS } from "./golden-ab5-metrics.js";
 
 // ── prompt 变体常量（harness 侧；票 06 C 臂 strict）─────────────────────
@@ -132,4 +140,138 @@ export function thinkingConfigPatch(knobs: Ab5Knobs): { thinkingLevel?: Thinking
     throw new Error(`[ab5] thinking 旋钮非法: ${JSON.stringify(knobs.thinking)}（合法: ${THINKING_LEVELS.join("/")}）`);
   }
   return { thinkingLevel: knobs.thinking };
+}
+
+// ── 判定模型旋钮（票 07：--model / --provider）──────────────────────────
+
+/** 单 provider 预设：换 provider 时 runner config 的替换来源（openai=无预设，yaml 原样）。 */
+export interface Ab5ProviderPreset {
+  baseUrl: string;
+  /** key 值只从该 env 变量取（run-golden-ab5-v3.bat 注入；预设表零明文 key） */
+  apiKeyEnv: string;
+  /** provider 未被 --model 覆盖时的默认模型（yaml 模型名不跨厂商沿用） */
+  defaultModel: string;
+  /** 强制请求头名（值=每次运行随机会话串；opencode-go 缺该头上游 400 MissingSessionID，2026-10-16 探针实证） */
+  sessionHeader: string;
+}
+
+/**
+ * provider 预设表（openai 不在表内=缺省现状：直连 yaml llm 块）。opencode 条目
+ * 逐字段对齐 tdai-panel server/vendorCatalog.ts 的 opencode-go 内置条目
+ * （2026-10-24 快照：baseUrl/apiKeyEnv/defaultModel/session 头名）。
+ */
+export const AB5_PROVIDER_PRESETS: Readonly<Record<string, Ab5ProviderPreset>> = {
+  opencode: {
+    baseUrl: "https://opencode.ai/zen/go/v1",
+    apiKeyEnv: "TDAI_KEY_OPENCODE",
+    defaultModel: "deepseek-v4.1-flash",
+    sessionHeader: "x-opencode-session",
+  },
+};
+
+/** provider 名合法性：openai（缺省=现状）或预设表键。 */
+export function isAb5ProviderName(v: string): boolean {
+  return v === AB5_DEFAULT_PROVIDER || v in AB5_PROVIDER_PRESETS;
+}
+
+/**
+ * 模型旋钮解析（票 07）：--provider=<openai|opencode>（缺省 openai=yaml 原样）；
+ * --model=<id>（缺省空串=未覆盖，生效值经 resolveAb5ModelKnobs 结合 yaml 解析）。
+ * 非法 provider / 空 model 显式抛错——消融臂配置必须与实际执行严格一致。
+ */
+export function parseAb5ModelKnobs(argv: readonly string[]): { provider: string; model: string } {
+  let provider = AB5_DEFAULT_PROVIDER;
+  let model = "";
+
+  const providerRaw = argValueFrom(argv, "provider");
+  if (providerRaw !== undefined) {
+    if (!isAb5ProviderName(providerRaw)) {
+      throw new Error(
+        `[ab5] --provider 非法: ${JSON.stringify(providerRaw)}（合法: ${AB5_DEFAULT_PROVIDER},${Object.keys(AB5_PROVIDER_PRESETS).join(",")}）`,
+      );
+    }
+    provider = providerRaw;
+  }
+
+  const modelRaw = argValueFrom(argv, "model");
+  if (modelRaw !== undefined) {
+    if (modelRaw === "") {
+      throw new Error("[ab5] --model 非法: 空模型名（缺省=provider 对应默认：openai→yaml 全局值、opencode→预设默认模型）");
+    }
+    model = modelRaw;
+  }
+
+  return { provider, model };
+}
+
+/**
+ * raw 模型旋钮 + yaml 全局 model → 生效模型旋钮：openai 未覆盖 → yaml 值（现状）；
+ * opencode 未覆盖 → 预设默认模型。防御式再校验 provider（parse 已验，防手拼绕过）。
+ */
+export function resolveAb5ModelKnobs(raw: { provider: string; model: string }, yamlModel: string): Ab5ModelKnobs {
+  if (!isAb5ProviderName(raw.provider)) {
+    throw new Error(
+      `[ab5] provider 非法: ${JSON.stringify(raw.provider)}（合法: ${AB5_DEFAULT_PROVIDER},${Object.keys(AB5_PROVIDER_PRESETS).join(",")}）`,
+    );
+  }
+  const model =
+    raw.model || (raw.provider === AB5_DEFAULT_PROVIDER ? yamlModel : AB5_PROVIDER_PRESETS[raw.provider]!.defaultModel);
+  return { provider: raw.provider, model };
+}
+
+/** providerLlmPatch 的 llm 输入面（loadGatewayConfig 产出的 llm 块相关字段）。 */
+export interface Ab5LlmSource {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  headers?: Record<string, string>;
+}
+
+export interface ProviderLlmPatchOptions {
+  /** env 来源（缺省 process.env；测试注入合成值） */
+  env?: Record<string, string | undefined>;
+  /** session 头值（缺省每次调用随机 UUID；测试注入固定值保确定性） */
+  sessionId?: string;
+}
+
+/**
+ * 判定模型旋钮 → runner config 组装片段（票 07）：
+ * - openai：baseUrl/apiKey/headers 全套 yaml 原样（=现状直连），model=生效值。
+ * - opencode：baseUrl 换预设；apiKey **只从预设 env 变量取**（缺失/空串显式抛错
+ *   点名变量名、不盲跑；错误信息不含 key 值）；注入 session 头（值=随机会话串）。
+ * harness 把返回片段铺进 StandaloneLLMRunner config（maxTokens 等标量仍来自 yaml）。
+ * 纯函数（env/sessionId 可注入），可直测。
+ */
+export function providerLlmPatch(
+  llm: Ab5LlmSource,
+  mk: Ab5ModelKnobs,
+  opts: ProviderLlmPatchOptions = {},
+): { baseUrl: string; apiKey: string; model: string; headers?: Record<string, string> } {
+  if (mk.provider === AB5_DEFAULT_PROVIDER) {
+    return {
+      baseUrl: llm.baseUrl,
+      apiKey: llm.apiKey,
+      model: mk.model,
+      ...(llm.headers && Object.keys(llm.headers).length > 0 ? { headers: { ...llm.headers } } : {}),
+    };
+  }
+  const preset = AB5_PROVIDER_PRESETS[mk.provider];
+  if (!preset) {
+    throw new Error(
+      `[ab5] provider 非法: ${JSON.stringify(mk.provider)}（合法: ${AB5_DEFAULT_PROVIDER},${Object.keys(AB5_PROVIDER_PRESETS).join(",")}）`,
+    );
+  }
+  const env = opts.env ?? process.env;
+  const apiKey = env[preset.apiKeyEnv];
+  if (typeof apiKey !== "string" || apiKey === "") {
+    throw new Error(
+      `[ab5] --provider=${mk.provider} 需要 env ${preset.apiKeyEnv}（run-golden-ab5-v3.bat 自动注入；缺失即退出，不盲跑）`,
+    );
+  }
+  return {
+    baseUrl: preset.baseUrl,
+    apiKey,
+    model: mk.model,
+    headers: { [preset.sessionHeader]: opts.sessionId ?? randomUUID() },
+  };
 }

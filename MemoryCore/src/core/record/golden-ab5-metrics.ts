@@ -19,7 +19,11 @@
  *    「不进指标分母」剔出分母，仅计入 errors 计数）+ 预注册三条件判定
  *    （preregConditions，逐字沿用 golden-ab.ts）+ degraded 标记（isDegraded）。
  * 5. 断点续跑（resumeKey / resumeSkip，票 05 起跳过键扩为
- *    (pid,mode,topk,thinking,promptVariant)，两参旧形态保持向后兼容）。
+ *    (pid,mode,topk,thinking,promptVariant)，票 07 再扩 provider/model；两参
+ *    旧形态保持向后兼容）。
+ * 6. 判定模型旋钮键（票 07）：Ab5ModelKnobs（provider+已解析 model）与
+ *    modelKnobKey / rowModelKnobs（旧行缺字段回落默认=openai+yaml model）。
+ *    键格式与解析/预设组装在 golden-ab5-knobs.ts。
  *
  * 全部纯函数、零 IO，可直测（golden-ab5-metrics.test.ts / golden-ab5-knobs.test.ts）。
  */
@@ -51,6 +55,11 @@ export interface Ab5Row {
   thinking?: string;
   /** prompt 变体名；生产 prompt = "base" */
   promptVariant?: string;
+  // ── 票 07 判定模型旋钮（harness 写行恒携带；旧行缺字段由 rowModelKnobs 回落默认）──
+  /** 判定 provider 名（openai=现状直连 yaml llm 块；opencode=预设） */
+  provider?: string;
+  /** 实际生效判定模型 id（--model 覆盖值；缺省=provider 对应默认） */
+  model?: string;
 }
 
 /** 消融旋钮三元组（归一化形状：thinking 空串=不注入；promptVariant "base"=生产 prompt）。 */
@@ -77,6 +86,35 @@ export function rowKnobs(row: Pick<Ab5Row, "topk" | "thinking" | "promptVariant"
     topk: typeof row.topk === "number" ? row.topk : AB5_DEFAULT_KNOBS.topk,
     thinking: typeof row.thinking === "string" ? row.thinking : AB5_DEFAULT_KNOBS.thinking,
     promptVariant: typeof row.promptVariant === "string" ? row.promptVariant : AB5_DEFAULT_KNOBS.promptVariant,
+  };
+}
+
+// ── 判定模型旋钮键（票 07：--model / --provider）────────────────────────
+
+/** 判定模型旋钮二元组（票 07；归一化形状=已解析的实际生效值，model 恒非空）。 */
+export interface Ab5ModelKnobs {
+  provider: string;
+  model: string;
+}
+
+/** 缺省判定 provider = openai（直连 yaml llm 块，现状不变）。 */
+export const AB5_DEFAULT_PROVIDER = "openai";
+
+/** 模型旋钮分组键段（resumeKey 后缀与聚合 (arm×变体×模型) 分组共用同一口径）。 */
+export function modelKnobKey(mk: Ab5ModelKnobs): string {
+  return `provider=${mk.provider}|model=${mk.model}`;
+}
+
+/**
+ * JSONL 行字段 → 归一化模型旋钮：旧行（票 05/02 时代，无 provider/model 字段）
+ * 逐字段回落 defaults——harness 传 defaults={openai, yaml 全局 model}（旧行只可能
+ * 以 yaml 配置跑出，票 07 前无换模型能力），默认 --resume 能无缝续跑历史行；
+ * 换模型运行键与旧行键天然不同，不误吞。
+ */
+export function rowModelKnobs(row: Pick<Ab5Row, "provider" | "model">, defaults: Ab5ModelKnobs): Ab5ModelKnobs {
+  return {
+    provider: typeof row.provider === "string" ? row.provider : defaults.provider,
+    model: typeof row.model === "string" ? row.model : defaults.model,
   };
 }
 
@@ -394,14 +432,27 @@ export function isDegraded(rows: readonly Ab5Row[]): boolean {
   return rows.filter((r) => r.action === "error").length / rows.length > 0.1;
 }
 
+/**
+ * 本轮跑批退出码（票 07 双审 P1）：本轮 fresh 行含 error（探针/跑批失败——
+ * 鉴权失败等曾只产 error 行仍 exit 0）或全文件 degraded → 1，否则 0。
+ * 历史 error 行不经 freshRows 传入、天然不算（只看本轮 fresh；degraded 是
+ * 全文件口径，作兜底）。
+ */
+export function runExitCode(freshRows: readonly Ab5Row[], degraded: boolean): 0 | 1 {
+  if (degraded) return 1;
+  return freshRows.some((r) => r.action === "error") ? 1 : 0;
+}
+
 // ── 断点续跑 ────────────────────────────────────────────────────────────
 
 /**
  * 已判记录键：pid|mode（票 02 形态，两参调用保持不变）；带旋钮时扩为
- * pid|mode|topk=N|thinking=X|variant=Y（票 05：不同消融臂互不误跳）。
+ * pid|mode|topk=N|thinking=X|variant=Y（票 05：不同消融臂互不误跳）；带模型
+ * 旋钮时再追加 provider=P|model=M（票 07：不同判定模型/厂商臂互不误跳）。
  */
-export function resumeKey(pid: string, mode: string, knobs?: Ab5Knobs): string {
-  return knobs ? `${pid}|${mode}|${knobKey(knobs)}` : `${pid}|${mode}`;
+export function resumeKey(pid: string, mode: string, knobs?: Ab5Knobs, modelKnobs?: Ab5ModelKnobs): string {
+  const base = knobs ? `${pid}|${mode}|${knobKey(knobs)}` : `${pid}|${mode}`;
+  return modelKnobs ? `${base}|${modelKnobKey(modelKnobs)}` : base;
 }
 
 export interface ResumeSkipResult<T> {
@@ -409,15 +460,15 @@ export interface ResumeSkipResult<T> {
   skipped: number;
 }
 
-/** 已判 (pid,mode,旋钮) 集合 × 任务队列 → 待跑任务（跳过已判；任务不带旋钮沿用旧键）。 */
-export function resumeSkip<T extends { pid: string; mode: string; knobs?: Ab5Knobs }>(
+/** 已判 (pid,mode,旋钮,模型旋钮) 集合 × 任务队列 → 待跑任务（跳过已判；任务不带旋钮沿用旧键）。 */
+export function resumeSkip<T extends { pid: string; mode: string; knobs?: Ab5Knobs; modelKnobs?: Ab5ModelKnobs }>(
   judged: ReadonlySet<string>,
   tasks: readonly T[],
 ): ResumeSkipResult<T> {
   const pending: T[] = [];
   let skipped = 0;
   for (const t of tasks) {
-    if (judged.has(resumeKey(t.pid, t.mode, t.knobs))) skipped++;
+    if (judged.has(resumeKey(t.pid, t.mode, t.knobs, t.modelKnobs))) skipped++;
     else pending.push(t);
   }
   return { pending, skipped };

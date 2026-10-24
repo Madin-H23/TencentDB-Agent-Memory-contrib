@@ -16,7 +16,8 @@
  * 产出：
  *   - 逐判定追加 JSONL：<OUT_DIR>/d2-ab5-<UTC日期>.jsonl
  *     （一行一个 {pid,mode,golden,action,sim,band,twin_source,twin_rank,error,
- *      topk,thinking,promptVariant}，票 05 起行内嵌消融旋钮）
+ *      topk,thinking,promptVariant,provider,model}，票 05 起行内嵌消融旋钮、
+ *      票 07 起行内嵌判定模型旋钮）
  *   - 聚合 json：<OUT_DIR>/d2-ab5-result-<UTC日期>.json
  *     （四指标两臂 + 孪生生存率两臂 + M1 分解 + 动作分布 + 预注册三条件判定
  *     （口径逐字沿用 golden-ab.ts）+ 分层表 + degraded 标记；票 05 起另含
@@ -29,6 +30,14 @@
  *   --prompt-variant=<name> prompt 变体（缺省 base=生产 prompt；strict=系统
  *                         提示词追加收紧段，变体常量集中 harness 侧）
  *
+ * 判定模型旋钮（票 07，零生产影响，只改 harness 侧 runner config 组装）：
+ *   --model=<id>          覆盖 runner config 的 model（缺省=openai→yaml 全局值 /
+ *                         opencode→预设默认模型）。JSONL 行嵌 model 字段。
+ *   --provider=<openai|opencode> 缺省 openai=现状（yaml llm 块原样）；opencode=
+ *                         预设换 baseUrl + apiKey 只取 env TDAI_KEY_OPENCODE
+ *                         （缺失即退出）+ 注入 x-opencode-session 随机会话头。
+ *                         JSONL 行嵌 provider 字段。resumeKey/聚合分组键同扩。
+ *
  * 指标口径：四指标公式沿用 golden-ab.ts；error 行按票面约束不进指标分母
  * （error 率>10% 标 degraded）。M1 分解：golden=merge 判 store 的行按孪生是否
  * 入最终池拆成召回截断损失 vs 判定层失败。
@@ -36,8 +45,9 @@
  * 用法：
  *   run-golden-ab5-v3.bat [--limit=N] [--resume] [--dataset=<路径>]
  *                         [--topk=N] [--thinking=<level>] [--prompt-variant=<name>]
+ *                         [--model=<id>] [--provider=<openai|opencode>]
  *   node --import tsx scripts/golden-ab5.ts --selftest   # 确定性 stub，零网络回归
- *                                                        # （三旋钮各跑一组）
+ *                                                        # （三旋钮各跑一组 + 模型旋钮一组）
  */
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -54,21 +64,29 @@ import {
   isDegraded,
   knobKey,
   m1Decomposition,
+  modelKnobKey,
   preregConditions,
   resumeKey,
   resumeSkip,
   rowKnobs,
+  rowModelKnobs,
+  runExitCode,
   stratify,
   twinSurvival,
   AB5_DEFAULT_KNOBS,
+  AB5_DEFAULT_PROVIDER,
   type Ab5Context,
   type Ab5Knobs,
+  type Ab5ModelKnobs,
   type Ab5Row,
   type Arm,
 } from "../src/core/record/golden-ab5-metrics.js";
 import {
   AB5_STRICT_PROMPT_SUFFIX,
   parseAb5Knobs,
+  parseAb5ModelKnobs,
+  providerLlmPatch,
+  resolveAb5ModelKnobs,
   thinkingConfigPatch,
   variantWrappedRunner,
 } from "../src/core/record/golden-ab5-knobs.js";
@@ -133,6 +151,7 @@ async function judgeOne(
   runner: LLMRunner,
   goldenByPid: Map<string, GoldenPair>,
   knobs: Ab5Knobs,
+  modelKnobs: Ab5ModelKnobs,
 ): Promise<Ab5Row> {
   const golden = goldenByPid.get(pair.pid)!;
   // mock store 与单测共用构造器（countL1=池长、isFtsAvailable=true、searchL1Fts 按池序截 topK）
@@ -148,6 +167,9 @@ async function judgeOne(
     topk: knobs.topk,
     thinking: knobs.thinking,
     promptVariant: knobs.promptVariant,
+    // 票 07 判定模型旋钮：行内嵌实际生效 provider/model（旧行缺字段由 rowModelKnobs 回落默认）
+    provider: modelKnobs.provider,
+    model: modelKnobs.model,
   };
   try {
     const decisions = await batchDedup({
@@ -184,18 +206,19 @@ async function judgeOne(
 function interleaveTasks(
   pairs: Golden5CandPair[],
   knobs: Ab5Knobs,
-): Array<{ pid: string; pair: Golden5CandPair; mode: Arm; knobs: Ab5Knobs }> {
-  const tasks: Array<{ pid: string; pair: Golden5CandPair; mode: Arm; knobs: Ab5Knobs }> = [];
+  modelKnobs: Ab5ModelKnobs,
+): Array<{ pid: string; pair: Golden5CandPair; mode: Arm; knobs: Ab5Knobs; modelKnobs: Ab5ModelKnobs }> {
+  const tasks: Array<{ pid: string; pair: Golden5CandPair; mode: Arm; knobs: Ab5Knobs; modelKnobs: Ab5ModelKnobs }> = [];
   for (const p of pairs) {
-    tasks.push({ pid: p.pid, pair: p, mode: "none", knobs });
-    tasks.push({ pid: p.pid, pair: p, mode: "lexical", knobs });
+    tasks.push({ pid: p.pid, pair: p, mode: "none", knobs, modelKnobs });
+    tasks.push({ pid: p.pid, pair: p, mode: "lexical", knobs, modelKnobs });
   }
   return tasks;
 }
 
 /** 工作池消费任务，逐判定追加 JSONL；返回本轮新产出行。 */
 async function runTasks(
-  tasks: Array<{ pid: string; pair: Golden5CandPair; mode: Arm; knobs: Ab5Knobs }>,
+  tasks: Array<{ pid: string; pair: Golden5CandPair; mode: Arm; knobs: Ab5Knobs; modelKnobs: Ab5ModelKnobs }>,
   runner: LLMRunner,
   goldenByPid: Map<string, GoldenPair>,
   jsonlFile: string,
@@ -208,8 +231,8 @@ async function runTasks(
     while (true) {
       const i = next++;
       if (i >= tasks.length) return;
-      const { pair, mode, knobs } = tasks[i]!;
-      const row = await judgeOne(pair, mode, runner, goldenByPid, knobs);
+      const { pair, mode, knobs, modelKnobs } = tasks[i]!;
+      const row = await judgeOne(pair, mode, runner, goldenByPid, knobs, modelKnobs);
       rows.push(row);
       appendFileSync(jsonlFile, `${JSON.stringify(row)}\n`, "utf-8");
       done++;
@@ -228,43 +251,59 @@ interface Ab5ArmAgg {
   m1Decomposition: ReturnType<typeof m1Decomposition>;
 }
 
-/** 一个消融变体组合（topk×thinking×promptVariant）的双臂汇总（票 05 聚合分组单元）。 */
+/** 一个消融变体组合（topk×thinking×promptVariant×provider×model）的双臂汇总（票 05/07 聚合分组单元）。 */
 interface Ab5ComboAgg {
   knobs: Ab5Knobs;
+  modelKnobs: Ab5ModelKnobs;
   none: Ab5ArmAgg;
   lexical: Ab5ArmAgg;
   strata: { none: ReturnType<typeof stratify>; lexical: ReturnType<typeof stratify> };
   conditions: ReturnType<typeof preregConditions>;
 }
 
+/** 组合全键：消融旋钮段 + 判定模型旋钮段（resumeKey 后缀与分组共用口径，票 07 扩）。 */
+function comboKey(knobs: Ab5Knobs, modelKnobs: Ab5ModelKnobs): string {
+  return `${knobKey(knobs)}|${modelKnobKey(modelKnobs)}`;
+}
+
 /**
- * 按 (arm × 消融变体组合) 分组汇总：同日 JSONL 可能混多个旋钮组合（--resume
- * 跨臂追加），各组合用自己的 topk 复算孪生生存 / M1 分解 / 分层（topk 影响池
- * 截断口径，混算即失真）。runKnobs 只在行集为空时兜底播种（保 main 的
- * runCombo 恒可取，全 null 指标与旧行为同形状）；行集非空时分组完全来自行。
+ * 按 (arm × 消融变体组合 × 判定模型组合) 分组汇总：同日 JSONL 可能混多个旋钮
+ * 组合（--resume 跨臂/跨模型追加），各组合用自己的 topk 复算孪生生存 / M1
+ * 分解 / 分层（topk 影响池截断口径，混算即失真）；票 07 起不同 provider/model
+ * 的行（换判定模型消融臂）也各自分组，不与基线模型混算。runKnobs 只在行集为
+ * 空时兜底播种（保 main 的 runCombo 恒可取，全 null 指标与旧行为同形状）；
+ * 行集非空时分组完全来自行（旧行缺 model/provider 字段由 rowModelKnobs 回落
+ * defaults={openai, yaml model}）。
  */
-function aggregate(rows: Ab5Row[], ctx: Ab5Context, runKnobs: Ab5Knobs): { combos: Ab5ComboAgg[]; degraded: boolean } {
-  const groups = new Map<string, { knobs: Ab5Knobs; rows: Ab5Row[] }>();
-  const seed = (knobs: Ab5Knobs) => {
-    const key = knobKey(knobs);
+function aggregate(
+  rows: Ab5Row[],
+  ctx: Ab5Context,
+  runKnobs: Ab5Knobs,
+  runModelKnobs: Ab5ModelKnobs,
+  yamlDefaults: Ab5ModelKnobs,
+): { combos: Ab5ComboAgg[]; degraded: boolean } {
+  const groups = new Map<string, { knobs: Ab5Knobs; modelKnobs: Ab5ModelKnobs; rows: Ab5Row[] }>();
+  const seed = (knobs: Ab5Knobs, modelKnobs: Ab5ModelKnobs) => {
+    const key = comboKey(knobs, modelKnobs);
     const g = groups.get(key);
     if (g) return g;
-    const made = { knobs, rows: [] as Ab5Row[] };
+    const made = { knobs, modelKnobs, rows: [] as Ab5Row[] };
     groups.set(key, made);
     return made;
   };
-  if (rows.length === 0) seed(runKnobs);
-  for (const r of rows) seed(rowKnobs(r)).rows.push(r);
+  if (rows.length === 0) seed(runKnobs, runModelKnobs);
+  for (const r of rows) seed(rowKnobs(r), rowModelKnobs(r, yamlDefaults)).rows.push(r);
 
   const combos = [...groups.values()]
-    .sort((a, b) => knobKey(a.knobs).localeCompare(knobKey(b.knobs)))
-    .map(({ knobs, rows: gRows }): Ab5ComboAgg => {
+    .sort((a, b) => comboKey(a.knobs, a.modelKnobs).localeCompare(comboKey(b.knobs, b.modelKnobs)))
+    .map(({ knobs, modelKnobs, rows: gRows }): Ab5ComboAgg => {
       const noneRows = gRows.filter((r) => r.mode === "none");
       const lexRows = gRows.filter((r) => r.mode === "lexical");
       const none = abMetrics(noneRows);
       const lexical = abMetrics(lexRows);
       return {
         knobs,
+        modelKnobs,
         none: { metrics: none, twinSurvival: twinSurvival(noneRows, ctx, knobs.topk), m1Decomposition: m1Decomposition(noneRows, ctx, knobs.topk) },
         lexical: { metrics: lexical, twinSurvival: twinSurvival(lexRows, ctx, knobs.topk), m1Decomposition: m1Decomposition(lexRows, ctx, knobs.topk) },
         strata: { none: stratify(noneRows, ctx, knobs.topk), lexical: stratify(lexRows, ctx, knobs.topk) },
@@ -276,7 +315,9 @@ function aggregate(rows: Ab5Row[], ctx: Ab5Context, runKnobs: Ab5Knobs): { combo
 
 function printAggregate(agg: ReturnType<typeof aggregate>): void {
   for (const combo of agg.combos) {
-    console.log(`\n== D2 A/B 5 候选结果（预注册指标口径）[topk=${combo.knobs.topk}|thinking=${combo.knobs.thinking || "none"}|variant=${combo.knobs.promptVariant}] ==`);
+    console.log(
+      `\n== D2 A/B 5 候选结果（预注册指标口径）[topk=${combo.knobs.topk}|thinking=${combo.knobs.thinking || "none"}|variant=${combo.knobs.promptVariant}|provider=${combo.modelKnobs.provider}|model=${combo.modelKnobs.model}] ==`,
+    );
     console.log(`指标                  none        lexical`);
     const f = (x: number | null) => (x === null ? "n/a" : `${x.toFixed(1)}%`);
     console.log(`M1 该合未合          ${f(combo.none.metrics.M1_该合未合).padEnd(10)} ${f(combo.lexical.metrics.M1_该合未合)}`);
@@ -328,7 +369,13 @@ function ensureTrailingNewline(file: string): void {
   if (buf.length > 0 && buf[buf.length - 1] !== 0x0a) appendFileSync(file, "\n", "utf-8");
 }
 
-function readJsonlRows(file: string): { rows: Ab5Row[]; skippedTorn: number } {
+/**
+ * 读取当日 JSONL 行：按扩展 resumeKey（pid|mode|消融旋钮|provider|model）去重，
+ * 后行覆盖前行（追加写语义下同键重复时取最后一次判定）；撕裂半行容错跳过。
+ * yamlDefaults：旧行（票 05/02 时代，无 model/provider 字段）的回落默认
+ * （openai + yaml 全局 model——票 07 前的行只可能以 yaml 配置跑出）。
+ */
+function readJsonlRows(file: string, yamlDefaults: Ab5ModelKnobs): { rows: Ab5Row[]; skippedTorn: number } {
   if (!existsSync(file)) return { rows: [], skippedTorn: 0 };
   const byKey = new Map<string, Ab5Row>();
   let skippedTorn = 0;
@@ -341,9 +388,9 @@ function readJsonlRows(file: string): { rows: Ab5Row[]; skippedTorn: number } {
         skippedTorn++; // 可 parse 但 pid/mode 残缺——按撕裂行同口径处理
         continue;
       }
-      // 按 resumeKey 去重，后行覆盖前行（追加写语义下同键重复时取最后一次判定）；
-      // 票 05 起键含旋钮（旧行缺字段由 rowKnobs 回落默认，默认臂可续跑历史行）
-      byKey.set(resumeKey(r.pid, r.mode, rowKnobs(r)), r);
+      // 按扩展 resumeKey 去重（票 05 键含消融旋钮、票 07 再含判定模型旋钮；
+      // 旧行缺字段由 rowKnobs/rowModelKnobs 回落默认，默认臂可续跑历史行）
+      byKey.set(resumeKey(r.pid, r.mode, rowKnobs(r), rowModelKnobs(r, yamlDefaults)), r);
     } catch {
       skippedTorn++; // 撕裂半行（进程中断写一半）——跳过不打断 resume
     }
@@ -403,33 +450,61 @@ function selftestPairs(pairs: readonly Golden5CandPair[]): Golden5CandPair[] {
   return chosen.slice(0, 3);
 }
 
-/** 票 05 selftest 三组消融旋钮（每组独立跑通；topk=1 组不作 merge/store 覆盖断言——候选数 1 时孪生可能被截出）。 */
-const SELFTEST_KNOB_RUNS: ReadonlyArray<{ label: string; knobs: Ab5Knobs; expectCoverage: boolean }> = [
-  { label: "--topk=1", knobs: { topk: 1, thinking: "", promptVariant: "base" }, expectCoverage: false },
-  { label: "--thinking=low", knobs: { topk: 5, thinking: "low", promptVariant: "base" }, expectCoverage: true },
-  { label: "--prompt-variant=strict", knobs: { topk: 5, thinking: "", promptVariant: "strict" }, expectCoverage: true },
+/** selftest 判定模型旋钮缺省组（名义值——stub runner 不发请求，仅验证行字段/分组/键扩展，票 07）。 */
+const SELFTEST_MODEL_DEFAULT: Ab5ModelKnobs = { provider: AB5_DEFAULT_PROVIDER, model: "selftest-openai-model" };
+
+/** 票 05+07 selftest 四组旋钮（每组独立跑通；topk=1 组不作 merge/store 覆盖断言——候选数 1 时孪生可能被截出）。 */
+const SELFTEST_KNOB_RUNS: ReadonlyArray<{
+  label: string;
+  knobs: Ab5Knobs;
+  modelKnobs: Ab5ModelKnobs;
+  expectCoverage: boolean;
+}> = [
+  { label: "--topk=1", knobs: { topk: 1, thinking: "", promptVariant: "base" }, modelKnobs: SELFTEST_MODEL_DEFAULT, expectCoverage: false },
+  { label: "--thinking=low", knobs: { topk: 5, thinking: "low", promptVariant: "base" }, modelKnobs: SELFTEST_MODEL_DEFAULT, expectCoverage: true },
+  { label: "--prompt-variant=strict", knobs: { topk: 5, thinking: "", promptVariant: "strict" }, modelKnobs: SELFTEST_MODEL_DEFAULT, expectCoverage: true },
+  // 票 07：--provider=opencode + --model（stub runner 不发请求，验证 provider/model 行字段、
+  // 扩展 resumeKey（同 pid/mode 异模型不误吞）与 (arm×变体×模型) 分组）
+  {
+    label: "--provider=opencode --model=deepseek-v4.1-flash",
+    knobs: { topk: 5, thinking: "", promptVariant: "base" },
+    modelKnobs: { provider: "opencode", model: "deepseek-v4.1-flash" },
+    expectCoverage: true,
+  },
 ];
 
 async function selftestMain(): Promise<void> {
-  // CLI 传入的旋钮参数同样校验（非法即报错；三组消融用固定旋钮，与传参解耦保确定性）
+  // CLI 传入的旋钮参数同样校验（非法即报错；消融用固定旋钮，与传参解耦保确定性）
   parseAb5Knobs(process.argv);
+  parseAb5ModelKnobs(process.argv);
   const data = loadData(DEFAULT_DATASET);
   const pairs = selftestPairs(data.pairs);
   const ctx = buildAb5Context(pairs, [...data.goldenByPid.values()]);
   const jsonlFile = join(tmpdir(), `d2-ab5-selftest-${process.pid}-${Date.now()}.jsonl`);
-  console.log(`[ab5] selftest：${pairs.map((p) => `${p.pid}(rank=${p.twin_rank})`).join(" ")} × 2 臂 × 3 组消融旋钮 = 18 次判定（确定性 stub runner，零网络；POOL=1 保输出序确定）`);
+  console.log(`[ab5] selftest：${pairs.map((p) => `${p.pid}(rank=${p.twin_rank})`).join(" ")} × 2 臂 × 4 组旋钮（3 消融 + 1 判定模型） = 24 次判定（确定性 stub runner，零网络；POOL=1 保输出序确定）`);
 
   let allRows: Ab5Row[] = [];
   for (const run of SELFTEST_KNOB_RUNS) {
     const captured: LLMRunParams[] = [];
     const runner = variantWrappedRunner(selftestRecordingRunner(ctx.pairById, captured), run.knobs.promptVariant);
-    const rows = await runTasks(interleaveTasks(pairs, run.knobs), runner, data.goldenByPid, jsonlFile, 1);
+    const rows = await runTasks(interleaveTasks(pairs, run.knobs, run.modelKnobs), runner, data.goldenByPid, jsonlFile, 1);
     allRows = allRows.concat(rows);
 
-    // 行字段自检：本组 6 行全部携带该旋钮组合（票面「行含新字段」）
-    const fieldsOk = rows.every((r) => r.topk === run.knobs.topk && r.thinking === run.knobs.thinking && r.promptVariant === run.knobs.promptVariant);
+    // 行字段自检：本组 6 行全部携带该旋钮组合（票面「行含新字段」，票 07 含 provider/model）
+    const fieldsOk = rows.every(
+      (r) =>
+        r.topk === run.knobs.topk &&
+        r.thinking === run.knobs.thinking &&
+        r.promptVariant === run.knobs.promptVariant &&
+        r.provider === run.modelKnobs.provider &&
+        r.model === run.modelKnobs.model,
+    );
     if (rows.length !== 6 || !fieldsOk) {
-      throw new Error(`[ab5] selftest 自检失败（${run.label}）：rows=${rows.length}（期望 6），行旋钮字段=${JSON.stringify(rows.map((r) => [r.topk, r.thinking, r.promptVariant]))}`);
+      throw new Error(
+        `[ab5] selftest 自检失败（${run.label}）：rows=${rows.length}（期望 6），行旋钮字段=${JSON.stringify(
+          rows.map((r) => [r.topk, r.thinking, r.promptVariant, r.provider, r.model]),
+        )}`,
+      );
     }
     // merge/store 两路 parse/指标覆盖（topk=5 组；确定性 stub 的两路样本）
     if (run.expectCoverage && (!rows.some((r) => r.action === "merge") || !rows.some((r) => r.action === "store"))) {
@@ -444,24 +519,25 @@ async function selftestMain(): Promise<void> {
     if (run.knobs.promptVariant === "base" && captured.some((p) => p.systemPrompt?.includes("判定纪律："))) {
       throw new Error(`[ab5] selftest 自检失败（${run.label}）：base 变体不应追加收紧段`);
     }
-    console.log(`[ab5] selftest ${run.label}：6/6 通过，行含 topk=${run.knobs.topk}/thinking=${run.knobs.thinking || "none"}/variant=${run.knobs.promptVariant}`);
+    console.log(`[ab5] selftest ${run.label}：6/6 通过，行含 topk=${run.knobs.topk}/thinking=${run.knobs.thinking || "none"}/variant=${run.knobs.promptVariant}/provider=${run.modelKnobs.provider}/model=${run.modelKnobs.model}`);
   }
 
-  // 跨旋钮 resume 键自检：同文件 18 行按扩展键去重回读、无撕裂
-  const readback = readJsonlRows(jsonlFile);
-  if (readback.rows.length !== 18 || readback.skippedTorn !== 0) {
-    throw new Error(`[ab5] selftest 自检失败：JSONL 回读 rows=${readback.rows.length}（期望 18），skippedTorn=${readback.skippedTorn}`);
+  // 跨旋钮 resume 键自检：同文件 24 行按扩展键去重回读、无撕裂（第 4 组与第 2/3 组
+  // 同 (pid,mode) 异模型旋钮——键扩展不误吞即保 24 行全在）
+  const readback = readJsonlRows(jsonlFile, SELFTEST_MODEL_DEFAULT);
+  if (readback.rows.length !== 24 || readback.skippedTorn !== 0) {
+    throw new Error(`[ab5] selftest 自检失败：JSONL 回读 rows=${readback.rows.length}（期望 24），skippedTorn=${readback.skippedTorn}`);
   }
 
-  // (arm × 变体) 分组自检：18 行（3 组合 × 2 臂 × 3 对）恰分 3 组
-  const agg = aggregate(allRows, ctx, AB5_DEFAULT_KNOBS);
-  if (agg.combos.length !== 3) {
-    throw new Error(`[ab5] selftest 自检失败：聚合分组 combos=${agg.combos.length}（期望 3）`);
+  // (arm × 变体 × 判定模型) 分组自检：24 行（4 组合 × 2 臂 × 3 对）恰分 4 组
+  const agg = aggregate(allRows, ctx, AB5_DEFAULT_KNOBS, SELFTEST_MODEL_DEFAULT, SELFTEST_MODEL_DEFAULT);
+  if (agg.combos.length !== 4) {
+    throw new Error(`[ab5] selftest 自检失败：聚合分组 combos=${agg.combos.length}（期望 4）`);
   }
   printAggregate(agg);
   console.log(`\n[ab5] selftest JSONL（临时文件）: ${jsonlFile}`);
   console.log(`[ab5] selftest 首行样例: ${JSON.stringify(allRows[0])}`);
-  console.log(`[ab5] selftest PASS：mock→batchDedup→parse→指标→JSONL 全链路 18/18（3 组消融旋钮 × 6）无重复，行含 topk/thinking/promptVariant 新字段，(arm×变体) 分组=3`);
+  console.log(`[ab5] selftest PASS：mock→batchDedup→parse→指标→JSONL 全链路 24/24（3 组消融旋钮 + 1 组判定模型旋钮 × 6）无重复，行含 topk/thinking/promptVariant/provider/model 新字段，(arm×变体×模型) 分组=4`);
 }
 
 // ── 主流程（live）───────────────────────────────────────────────────────
@@ -471,6 +547,16 @@ async function main(): Promise<void> {
   const resume = process.argv.includes("--resume");
   const datasetPath = argValue("dataset") ?? DEFAULT_DATASET;
   const knobs = parseAb5Knobs(process.argv);
+  const modelKnobsRaw = parseAb5ModelKnobs(process.argv);
+
+  // 判定模型旋钮解析须在跑批前完成：providerLlmPatch 对 opencode 缺 env key
+  // 显式抛错（不盲跑 500；跑批前 1 判定探针由 --limit=1 承担）
+  const cfg = loadGatewayConfig();
+  const llm = cfg.llm;
+  const modelKnobs = resolveAb5ModelKnobs(modelKnobsRaw, llm.model);
+  // 旧行回落默认 = openai + yaml 全局 model（票 07 前的行只可能以 yaml 配置跑出）
+  const yamlDefaults: Ab5ModelKnobs = { provider: AB5_DEFAULT_PROVIDER, model: llm.model };
+  const providerCfg = providerLlmPatch(llm, modelKnobs);
 
   const data = loadData(datasetPath);
   let pairs = data.pairs;
@@ -479,32 +565,36 @@ async function main(): Promise<void> {
   mkdirSync(OUT_DIR, { recursive: true });
   const jsonlFile = join(OUT_DIR, `d2-ab5-${utcDate()}.jsonl`);
 
-  // resume：读当日 JSONL 跳过已判 (pid,mode,topk,thinking,promptVariant)，聚合时并入。
-  // readJsonlRows 已按扩展 resumeKey 去重（后行覆盖前行）并容错跳过撕裂半行。
+  // resume：读当日 JSONL 跳过已判 (pid,mode,topk,thinking,promptVariant,provider,model)，
+  // 聚合时并入。readJsonlRows 已按扩展 resumeKey 去重（后行覆盖前行）并容错跳过撕裂半行。
   let priorRows: Ab5Row[] = [];
-  let tasks = interleaveTasks(pairs, knobs);
+  let tasks = interleaveTasks(pairs, knobs, modelKnobs);
   if (resume) {
-    const prior = readJsonlRows(jsonlFile);
+    const prior = readJsonlRows(jsonlFile, yamlDefaults);
     priorRows = prior.rows;
     if (prior.skippedTorn > 0) console.log(`[ab5] resume：跳过撕裂/残缺行 ${prior.skippedTorn}（JSON.parse 失败或 pid/mode 残缺）`);
-    const judged = new Set(priorRows.map((r) => resumeKey(r.pid, r.mode, rowKnobs(r))));
+    // 双审 P2：旧行回落口径显式可见——票 07 前旧行无 provider/model 字段，归键
+    // 模型随当前 yaml 全局值走；yaml 中途换模型时该错配须可从日志发现（安全审查建议）
+    console.log(`[ab5] resume：旧行回落 provider=${yamlDefaults.provider} model=${yamlDefaults.model}`);
+    const judged = new Set(priorRows.map((r) => resumeKey(r.pid, r.mode, rowKnobs(r), rowModelKnobs(r, yamlDefaults))));
     const { pending, skipped } = resumeSkip(judged, tasks);
     tasks = pending;
     console.log(`[ab5] resume：已判 ${skipped}，待跑 ${pending.length}`);
   }
 
-  const cfg = loadGatewayConfig();
-  const llm = cfg.llm;
   const runner = variantWrappedRunner(
     new StandaloneLLMRunner({
       config: {
-        baseUrl: llm.baseUrl,
-        apiKey: llm.apiKey,
-        model: llm.model,
+        // 票 07 判定模型旋钮：provider=openai → yaml 原样（=现状）；opencode →
+        // 预设 baseUrl + env key + x-opencode-session 随机会话头（key 不落地不打印）
+        baseUrl: providerCfg.baseUrl,
+        apiKey: providerCfg.apiKey,
+        model: providerCfg.model,
         maxTokens: llm.maxTokens,
         timeoutMs: llm.timeoutMs,
         callDeadlineMs: llm.callDeadlineMs,
         maxConcurrency: llm.maxConcurrency,
+        ...(providerCfg.headers && Object.keys(providerCfg.headers).length > 0 ? { headers: providerCfg.headers } : {}),
         // 票 05 消融旋钮：--thinking 注入（缺省空补丁 = runner config 生产原样）
         ...thinkingConfigPatch(knobs),
       },
@@ -513,7 +603,8 @@ async function main(): Promise<void> {
     }),
     knobs.promptVariant,
   );
-  console.log(`[ab5] model=${llm.model} deadline=${llm.callDeadlineMs ?? "(auto)"}ms gate=${llm.maxConcurrency ?? 0}`);
+  console.log(`[ab5] provider=${modelKnobs.provider} model=${modelKnobs.model} baseUrl=${providerCfg.baseUrl}（key 不打印）`);
+  console.log(`[ab5] deadline=${llm.callDeadlineMs ?? "(auto)"}ms gate=${llm.maxConcurrency ?? 0}`);
   console.log(`[ab5] knobs: topk=${knobs.topk} thinking=${knobs.thinking || "none"} promptVariant=${knobs.promptVariant}`);
   console.log(`[ab5] dataset=${datasetPath}`);
   console.log(`[ab5] pairs=${pairs.length}（×2 臂 = ${pairs.length * 2} 次判定，pool=${POOL}，jsonl=${jsonlFile}）`);
@@ -521,31 +612,34 @@ async function main(): Promise<void> {
   ensureTrailingNewline(jsonlFile);
   const freshRows = await runTasks(tasks, runner, data.goldenByPid, jsonlFile, POOL);
 
-  // 聚合并入当日全部行（resume 场景 = 旧 + 新；不同旋钮组合各自分组）
+  // 聚合并入当日全部行（resume 场景 = 旧 + 新；不同旋钮/判定模型组合各自分组）
   const rows = [...priorRows, ...freshRows];
-  const agg = aggregate(rows, data.ctx, knobs);
+  const agg = aggregate(rows, data.ctx, knobs, modelKnobs, yamlDefaults);
   printAggregate(agg);
 
   // 本次运行旋钮组合的两臂视图（单组合运行 = 与票 02 结果形状一致）
-  const runCombo = agg.combos.find((c) => knobKey(c.knobs) === knobKey(knobs))!;
+  const runCombo = agg.combos.find((c) => comboKey(c.knobs, c.modelKnobs) === comboKey(knobs, modelKnobs))!;
   const outFile = join(OUT_DIR, `d2-ab5-result-${utcDate()}.json`);
   writeResult(outFile, {
     run_at: new Date().toISOString(),
     mode: "live",
-    model: llm.model,
+    model: modelKnobs.model,
+    provider: modelKnobs.provider,
     dataset: datasetPath,
     dataset_pairs_total: data.datasetPairsTotal,
     fixture_pairs: pairs.length,
-    knobs: { topk: knobs.topk, thinking: knobs.thinking, promptVariant: knobs.promptVariant },
+    knobs: { topk: knobs.topk, thinking: knobs.thinking, promptVariant: knobs.promptVariant, provider: modelKnobs.provider, model: modelKnobs.model },
     resumed_rows: priorRows.length,
     fresh_rows: freshRows.length,
     degraded: agg.degraded,
     parseFallbackCount,
-    // 票 05：按 (arm × 消融变体组合) 分组的汇总表（--resume 跨臂同文件时逐组可读）
+    // 票 05/07：按 (arm × 消融变体组合 × 判定模型组合) 分组的汇总表（--resume 跨臂同文件时逐组可读）
     variants: agg.combos.map((c) => ({
       topk: c.knobs.topk,
       thinking: c.knobs.thinking,
       promptVariant: c.knobs.promptVariant,
+      provider: c.modelKnobs.provider,
+      model: c.modelKnobs.model,
       arms: { none: c.none, lexical: c.lexical },
       conditions: c.conditions,
       verdict: c.conditions.allMet ? "lexical-effective" : "not-all-met",
@@ -558,6 +652,16 @@ async function main(): Promise<void> {
     results: rows,
   });
   console.log(`\n结果文件: ${outFile}`);
+
+  // 双审 P1：本轮 fresh 含 error 行（探针/跑批失败，如鉴权失败）或全文件
+  // degraded → 非零退出码（此前只产 error 行仍 exit 0）。历史 error 行不算
+  // ——只看本轮 fresh；degraded 是全文件口径，兜底。
+  const exit = runExitCode(freshRows, agg.degraded);
+  if (exit !== 0) {
+    const freshErrors = freshRows.filter((r) => r.action === "error").length;
+    console.log(`[ab5] 本轮 fresh error 行=${freshErrors} degraded=${agg.degraded} → 退出码 ${exit}`);
+  }
+  process.exitCode = exit;
 }
 
 if (process.argv.includes("--selftest")) {
