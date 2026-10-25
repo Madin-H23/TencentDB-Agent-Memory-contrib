@@ -234,7 +234,7 @@ export async function runLlmJudgment(
       const elapsed = Date.now() - t0;
       if (elapsed <= llmTimeoutMs / 2) {
         logger?.warn?.(
-          `${TAG} l1-dedup-retry elapsed=${elapsed}ms — 判定解析失败（${outcome.reason}），预算内重试一次`,
+          `${TAG} l1-dedup-retry elapsed=${elapsed}ms sessionKey=${srcCtx.sessionKey ?? "(unknown)"} sessionId=${srcCtx.sessionId ?? "(unknown)"} model=${srcCtx.model ?? "(default)"} — 判定解析失败（${outcome.reason}），预算内重试一次`,
         );
         let retryOutcome: DedupParseOutcome | null = null;
         try {
@@ -243,13 +243,13 @@ export async function runLlmJudgment(
         } catch (retryErr) {
           // 重试调用失败没有重试响应文本——回退首次响应的 salvage（审查 P1-3）
           logger?.warn?.(
-            `${TAG} l1-dedup-retry call-failed: ${retryErr instanceof Error ? retryErr.message : String(retryErr)} — 回退首次响应`,
+            `${TAG} l1-dedup-retry call-failed sessionKey=${srcCtx.sessionKey ?? "(unknown)"} sessionId=${srcCtx.sessionId ?? "(unknown)"} model=${srcCtx.model ?? "(default)"}: ${retryErr instanceof Error ? retryErr.message : String(retryErr)} — 回退首次响应`,
           );
         }
         if (retryOutcome?.ok) return retryOutcome.decisions;
       } else {
         logger?.warn?.(
-          `${TAG} l1-dedup-retry skipped elapsed=${elapsed}ms — 超预算（>timeoutMs/2），不重试`,
+          `${TAG} l1-dedup-retry skipped elapsed=${elapsed}ms sessionKey=${srcCtx.sessionKey ?? "(unknown)"} sessionId=${srcCtx.sessionId ?? "(unknown)"} model=${srcCtx.model ?? "(default)"} — 超预算（>timeoutMs/2），不重试`,
         );
       }
     }

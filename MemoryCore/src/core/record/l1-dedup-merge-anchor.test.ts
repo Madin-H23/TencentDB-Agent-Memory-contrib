@@ -97,7 +97,7 @@ describe("票11：l1-dedup-merge-decision 误合观测锚点（判定行为零�
     expect(hit).toBeTruthy();
     // 整形断言（审查 P2-1）：锚点只允许 id/动作/长度字段——未来任何内容字段泄漏即红
     expect(hit).toMatch(
-      /l1-dedup-merge-decision record=\S+ action=merge targets=\S+ contentLen=\d+ — 合并\/更新决策落库（误合观测锚点）$/,
+      /l1-dedup-merge-decision record=\S+ action=merge targets=\S+ contentLen=\d+ sessionKey=zcode-default sessionId=sess-t11 model=\(default\) — 合并\/更新决策落库（误合观测锚点）$/,
     );
     expect(hit).not.toContain("用户偏好"); // 新记忆正文
     expect(hit).not.toContain("汇报格式"); // merged_content

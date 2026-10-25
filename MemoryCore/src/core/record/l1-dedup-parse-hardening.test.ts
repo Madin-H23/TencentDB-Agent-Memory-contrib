@@ -327,6 +327,7 @@ describe("票18 B: runLlmJudgment 判定重试一次", () => {
     const w = warns().join("\n");
     expect(w).toMatch(/reason=no_json_array sessionKey=zcode-default sessionId=sess_abc model=glm-5\.3-flash — /);
     expect(w).toMatch(/digest [^\n]*sessionKey=zcode-default sessionId=sess_abc model=glm-5\.3-flash/);
+    expect(w).toMatch(/l1-dedup-retry elapsed=\d+ms sessionKey=zcode-default sessionId=sess_abc model=glm-5\.3-flash/);
   });
 
   it("票19：无 ctx（harness 直调）锚点显示 (unknown)/(default)", async () => {

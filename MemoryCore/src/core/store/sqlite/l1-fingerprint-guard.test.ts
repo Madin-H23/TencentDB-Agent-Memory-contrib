@@ -163,6 +163,8 @@ describe("守卫集成（真实 store + LLM mock）", () => {
       expect(anchor).toBeTruthy();
       expect(anchor).toContain("twin=m_twin");
       expect(anchor).toContain("len=");
+      // 票20：来源三元组（twin 分支）
+      expect(anchor).toMatch(/sessionKey=\S+ sessionId=\S+ model=/);
     } finally {
       cleanup(store, dir);
     }

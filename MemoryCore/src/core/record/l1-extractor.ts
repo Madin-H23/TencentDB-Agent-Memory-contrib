@@ -452,6 +452,7 @@ export async function extractL1Memories(params: {
         teamId,
         userId,
         agentId,
+        model: options.model, // 票20：锚点来源标注
         logger,
         vectorStore: options.vectorStore,
         embeddingService: options.embeddingService,
@@ -826,6 +827,8 @@ async function applyDecisions(params: {
   teamId?: string;
   userId?: string;
   agentId?: string;
+  /** 票20：生效模型（锚点来源标注；extractL1Memories 唯一调用点传 options.model）。 */
+  model?: string;
   logger?: Logger;
   vectorStore?: IMemoryStore;
   embeddingService?: EmbeddingService;
@@ -839,7 +842,7 @@ async function applyDecisions(params: {
    */
   userIdentityNames?: string[];
 }): Promise<MemoryRecord[]> {
-  const { memoriesWithIds, decisions, baseDir, sessionKey, sessionId, taskId, teamId, userId, agentId, logger, vectorStore, embeddingService, storage, dedupRecallRerank, userIdentityNames } = params;
+  const { memoriesWithIds, decisions, baseDir, sessionKey, sessionId, taskId, teamId, userId, agentId, model, logger, vectorStore, embeddingService, storage, dedupRecallRerank, userIdentityNames } = params;
   const storedRecords: MemoryRecord[] = [];
 
   // Build a map from record_id → decision
@@ -877,7 +880,7 @@ async function applyDecisions(params: {
         if (fp) {
           if (inFlightFingerprints.has(fp)) {
             logger?.warn?.(
-              `${TAG} l1-dedup-fingerprint-skip record=${memoryWithId.record_id} twin=in-flight len=${norm.length} — 写入前指纹命中（并发组在途），转 skip`,
+              `${TAG} l1-dedup-fingerprint-skip record=${memoryWithId.record_id} twin=in-flight len=${norm.length} sessionKey=${sessionKey} sessionId=${sessionId ?? "(unknown)"} model=${model ?? "(default)"} — 写入前指纹命中（并发组在途），转 skip`,
             );
             continue;
           }
@@ -891,7 +894,7 @@ async function applyDecisions(params: {
           const twin = hits.find((h) => fingerprintOf(h.content) === fp);
           if (twin) {
             logger?.warn?.(
-              `${TAG} l1-dedup-fingerprint-skip record=${memoryWithId.record_id} twin=${twin.record_id} len=${norm.length} — 写入前指纹命中，转 skip（组间竞态双入库兜底）`,
+              `${TAG} l1-dedup-fingerprint-skip record=${memoryWithId.record_id} twin=${twin.record_id} len=${norm.length} sessionKey=${sessionKey} sessionId=${sessionId ?? "(unknown)"} model=${model ?? "(default)"} — 写入前指纹命中，转 skip（组间竞态双入库兜底）`,
             );
             continue;
           }
@@ -924,7 +927,7 @@ async function applyDecisions(params: {
           // 污染审计的增量数据源。只打 id/动作/长度，不打正文（防 PII 进日志）。
           if (decision.action === "merge" || decision.action === "update") {
             logger?.info(
-              `${TAG} l1-dedup-merge-decision record=${decision.record_id} action=${decision.action} targets=${decision.target_ids.join(",") || "(none)"} contentLen=${memoryWithId.content.length} — 合并/更新决策落库（误合观测锚点）`,
+              `${TAG} l1-dedup-merge-decision record=${decision.record_id} action=${decision.action} targets=${decision.target_ids.join(",") || "(none)"} contentLen=${memoryWithId.content.length} sessionKey=${sessionKey} sessionId=${sessionId ?? "(unknown)"} model=${model ?? "(default)"} — 合并/更新决策落库（误合观测锚点）`,
             );
           }
         }
