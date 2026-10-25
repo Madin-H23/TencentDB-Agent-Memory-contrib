@@ -416,6 +416,7 @@ export async function extractL1Memories(params: {
         embeddingTimeoutMs: options.embeddingTimeoutMs,
         llmRunner: options.llmRunner,
         traceContext: { teamId, userId, agentId, sessionId },
+        sessionKey, // 票19：免检锚点来源标注（zcode-default / deepseek-harness…）
         // sessionId 不进 filter（P2-④ 并行安全，v2 2026-10-09 多线程治理语义）：
         // hook 转发真实 sid 后，各线程只在「自己的桶」查重会让两线程产出的同一
         // 事实双入库。跨线程去重语义以 team/user/agent/task 为界。

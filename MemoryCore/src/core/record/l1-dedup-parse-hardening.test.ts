@@ -317,4 +317,25 @@ describe("票18 B: runLlmJudgment 判定重试一次", () => {
     const w = warns().join("\n");
     expect(w.match(/l1-dedup-fallback-silent reason=truncated_partial/g)?.length).toBe(1);
   });
+
+  it("票19：fallback 锚点带 sessionKey/sessionId/model（有 ctx）", async () => {
+    (logger.warn as ReturnType<typeof vi.fn>).mockClear();
+    const r = runnerOf([async () => "garbage", async () => "garbage two"]);
+    await runLlmJudgment(matches, memories, undefined, logger, "glm-5.3-flash", "chat", {
+      run: r.run,
+    } as never, { teamId: undefined, userId: "u", agentId: "a", sessionId: "sess_abc" }, 2000, true, "zcode-default");
+    const w = warns().join("\n");
+    expect(w).toMatch(/reason=no_json_array sessionKey=zcode-default sessionId=sess_abc model=glm-5\.3-flash — /);
+    expect(w).toMatch(/digest [^\n]*sessionKey=zcode-default sessionId=sess_abc model=glm-5\.3-flash/);
+  });
+
+  it("票19：无 ctx（harness 直调）锚点显示 (unknown)/(default)", async () => {
+    (logger.warn as ReturnType<typeof vi.fn>).mockClear();
+    const r = runnerOf([async () => "garbage", async () => "garbage two"]);
+    await runLlmJudgment(matches, memories, undefined, logger, undefined, "chat", {
+      run: r.run,
+    } as never, undefined, 2000, true);
+    const w = warns().join("\n");
+    expect(w).toMatch(/reason=no_json_array sessionKey=\(unknown\) sessionId=\(unknown\) model=\(default\)/);
+  });
 });

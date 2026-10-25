@@ -91,8 +91,14 @@ export async function batchDedup(params: {
   dedupFailFast?: boolean;
   /** D2 召回轻修开关：none=旧行为（默认）；lexical=超额召回+词汇相似度重排。 */
   dedupRecallRerank?: DedupRecallRerank;
+  /**
+   * 票19（2026-10-25）：会话键，随 fallback/digest 锚点输出——免检事件须可归因到
+   * 宿主（zcode-default / deepseek-harness）与会话，否则面板审计页无法标注来源。
+   * 可选：harness 直调等无会话上下文的调用方不传，锚点显示 (unknown)。
+   */
+  sessionKey?: string;
 }): Promise<DedupDecision[]> {
-  const { memories, config, logger, model, promptMode = "chat", vectorStore, embeddingService, llmRunner, filter, traceContext, dedupFailFast, dedupRecallRerank = "none" } = params;
+  const { memories, config, logger, model, promptMode = "chat", vectorStore, embeddingService, llmRunner, filter, traceContext, dedupFailFast, dedupRecallRerank = "none", sessionKey } = params;
   const timeoutMs = params.timeoutMs ?? 180_000;
   const topK = params.conflictRecallTopK ?? 5;
 
@@ -149,7 +155,7 @@ export async function batchDedup(params: {
   }
 
   // Phase 2: Batch LLM judgment
-  return runLlmJudgment(matches, memories, config, logger, model, promptMode, llmRunner, traceContext, timeoutMs, dedupFailFast);
+  return runLlmJudgment(matches, memories, config, logger, model, promptMode, llmRunner, traceContext, timeoutMs, dedupFailFast, sessionKey);
 }
 
 /**
@@ -171,9 +177,17 @@ export async function runLlmJudgment(
   timeoutMs?: number,
   /** fail-closed 开关（P0-Fix1）：true=判定失败上抛给调用方走延后；false=既有降级全 store */
   dedupFailFast?: boolean,
+  /** 票19：会话键（锚点来源标注用，可选）。 */
+  sessionKey?: string,
 ): Promise<DedupDecision[]> {
   const llmTimeoutMs = timeoutMs ?? 180_000;
   logger?.debug?.(`${TAG} Running batch conflict detection for ${memories.length} memories (promptMode=${promptMode})`);
+  // 票19：锚点来源三元组（会话归属 + 生效模型）。model 未显式覆盖时为层默认。
+  const srcCtx = {
+    sessionKey,
+    sessionId: traceContext?.sessionId,
+    model,
+  };
 
   const userPrompt = formatBatchConflictPrompt(matches);
   const systemPrompt = getConflictDetectionSystemPrompt(promptMode);
@@ -211,7 +225,7 @@ export async function runLlmJudgment(
   try {
     const t0 = Date.now();
     const result = await callOnce("l1-conflict-detection");
-    let outcome = parseBatchResult(result, memories, logger, "first");
+    let outcome = parseBatchResult(result, memories, logger, "first", srcCtx);
 
     // 票18 B：解析失败（非调用失败——调用失败走下方 catch 的 fail-fast 语义）且首调用
     // 耗时 ≤ timeoutMs/2 时重试一次。口径：callDeadline 每次 run 独享，重试不撞首调
@@ -225,7 +239,7 @@ export async function runLlmJudgment(
         let retryOutcome: DedupParseOutcome | null = null;
         try {
           const retryResult = await callOnce("l1-conflict-detection-retry");
-          retryOutcome = parseBatchResult(retryResult, memories, logger, "second");
+          retryOutcome = parseBatchResult(retryResult, memories, logger, "second", srcCtx);
         } catch (retryErr) {
           // 重试调用失败没有重试响应文本——回退首次响应的 salvage（审查 P1-3）
           logger?.warn?.(
@@ -246,7 +260,7 @@ export async function runLlmJudgment(
     if (!outcome.ok) {
       if (outcome.reason === "truncated_partial" && outcome.decisions) {
         logger?.warn?.(
-          `${TAG} l1-dedup-fallback-silent reason=truncated_partial — ${outcome.tailCount ?? 0} memory(ies) stored without dedup judgment`,
+          `${TAG} l1-dedup-fallback-silent reason=truncated_partial sessionKey=${srcCtx.sessionKey ?? "(unknown)"} sessionId=${srcCtx.sessionId ?? "(unknown)"} model=${srcCtx.model ?? "(default)"} — ${outcome.tailCount ?? 0} memory(ies) stored without dedup judgment`,
         );
         return outcome.decisions;
       }
@@ -254,6 +268,7 @@ export async function runLlmJudgment(
         memories,
         outcome.reason as "no_json_array" | "not_array" | "parse_error",
         logger,
+        srcCtx,
       );
     }
     return outcome.decisions;
@@ -415,6 +430,8 @@ export function parseBatchResult(
   logger?: Logger,
   /** A3 摘要的重试相位标记（first/second），由 runLlmJudgment 传入 */
   attemptTag: "first" | "second" = "first",
+  /** 票19：锚点来源三元组（sessionKey/sessionId/model，可选——harness 直调不传） */
+  srcCtx?: { sessionKey?: string; sessionId?: string; model?: string },
 ): DedupParseOutcome {
   const stripped = raw.replace(/<think>[\s\S]*?<\/think>\s*/g, "");
 
@@ -432,7 +449,7 @@ export function parseBatchResult(
     }
     const endsWith = cleaned.length > 0 ? cleaned[cleaned.length - 1]! : "";
     logger?.warn?.(
-      `${TAG} l1-dedup-parse-digest rawLen=${raw.length} strippedLen=${cleaned.length} spanFound=${spanCount > 0} spanCount=${spanCount} braceBalance=${braceBalance} endsWith=${JSON.stringify(endsWith)} errPos=${errPos} retry=${attemptTag} — 无正文`,
+      `${TAG} l1-dedup-parse-digest rawLen=${raw.length} strippedLen=${cleaned.length} spanFound=${spanCount > 0} spanCount=${spanCount} braceBalance=${braceBalance} endsWith=${JSON.stringify(endsWith)} errPos=${errPos} retry=${attemptTag} sessionKey=${srcCtx?.sessionKey ?? "(unknown)"} sessionId=${srcCtx?.sessionId ?? "(unknown)"} model=${srcCtx?.model ?? "(default)"} — 无正文`,
     );
   };
 
@@ -596,9 +613,11 @@ function fallbackStoreAll(
   memories: Array<ExtractedMemory & { record_id: string }>,
   reason: "no_json_array" | "not_array" | "parse_error",
   logger?: Logger,
+  /** 票19：来源三元组——免检事件必须可归因到宿主/会话/模型（缺省 (unknown)/(default)）。 */
+  srcCtx?: { sessionKey?: string; sessionId?: string; model?: string },
 ): DedupDecision[] {
   logger?.warn?.(
-    `${TAG} l1-dedup-fallback-silent reason=${reason} — ${memories.length} memory(ies) stored without dedup judgment`,
+    `${TAG} l1-dedup-fallback-silent reason=${reason} sessionKey=${srcCtx?.sessionKey ?? "(unknown)"} sessionId=${srcCtx?.sessionId ?? "(unknown)"} model=${srcCtx?.model ?? "(default)"} — ${memories.length} memory(ies) stored without dedup judgment`,
   );
   return memories.map((m) => ({
     record_id: m.record_id,
