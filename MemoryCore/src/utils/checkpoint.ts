@@ -164,6 +164,31 @@ const noopLogger: CheckpointLogger = { info() {} };
 const fileLocks = new Map<string, Promise<void>>();
 
 /**
+ * Windows 瞬态占用加固（2026-10-24 闸门加固）：rename 目标刚被上一轮写入落盘时，
+ * 杀毒/索引服务可能瞬时握住句柄 → EPERM/EBUSY。进程内 withFileLock 只串行自家
+ * 临界区，防不了系统级瞬态占用（l2-batch「同毫秒兄弟不丢」用例连跑 5 次挂 1 的
+ * flaky 实证）。对 EPERM/EBUSY 做短退避重试；其余错误码（ENOENT 等永久错误）
+ * 照常上抛。fs 模块注入便于单测（checkpoint-rename-retry.test.ts）。
+ */
+export async function renameWithRetry(
+  fsMod: { rename(from: string, to: string): Promise<void> },
+  from: string,
+  to: string,
+  attempts = 4,
+): Promise<void> {
+  for (let i = 0; ; i++) {
+    try {
+      await fsMod.rename(from, to);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if ((code !== "EPERM" && code !== "EBUSY") || i >= attempts - 1) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 25 * (i + 1)));
+    }
+  }
+}
+
+/**
  * Serialize async critical sections per file path.
  * Under no contention the overhead is a single resolved-promise await.
  */
@@ -356,7 +381,9 @@ export class CheckpointManager {
       await fs.default.mkdir(dir, { recursive: true });
       const tmp = `${this.filePath}.tmp.${randomBytes(4).toString("hex")}`;
       await fs.default.writeFile(tmp, content, "utf-8");
-      await fs.default.rename(tmp, this.filePath);
+      // Windows 瞬态占用加固（2026-10-24）：裸 rename 在目标被杀毒/索引服务瞬时
+      // 握句柄时报 EPERM（l2-batch flaky 实证，见 renameWithRetry doc）。
+      await renameWithRetry(fs.default, tmp, this.filePath);
     }
   }
 
