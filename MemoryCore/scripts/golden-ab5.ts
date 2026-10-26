@@ -28,7 +28,8 @@
  *   --thinking=<level>    注入 runner config thinkingLevel（缺省不注入；
  *                         合法值 default/disabled/enabled/low/high/max）
  *   --prompt-variant=<name> prompt 变体（缺省 base=生产 prompt；strict=系统
- *                         提示词追加收紧段，变体常量集中 harness 侧）
+ *                         提示词追加收紧段；fewshot=票 09 追加收紧段+判定示例
+ *                         小节，变体常量集中 harness 侧）
  *
  * 判定模型旋钮（票 07，零生产影响，只改 harness 侧 runner config 组装）：
  *   --model=<id>          覆盖 runner config 的 model（缺省=openai→yaml 全局值 /
@@ -47,7 +48,7 @@
  *                         [--topk=N] [--thinking=<level>] [--prompt-variant=<name>]
  *                         [--model=<id>] [--provider=<openai|opencode>]
  *   node --import tsx scripts/golden-ab5.ts --selftest   # 确定性 stub，零网络回归
- *                                                        # （三旋钮各跑一组 + 模型旋钮一组）
+ *                                                        # （消融旋钮四组 + 判定模型旋钮一组）
  */
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -82,6 +83,7 @@ import {
   type Arm,
 } from "../src/core/record/golden-ab5-metrics.js";
 import {
+  AB5_FEWSHOT_EXAMPLES,
   AB5_STRICT_PROMPT_SUFFIX,
   parseAb5Knobs,
   parseAb5ModelKnobs,
@@ -453,7 +455,7 @@ function selftestPairs(pairs: readonly Golden5CandPair[]): Golden5CandPair[] {
 /** selftest 判定模型旋钮缺省组（名义值——stub runner 不发请求，仅验证行字段/分组/键扩展，票 07）。 */
 const SELFTEST_MODEL_DEFAULT: Ab5ModelKnobs = { provider: AB5_DEFAULT_PROVIDER, model: "selftest-openai-model" };
 
-/** 票 05+07 selftest 四组旋钮（每组独立跑通；topk=1 组不作 merge/store 覆盖断言——候选数 1 时孪生可能被截出）。 */
+/** 票 05+07+09 selftest 五组旋钮（每组独立跑通；topk=1 组不作 merge/store 覆盖断言——候选数 1 时孪生可能被截出）。 */
 const SELFTEST_KNOB_RUNS: ReadonlyArray<{
   label: string;
   knobs: Ab5Knobs;
@@ -463,6 +465,8 @@ const SELFTEST_KNOB_RUNS: ReadonlyArray<{
   { label: "--topk=1", knobs: { topk: 1, thinking: "", promptVariant: "base" }, modelKnobs: SELFTEST_MODEL_DEFAULT, expectCoverage: false },
   { label: "--thinking=low", knobs: { topk: 5, thinking: "low", promptVariant: "base" }, modelKnobs: SELFTEST_MODEL_DEFAULT, expectCoverage: true },
   { label: "--prompt-variant=strict", knobs: { topk: 5, thinking: "", promptVariant: "strict" }, modelKnobs: SELFTEST_MODEL_DEFAULT, expectCoverage: true },
+  // 票 09：--prompt-variant=fewshot（收紧段+判定示例小节组合追加，端到端断言见 selftestMain）
+  { label: "--prompt-variant=fewshot", knobs: { topk: 5, thinking: "", promptVariant: "fewshot" }, modelKnobs: SELFTEST_MODEL_DEFAULT, expectCoverage: true },
   // 票 07：--provider=opencode + --model（stub runner 不发请求，验证 provider/model 行字段、
   // 扩展 resumeKey（同 pid/mode 异模型不误吞）与 (arm×变体×模型) 分组）
   {
@@ -481,7 +485,7 @@ async function selftestMain(): Promise<void> {
   const pairs = selftestPairs(data.pairs);
   const ctx = buildAb5Context(pairs, [...data.goldenByPid.values()]);
   const jsonlFile = join(tmpdir(), `d2-ab5-selftest-${process.pid}-${Date.now()}.jsonl`);
-  console.log(`[ab5] selftest：${pairs.map((p) => `${p.pid}(rank=${p.twin_rank})`).join(" ")} × 2 臂 × 4 组旋钮（3 消融 + 1 判定模型） = 24 次判定（确定性 stub runner，零网络；POOL=1 保输出序确定）`);
+  console.log(`[ab5] selftest：${pairs.map((p) => `${p.pid}(rank=${p.twin_rank})`).join(" ")} × 2 臂 × 5 组旋钮（4 消融 + 1 判定模型） = 30 次判定（确定性 stub runner，零网络；POOL=1 保输出序确定）`);
 
   let allRows: Ab5Row[] = [];
   for (const run of SELFTEST_KNOB_RUNS) {
@@ -515,6 +519,17 @@ async function selftestMain(): Promise<void> {
       const ok = captured.length > 0 && captured.every((p) => p.systemPrompt?.endsWith(AB5_STRICT_PROMPT_SUFFIX));
       if (!ok) throw new Error(`[ab5] selftest 自检失败（${run.label}）：systemPrompt 未追加 strict 收紧段`);
     }
+    // fewshot 变体端到端（票 09）：runner 实收 systemPrompt 已追加「收紧段+判定示例小节」组合
+    if (run.knobs.promptVariant === "fewshot") {
+      const ok =
+        captured.length > 0 &&
+        captured.every(
+          (p) =>
+            p.systemPrompt?.includes(AB5_STRICT_PROMPT_SUFFIX) === true &&
+            p.systemPrompt?.endsWith(AB5_FEWSHOT_EXAMPLES) === true,
+        );
+      if (!ok) throw new Error(`[ab5] selftest 自检失败（${run.label}）：systemPrompt 未追加 fewshot 组合段（收紧段+判定示例）`);
+    }
     // base 变体反证：生产 prompt 不被追加收紧段
     if (run.knobs.promptVariant === "base" && captured.some((p) => p.systemPrompt?.includes("判定纪律："))) {
       throw new Error(`[ab5] selftest 自检失败（${run.label}）：base 变体不应追加收紧段`);
@@ -522,22 +537,22 @@ async function selftestMain(): Promise<void> {
     console.log(`[ab5] selftest ${run.label}：6/6 通过，行含 topk=${run.knobs.topk}/thinking=${run.knobs.thinking || "none"}/variant=${run.knobs.promptVariant}/provider=${run.modelKnobs.provider}/model=${run.modelKnobs.model}`);
   }
 
-  // 跨旋钮 resume 键自检：同文件 24 行按扩展键去重回读、无撕裂（第 4 组与第 2/3 组
-  // 同 (pid,mode) 异模型旋钮——键扩展不误吞即保 24 行全在）
+  // 跨旋钮 resume 键自检：同文件 30 行按扩展键去重回读、无撕裂（第 5 组与第 2/3/4 组
+  // 同 (pid,mode) 异模型旋钮——键扩展不误吞即保 30 行全在）
   const readback = readJsonlRows(jsonlFile, SELFTEST_MODEL_DEFAULT);
-  if (readback.rows.length !== 24 || readback.skippedTorn !== 0) {
-    throw new Error(`[ab5] selftest 自检失败：JSONL 回读 rows=${readback.rows.length}（期望 24），skippedTorn=${readback.skippedTorn}`);
+  if (readback.rows.length !== 30 || readback.skippedTorn !== 0) {
+    throw new Error(`[ab5] selftest 自检失败：JSONL 回读 rows=${readback.rows.length}（期望 30），skippedTorn=${readback.skippedTorn}`);
   }
 
-  // (arm × 变体 × 判定模型) 分组自检：24 行（4 组合 × 2 臂 × 3 对）恰分 4 组
+  // (arm × 变体 × 判定模型) 分组自检：30 行（5 组合 × 2 臂 × 3 对）恰分 5 组
   const agg = aggregate(allRows, ctx, AB5_DEFAULT_KNOBS, SELFTEST_MODEL_DEFAULT, SELFTEST_MODEL_DEFAULT);
-  if (agg.combos.length !== 4) {
-    throw new Error(`[ab5] selftest 自检失败：聚合分组 combos=${agg.combos.length}（期望 4）`);
+  if (agg.combos.length !== 5) {
+    throw new Error(`[ab5] selftest 自检失败：聚合分组 combos=${agg.combos.length}（期望 5）`);
   }
   printAggregate(agg);
   console.log(`\n[ab5] selftest JSONL（临时文件）: ${jsonlFile}`);
   console.log(`[ab5] selftest 首行样例: ${JSON.stringify(allRows[0])}`);
-  console.log(`[ab5] selftest PASS：mock→batchDedup→parse→指标→JSONL 全链路 24/24（3 组消融旋钮 + 1 组判定模型旋钮 × 6）无重复，行含 topk/thinking/promptVariant/provider/model 新字段，(arm×变体×模型) 分组=4`);
+  console.log(`[ab5] selftest PASS：mock→batchDedup→parse→指标→JSONL 全链路 30/30（4 组消融旋钮 + 1 组判定模型旋钮 × 6）无重复，行含 topk/thinking/promptVariant/provider/model 新字段，(arm×变体×模型) 分组=5`);
 }
 
 // ── 主流程（live）───────────────────────────────────────────────────────
