@@ -11,6 +11,10 @@
 
 import { tool, jsonSchema } from "ai";
 import type { StorageAdapter } from "../../core/storage/adapter.js";
+import {
+  ReadBudgetTracker,
+  formatReadBudgetObservation,
+} from "../../utils/read-budget.js";
 
 const TAG = "[memory-tdai] [storage-tools]";
 
@@ -58,6 +62,8 @@ export function createStorageTools(
   prefix: string,
   logger?: Logger,
 ) {
+  // S0 影子计量：一次 toolset = 一次 run，累计量随工具集生命周期归零。
+  const readBudget = new ReadBudgetTracker();
   return {
     read: tool({
       description: "Read the contents of a file at the given relative path.",
@@ -78,6 +84,11 @@ export function createStorageTools(
             return JSON.stringify({ error: `File not found: ${args.path}` });
           }
           logger?.debug?.(`${TAG} read: "${args.path}" → ${content.length} chars`);
+          const obs = readBudget.observe(args.path, content.length);
+          logger?.debug?.(`${TAG} ${formatReadBudgetObservation(obs)}`);
+          if (obs.overFile || obs.crossedRunBudget) {
+            logger?.warn?.(`${TAG} ${formatReadBudgetObservation(obs)} (shadow-only, no enforcement)`);
+          }
           return content;
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);

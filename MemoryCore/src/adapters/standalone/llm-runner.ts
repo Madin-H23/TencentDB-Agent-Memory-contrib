@@ -23,6 +23,10 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { report } from "../../core/report/reporter.js";
 import { withSharedLlmLimit, getDefaultLlmConcurrency } from "../../utils/llm-concurrency.js";
 import { runWithRateLimitRetry } from "../../utils/rate-limit-backoff.js";
+import {
+  ReadBudgetTracker,
+  formatReadBudgetObservation,
+} from "../../utils/read-budget.js";
 import type {
   LLMRunner,
   LLMRunParams,
@@ -279,6 +283,8 @@ function resolveSandboxedPath(workspaceDir: string, relativePath: string): strin
 // ============================
 
 function createSandboxedTools(workspaceDir: string, logger?: Logger) {
+  // S0 影子计量：一次 toolset = 一次 run，累计量随工具集生命周期归零。
+  const readBudget = new ReadBudgetTracker();
   return {
     read: tool({
       description: "Read the contents of a file at the given relative path.",
@@ -295,6 +301,11 @@ function createSandboxedTools(workspaceDir: string, logger?: Logger) {
         try {
           const content = await fsPromises.readFile(resolved, "utf-8");
           logger?.debug?.(`${TAG} read: "${args.path}" → ${content.length} chars`);
+          const obs = readBudget.observe(args.path, content.length);
+          logger?.debug?.(`${TAG} ${formatReadBudgetObservation(obs)}`);
+          if (obs.overFile || obs.crossedRunBudget) {
+            logger?.warn?.(`${TAG} ${formatReadBudgetObservation(obs)} (shadow-only, no enforcement)`);
+          }
           return content;
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
