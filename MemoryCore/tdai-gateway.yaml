@@ -30,21 +30,21 @@ llm:
   #   免费档额度扛不住日常蒸馏量）→ zhipu-free/glm-4.7-flash（10-18 晚起在役）。
   # 备选：智谱coding plan（open.bigmodel.cn/api/coding/paas/v4 订阅端点，key 同
   # TDAI_KEY_ZHIPU，已入面板目录，晚高峰可切）/ deepseek-official（按量付费）。
-  baseUrl: "https://opencode.ai/zen/go/v1"
+  baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4"
   # key 走 yaml 插值（启动件 set TDAI_KEY_ZHIPU）；注意启动件不得再设
   # TDAI_LLM_API_KEY——env 优先于 yaml，会把别家 key 强塞给本厂商。
-  apiKey: "${TDAI_KEY_OPENCODE}"
+  apiKey: "${TDAI_KEY_ZHIPU}"
   # 无自定义请求头：zhipu 不要求固定头（opencode-go 的 x-opencode-session 是
   # 上一家厂商的专项，切走即摘；headers 字段缺省=不发额外头）。
   # 厂商显示名（归属移植，v2 c00899f）：纯展示字段——L1 完成/延后/失败日志与
   # 面板蒸馏记录/死信两卡的「(厂商: 模型)」归属。不参与调用路由。
-  providerLabel: "opencode-go"
+  providerLabel: "智谱coding plan"
   # 全局模型（l2/l3 未显式覆盖 model 时沿用）：glm-4.7-flash（zhipu 免费档）。
   # 已知边界：**上下文远小于 nemotron 的 1M**——L2/L3 长输入会撞 Prompt exceeds
   # max length（10-19 实测 6 次，400 不可重试），待决策分层大上下文模型；
   # 晚高峰易触发上游「访问量过大」（并发负载）与「已达到速率限制」（账户级 RPM，
   # 并发 1 也挡不住）两类限流，退避已兜底、游标不动数据不丢。
-  model: "minimax-m3.1-flash-free"
+  model: "glm-5.3-flash"
   maxTokens: 65536
   timeoutMs: 120000
   # 进程级并发闸门：按 baseUrl 分桶限流，防多子系统调用叠加触发厂商秒拒；0/缺省=不限。
@@ -70,21 +70,22 @@ llm:
       maxTokens: 64000
       timeoutMs: 300000
       thinkingLevel: low
-      model: minimax-m3.1-flash-free
     l2:
       maxTokens: 128000
       timeoutMs: 600000
       callDeadlineMs: 660000
       thinkingLevel: max
-      model: minimax-m3.1-flash-free
+      # 流式调用（票04，2026-10-24）：thinking=max 的长提示词非流式首字节超
+      # undici headersTimeout（L2 死信主导族 Headers Timeout）。层 runner 经
+      # tdai-core 装配点构造（层解析+MetricTracking+enableTools:true）。
+      stream: true
     l3:
       maxTokens: 128000
       timeoutMs: 600000
       callDeadlineMs: 660000
       thinkingLevel: max
-      model: minimax-m3.1-flash-free
-  headers:
-    x-opencode-session: 8ae1bd54-2614-41ae-9ada-c21a2a3e7a00
+      # 同 l2（票04）。回退=删本键并重启。
+      stream: true
 
 # ── Memory 引擎 ──
 memory:
