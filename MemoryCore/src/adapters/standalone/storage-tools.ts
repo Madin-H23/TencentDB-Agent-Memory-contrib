@@ -15,6 +15,7 @@ import {
   ReadBudgetTracker,
   formatReadBudgetObservation,
 } from "../../utils/read-budget.js";
+import { readCacheMetrics, formatReadCacheNote } from "../../utils/read-cache-metrics.js";
 
 const TAG = "[memory-tdai] [storage-tools]";
 
@@ -86,6 +87,9 @@ export function createStorageTools(
             return JSON.stringify({ error: `File not found: ${args.path}` });
           }
           logger?.debug?.(`${TAG} read: "${args.path}" → ${content.length} chars`);
+          // 影子缓存计量（2026-10-27）：只统计 would-hit，仍返回全文。
+          const cacheNote = readCacheMetrics.note(key, content);
+          logger?.debug?.(`${TAG} ${formatReadCacheNote(cacheNote, args.path, content.length, taskId)}`);
           const obs = readBudget.observe(args.path, content.length);
           logger?.debug?.(`${TAG} ${formatReadBudgetObservation(obs, taskId)}`);
           if (obs.overFile || obs.crossedRunBudget) {
