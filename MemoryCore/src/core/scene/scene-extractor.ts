@@ -25,6 +25,7 @@ import { parseSceneBlock } from "../scene/scene-format.js";
 import { generateSceneNavigation, stripSceneNavigation } from "../scene/scene-navigation.js";
 import { normalizeSceneFilenames } from "./filename-normalizer.js";
 import { isNoopSceneDiff } from "./noop-detect.js";
+import { writeSceneSnapshot } from "./scene-snapshot.js";
 import type { MemoryPromptMode } from "../../config.js";
 import { buildSceneExtractionPrompt } from "../prompts/scene-extraction.js";
 import { report } from "../report/reporter.js";
@@ -190,16 +191,23 @@ export class SceneExtractor {
     const backupStartMs = Date.now();
     const cpManager = new CheckpointManager(this.dataDir, this.logger, this.storage);
     const cp = await cpManager.read();
-    // BackupManager is only meaningful for local-fs deployments. In service
-    // mode (StorageAdapter / COS) snapshot/restore is the storage backend's
-    // responsibility, so `bm` stays undefined and the catch-block restore
-    // below short-circuits to a no-op.
+    // 2026-10-27：快照与回滚解耦。
+    // 旧逻辑只在沙箱模式（!storage）建 BackupManager，而网关恒传 storage →
+    // 在役从不做 L2 快照（实测 profiles 下无 .backup），写坏无可回滚单元。
+    // 现在：只要本地 scene_blocks 目录存在就写快照（COS 等天然跳过）；
+    // `bm` 仍只在沙箱模式下创建，因为下方 catch 分支的 restoreLatestDirectory
+    // 会整目录 rm -rf，不能与并发 L2 run 共用（两轮审查 P0）。
     let bm: BackupManager | undefined;
     if (!this.storage) {
       const path = await import("node:path");
       bm = new BackupManager(path.default.join(this.dataDir, ".backup"));
-      await bm.backupDirectory(sceneBlocksDir, "scene_blocks", `offset${cp.total_processed}`, this.sceneBackupCount);
     }
+    await writeSceneSnapshot({
+      dataDir: this.dataDir,
+      keep: this.sceneBackupCount,
+      tag: `offset${cp.total_processed}-${Date.now()}`,
+      logger: this.logger,
+    });
     this.logger?.debug?.(`${TAG} extract() backup phase: ${Date.now() - backupStartMs}ms`);
 
     // Phase 2: Load scene index
