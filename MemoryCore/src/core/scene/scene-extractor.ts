@@ -24,6 +24,7 @@ import type { SceneIndexEntry } from "../scene/scene-index.js";
 import { parseSceneBlock } from "../scene/scene-format.js";
 import { generateSceneNavigation, stripSceneNavigation } from "../scene/scene-navigation.js";
 import { normalizeSceneFilenames } from "./filename-normalizer.js";
+import { isNoopSceneDiff } from "./noop-detect.js";
 import type { MemoryPromptMode } from "../../config.js";
 import { buildSceneExtractionPrompt } from "../prompts/scene-extraction.js";
 import { report } from "../report/reporter.js";
@@ -457,6 +458,16 @@ export class SceneExtractor {
     const scenesCreated = sceneDiff.created.length;
     const scenesUpdated = sceneDiff.updated.filter(({ before, after }) => before.content !== after.content).length;
     const scenesDeleted = sceneDiff.deleted.length;
+
+    // 2026-10-27（用户拍板「只观测不动游标」）：全零 diff 轮次记 WARN 锚点。
+    // 既有 emptyExtraction 谓词在已有场景时恒 false（见下方 :498），实测 284 轮里
+    // 8 轮 created/updated/deleted 全零却仍推进游标。这里只观测：不改判定、不阻断
+    // 也不推进游标；是否据此做门控另票，等 3–7 天基线。
+    if (isNoopSceneDiff(scenesCreated, scenesUpdated, scenesDeleted)) {
+      this.logger?.warn?.(
+        `${TAG} l2-noop-processed instance=${this.instanceId ?? "(none)"} created=0 updated=0 deleted=0 — 全零 diff 轮（只观测，游标照常）`,
+      );
+    }
 
     // ── l2_extraction metric ──
     if (this.instanceId && this.logger) {
