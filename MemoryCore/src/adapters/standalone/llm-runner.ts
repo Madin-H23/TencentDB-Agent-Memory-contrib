@@ -282,7 +282,7 @@ function resolveSandboxedPath(workspaceDir: string, relativePath: string): strin
 // Tool definitions (Vercel AI SDK `tool()` format)
 // ============================
 
-function createSandboxedTools(workspaceDir: string, logger?: Logger) {
+function createSandboxedTools(workspaceDir: string, logger?: Logger, taskId?: string) {
   // S0 影子计量：一次 toolset = 一次 run，累计量随工具集生命周期归零。
   const readBudget = new ReadBudgetTracker();
   return {
@@ -302,9 +302,9 @@ function createSandboxedTools(workspaceDir: string, logger?: Logger) {
           const content = await fsPromises.readFile(resolved, "utf-8");
           logger?.debug?.(`${TAG} read: "${args.path}" → ${content.length} chars`);
           const obs = readBudget.observe(args.path, content.length);
-          logger?.debug?.(`${TAG} ${formatReadBudgetObservation(obs)}`);
+          logger?.debug?.(`${TAG} ${formatReadBudgetObservation(obs, taskId)}`);
           if (obs.overFile || obs.crossedRunBudget) {
-            logger?.warn?.(`${TAG} ${formatReadBudgetObservation(obs)} (shadow-only, no enforcement)`);
+            logger?.warn?.(`${TAG} ${formatReadBudgetObservation(obs, taskId)} (shadow-only, no enforcement)`);
           }
           return content;
         } catch (err) {
@@ -587,10 +587,10 @@ export class StandaloneLLMRunner implements LLMRunner {
       this.logger?.debug?.(`${TAG} Using caller-provided tools: [${Object.keys(tools!).join(", ")}]`);
     } else if (effectiveEnableTools && params.storage) {
       const { createStorageTools } = await import("./storage-tools.js");
-      tools = createStorageTools(params.storage, params.storagePrefix ?? "", this.logger);
+      tools = createStorageTools(params.storage, params.storagePrefix ?? "", this.logger, params.taskId);
       this.logger?.debug?.(`${TAG} Using storage-backed tools (prefix="${params.storagePrefix ?? ""}")`);
     } else if (effectiveEnableTools) {
-      tools = createSandboxedTools(workspaceDir, this.logger);
+      tools = createSandboxedTools(workspaceDir, this.logger, params.taskId);
     } else {
       tools = undefined; // pure-text task — never expose any tool to the model
     }

@@ -58,10 +58,15 @@ export class ReadBudgetTracker {
   }
 }
 
-/** 稳定锚点，便于日志 grep 与后续面板统计。 */
-export function formatReadBudgetObservation(o: ReadBudgetObservation): string {
+/**
+ * 稳定锚点，便于日志 grep 与后续面板统计。
+ * taskId 2026-10-27 追加：此前 read 事件无法归属到具体 run（验收统计只能靠
+ * run_chars 回退猜边界，多 profile 并发时会错配）；追加后可直接按 run 聚合。
+ */
+export function formatReadBudgetObservation(o: ReadBudgetObservation, taskId?: string): string {
   return (
     `${READ_BUDGET_ANCHOR} path="${o.path}" chars=${o.chars} run_chars=${o.runChars} ` +
-    `over_file=${o.overFile} over_run=${o.overRun} crossed_run=${o.crossedRunBudget}`
+    `over_file=${o.overFile} over_run=${o.overRun} crossed_run=${o.crossedRunBudget} ` +
+    `task_id=${taskId ?? "(none)"}`
   );
 }

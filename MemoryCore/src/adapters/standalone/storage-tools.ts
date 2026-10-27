@@ -61,6 +61,8 @@ export function createStorageTools(
   storage: StorageAdapter,
   prefix: string,
   logger?: Logger,
+  /** 2026-10-27：run 归属，写进 read-budget 锚点（验收按 run 聚合）。 */
+  taskId?: string,
 ) {
   // S0 影子计量：一次 toolset = 一次 run，累计量随工具集生命周期归零。
   const readBudget = new ReadBudgetTracker();
@@ -85,9 +87,9 @@ export function createStorageTools(
           }
           logger?.debug?.(`${TAG} read: "${args.path}" → ${content.length} chars`);
           const obs = readBudget.observe(args.path, content.length);
-          logger?.debug?.(`${TAG} ${formatReadBudgetObservation(obs)}`);
+          logger?.debug?.(`${TAG} ${formatReadBudgetObservation(obs, taskId)}`);
           if (obs.overFile || obs.crossedRunBudget) {
-            logger?.warn?.(`${TAG} ${formatReadBudgetObservation(obs)} (shadow-only, no enforcement)`);
+            logger?.warn?.(`${TAG} ${formatReadBudgetObservation(obs, taskId)} (shadow-only, no enforcement)`);
           }
           return content;
         } catch (err) {

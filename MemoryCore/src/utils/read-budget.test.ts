@@ -47,4 +47,13 @@ describe("ReadBudgetTracker（S0 影子计量）", () => {
     expect(line).toContain("over_file=true");
     expect(line).toContain("over_run=false");
   });
+
+  // 2026-10-27：read 事件补 run 归属——验收按 taskId 聚合，不再靠 run_chars 回退猜边界。
+  it("格式化输出带 task_id；未提供时退化为 (none)", () => {
+    const tracker = new ReadBudgetTracker();
+    const withId = formatReadBudgetObservation(tracker.observe("a.md", 10), "scene-extract-1793068158533");
+    expect(withId).toContain("task_id=scene-extract-1793068158533");
+    const without = formatReadBudgetObservation(tracker.observe("b.md", 10));
+    expect(without).toContain("task_id=(none)");
+  });
 });
