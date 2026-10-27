@@ -195,9 +195,14 @@ export async function writeMemory(params: {
   const now = new Date().toISOString();
 
   let nextVersion = 0;
+  // 审计串联 id（2026-10-27）：一次 merge/update 的「删目标 + 写合并版」共享同一
+  // request_id，便于把多条审计行还原成一次合并操作。
+  const auditRequestId = `req-audit-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
+  const targetVersionById = new Map<string, number>();
   if ((decision.action === "update" || decision.action === "merge") && decision.target_ids.length > 0 && vectorStore) {
     try {
       const existing = await vectorStore.queryL1Records({ recordIds: decision.target_ids });
+      for (const row of existing) targetVersionById.set(row.record_id, row.version ?? 0);
       const maxVersion = existing.reduce((max, row) => Math.max(max, row.version ?? 0), 0);
       nextVersion = maxVersion + 1;
     } catch (err) {
@@ -318,6 +323,22 @@ export async function writeMemory(params: {
           await vectorStore.deleteL1Batch(decision.target_ids);
         }
         logger?.debug?.(`${TAG} VectorStore: deleted ${decision.target_ids.length} target record(s) for ${decision.action}`);
+        // 审计（2026-10-27，用户令「合并/删除路径进审计表」）：被合并/更新吸收掉
+        // 的目标逐条记 delete（version 取删除前的真实版本）。此前管线内部删除不进
+        // memory_audit，只能靠日志锚点回溯。
+        for (const targetId of decision.target_ids) {
+          await appendAuditSafe(
+            vectorStore,
+            {
+              record_id: targetId,
+              action: "delete",
+              version: targetVersionById.get(targetId) ?? 0,
+              requestId: auditRequestId,
+              iso: { teamId, userId, agentId, taskId },
+            },
+            logger,
+          );
+        }
       } catch (err) {
         logger?.warn?.(
           `${TAG} VectorStore delete failed for ${decision.action}: ${err instanceof Error ? err.message : String(err)}`,
@@ -369,6 +390,21 @@ export async function writeMemory(params: {
 
       const upsertOk = await vectorStore.upsertL1(record, embedding);
       logger?.debug?.(`${TAG} [vec-dual-write] upsert result=${upsertOk} id=${record.id}`);
+      // 审计（2026-10-27）：合并/更新产出的新版本记 update（version=nextVersion）。
+      // store 是新增，不写审计——审计语义只覆盖 update/delete。
+      if (upsertOk && (decision.action === "merge" || decision.action === "update")) {
+        await appendAuditSafe(
+          vectorStore,
+          {
+            record_id: record.id,
+            action: "update",
+            version: record.version ?? nextVersion,
+            requestId: auditRequestId,
+            iso: { teamId, userId, agentId, taskId },
+          },
+          logger,
+        );
+      }
     } catch (err) {
       // Vector write failure should NOT block the main JSONL write
       logger?.warn?.(
@@ -387,6 +423,46 @@ export async function writeMemory(params: {
 // ============================
 // Helpers
 // ============================
+
+/**
+ * 审计追加（2026-10-27）：memory_audit 此前只由 v2-router / chat-memory-handlers
+ * （外部请求侧）写入，管线内部 L1 merge/update 从不落审计——当日巡检实证 27 次
+ * merge 决策零对应行。此处补写 L1 的 delete（被吸收目标）与 update（合并版）。
+ * 失败只 warn、不阻塞主流程（与 v2-router recordAudit 语义一致）；store 不支持
+ * appendAudit 时自动跳过。
+ */
+async function appendAuditSafe(
+  store: IMemoryStore | undefined,
+  entry: {
+    record_id: string;
+    action: "update" | "delete";
+    version: number;
+    requestId: string;
+    iso: { teamId?: string; userId?: string; agentId?: string; taskId?: string };
+  },
+  logger?: Logger,
+): Promise<void> {
+  if (!store?.appendAudit) return;
+  try {
+    await store.appendAudit({
+      audit_id: `audit-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`,
+      record_id: entry.record_id,
+      layer: "L1",
+      action: entry.action,
+      team_id: entry.iso.teamId,
+      agent_id: entry.iso.agentId,
+      user_id: entry.iso.userId,
+      task_id: entry.iso.taskId,
+      version: entry.version,
+      updated_at_ms: Date.now(),
+      request_id: entry.requestId,
+    });
+  } catch (err) {
+    logger?.warn?.(
+      `${TAG} audit append failed (L1/${entry.action} record=${entry.record_id}): ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
 
 function formatLocalDate(d: Date): string {
   const y = d.getFullYear();
