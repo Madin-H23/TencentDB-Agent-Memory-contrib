@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -13,6 +13,17 @@ function mkdata(): string {
   mkdirSync(blocks, { recursive: true });
   writeFileSync(join(blocks, "a.md"), "# a\n");
   writeFileSync(join(blocks, "b.md"), "# b\n");
+  return dir;
+}
+
+/** 完整 profile：scene_blocks + persona.md + .metadata/{scene_index,checkpoint}.json */
+function makeCompleteData(): string {
+  const dir = mkdata();
+  writeFileSync(join(dir, "persona.md"), "# PERSONA\n");
+  const meta = join(dir, ".metadata");
+  mkdirSync(meta, { recursive: true });
+  writeFileSync(join(meta, "scene_index.json"), "[]\n");
+  writeFileSync(join(meta, "checkpoint.json"), '{"total_processed":1}\n');
   return dir;
 }
 
@@ -50,6 +61,57 @@ describe("writeSceneSnapshot（只写快照，不接 restore）", () => {
     }
   });
 
+  // 2026-10-28（用户拍板补「快照完整性」）：快照必须同时带走 persona 与
+  // .metadata/scene_index.json、checkpoint.json，否则回滚只能恢复 scene_blocks，
+  // 索引与游标会和内容分叉。元文件与场景快照同名放在 .backup/profile_meta/ 下。
+  it("快照完整性：同时带走 persona.md 与 .metadata 的 index/checkpoint，并写 manifest", async () => {
+    const dir = makeCompleteData();
+    try {
+      expect(await writeSceneSnapshot({ dataDir: dir, keep: 10, tag: "full", logger })).toBe(true);
+      const snap = snapshots(dir)[0];
+      const metaDir = join(dir, ".backup", "profile_meta", snap);
+      expect(readdirSync(metaDir).sort()).toEqual(["checkpoint.json", "manifest.json", "persona.md", "scene_index.json"]);
+      expect(readFileSync(join(metaDir, "persona.md"), "utf8")).toContain("PERSONA");
+      const manifest = JSON.parse(readFileSync(join(metaDir, "manifest.json"), "utf8"));
+      expect(manifest.snapshot).toBe(snap);
+      expect(manifest.tag).toBe("full");
+      expect(manifest.sceneFiles).toBe(2);
+      expect(manifest.metaFiles.sort()).toEqual(["checkpoint.json", "persona.md", "scene_index.json"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("完整性降级：缺少 persona/.metadata 不报错，manifest 只记录实际存在的项", async () => {
+    const dir = mkdata(); // 只有 scene_blocks
+    try {
+      expect(await writeSceneSnapshot({ dataDir: dir, keep: 10, tag: "partial", logger })).toBe(true);
+      const snap = snapshots(dir)[0];
+      const metaDir = join(dir, ".backup", "profile_meta", snap);
+      expect(readdirSync(metaDir)).toEqual(["manifest.json"]);
+      const manifest = JSON.parse(readFileSync(join(metaDir, "manifest.json"), "utf8"));
+      expect(manifest.metaFiles).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("profile_meta 与 scene_blocks 用同一 keep 裁剪", async () => {
+    const dir = makeCompleteData();
+    try {
+      for (const tag of ["t1", "t2", "t3"]) {
+        await writeSceneSnapshot({ dataDir: dir, keep: 2, tag, logger });
+      }
+      const metas = readdirSync(join(dir, ".backup", "profile_meta"));
+      expect(metas.length).toBeLessThanOrEqual(2);
+      // 每个保留的 meta 目录都能与一个场景快照目录对上名
+      const snaps = new Set(snapshots(dir));
+      for (const m of metas) expect(snaps.has(m)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("目录不存在（COS 等非本地后端）时返回 false 且不抛错", async () => {
     const dir = mkdtempSync(join(tmpdir(), "scene-snapshot-empty-"));
     try {
@@ -60,11 +122,11 @@ describe("writeSceneSnapshot（只写快照，不接 restore）", () => {
     }
   });
 
-  it("源目录为空时不产生快照（BackupManager 的既有语义）", async () => {
+  it("源目录为空时不产生快照（返回 false，与 backupDirectory 语义一致）", async () => {
     const dir = mkdtempSync(join(tmpdir(), "scene-snapshot-blank-"));
     try {
       mkdirSync(join(dir, "scene_blocks"), { recursive: true });
-      expect(await writeSceneSnapshot({ dataDir: dir, keep: 10, logger })).toBe(true);
+      expect(await writeSceneSnapshot({ dataDir: dir, keep: 10, logger })).toBe(false);
       expect(snapshots(dir).length).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });

@@ -68,23 +68,26 @@ export class BackupManager {
    * @param category  - Logical grouping (e.g. "scene_blocks")
    * @param tag       - Additional identifier (e.g. "offset42")
    * @param maxKeep   - Max backup directories to retain in this category (0 = unlimited)
+   * @returns Destination directory path, or undefined when nothing was backed up
+   *          (source missing or empty). 2026-10-27 追加返回值供调用方把关联元文件
+   *          （persona/index/checkpoint）放进同一次快照。
    */
   async backupDirectory(
     srcDir: string,
     category: string,
     tag: string,
     maxKeep: number,
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     let entries: import("node:fs").Dirent[];
     try {
       entries = await fs.readdir(srcDir, { withFileTypes: true });
     } catch {
-      return; // Source directory doesn't exist
+      return undefined; // Source directory doesn't exist
     }
 
     // Only backup regular files (skip subdirectories to avoid EISDIR errors)
     const files = entries.filter((e) => e.isFile()).map((e) => e.name);
-    if (files.length === 0) return;
+    if (files.length === 0) return undefined;
 
     const parentDir = path.join(this.backupRoot, category);
     const timestamp = formatTimestamp(new Date());
@@ -98,6 +101,7 @@ export class BackupManager {
     if (maxKeep > 0) {
       await pruneOldEntries(parentDir, maxKeep, "directory");
     }
+    return destDir;
   }
 
   /**
