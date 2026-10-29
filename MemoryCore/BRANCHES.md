@@ -45,3 +45,5 @@ node scripts/l2-score.mjs --fixtures D:/Develop/tdai-workspace/exp-l2/fixtures/s
 ## 分支交付记录
 
 （各分支完成后在此追加：分支名 | commit | 评分 | 一句话结论）
+
+- exp/l2-plan-d-summary-index | 89e6ef8（实现；交付记录另 commit） | 静态门：vitest 56 文件/506 例全绿（基线 485 只增不减，新增 21：注入 8 + 模拟 13）+ tsc 230=基线（stash 复测零新增）；模拟评测 saving%=92.59%（indexed_cost 126,630 = 索引段 4,577 + 单场景平均 122,053 vs whole_cost 1,708,737，14 场景，fixtures/scene_blocks） | 场景索引注入默认 off 零行为变化（off 输出与基线逐字节一致，sha256 兼容钉 0b06ae16…），开启（persona.sceneIndexInPrompt）时 L2 提示词追加每场景一行「path | heat | summary≤300」紧凑索引（内存 scene_index 直读、零新增 I/O），两个 L2 read 工具 description 追加按需读取引导；模拟上「索引+定向读 1 场景」比整篇读省 92.59% 字符（存量场景文件超长是收益主因，真实收益取决于模型定向读的命中率）
