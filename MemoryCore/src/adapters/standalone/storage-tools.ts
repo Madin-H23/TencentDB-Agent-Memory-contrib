@@ -69,7 +69,7 @@ export function createStorageTools(
   const readBudget = new ReadBudgetTracker();
   return {
     read: tool({
-      description: "Read the contents of a file at the given relative path.",
+      description: "Read the contents of a file at the given relative path. 配合场景索引按需读取所需场景。",
       inputSchema: jsonSchema<{ path: string }>({
         type: "object",
         properties: {
