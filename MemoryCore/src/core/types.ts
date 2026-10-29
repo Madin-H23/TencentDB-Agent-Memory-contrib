@@ -102,6 +102,13 @@ export interface LLMRunParams {
   storage?: import("./storage/adapter.js").StorageAdapter;
   /** Key prefix for storage-backed tools (sandbox boundary). Default: "" */
   storagePrefix?: string;
+  /**
+   * L2 场景块写入后像尺寸帽（方案C，exp/l2-plan-c-write-cap）：write/edit 工具
+   * 落盘前检查写入后像字符数，超帽 → 拒绝且不落盘。undefined / ≤0 = off。
+   * 只有 L2 场景抽取装配点传入（scene-extractor ← persona.sceneCharCap）；
+   * L3 persona（storagePrefix 为空）不受限，不传。缺省 off，既有调用方行为不变。
+   */
+  sceneCharCap?: number;
   /** Plugin instance ID for metric reporting (optional). */
   instanceId?: string;
   /**
