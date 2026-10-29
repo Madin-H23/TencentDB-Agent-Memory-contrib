@@ -527,6 +527,14 @@ export class SceneExtractor {
       success: true,
       emptyExtraction,
     };
+    // 2026-10-30：no-op 门控判据——「零 diff 且最终输出为空」= 疑似中途夭折
+    // （steps 撞顶/供应商挂起），pipeline-factory 据此阻断游标推进。
+    // 非枚举：与 sceneDiff 同款，避免被结构比较/序列化带出去。
+    Object.defineProperty(result, "outputChars", {
+      value: llmOutput?.length ?? 0,
+      enumerable: false,
+      configurable: false,
+    });
     Object.defineProperty(result, "sceneDiff", {
       value: sceneDiff,
       enumerable: false,

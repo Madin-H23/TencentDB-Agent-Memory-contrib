@@ -51,6 +51,7 @@ import {
   type Manifest,
 } from "./manifest.js";
 import { SceneExtractor } from "../core/scene/scene-extractor.js";
+import { nextZeroDiffEmptyOutputGate, L2_ZERO_DIFF_EMPTY_OUTPUT_MAX } from "../core/scene/noop-detect.js";
 import { PersonaTrigger } from "../core/persona/persona-trigger.js";
 import { PersonaGenerator } from "../core/persona/persona-generator.js";
 import {
@@ -77,6 +78,10 @@ import { createScopedStorageAdapter, scopeProfileStorageView, StorageAdapter } f
 import type { Logger } from "../core/types.js";
 
 const TAG = "[memory-tdai] [pipeline-factory]";
+
+// no-op 门控 strike 计数（2026-10-30）：同 group「零 diff 且空输出」连续阻断次数。
+// 进程内状态，重启归零——quarantine 只需覆盖单次病态窗口，无需持久化。
+const l2ZeroDiffEmptyOutputStrikes = new Map<string, number>();
 
 // ============================
 // L1 batch sizing constants
@@ -1069,12 +1074,36 @@ export function createL2Runner(opts: {
         )) ?? changedProfiles;
       }
       if (changedProfiles.length === 0) {
+        // 2026-10-30 no-op 门控（数据依据：16/391 轮全零 diff 仍推进游标；10-26
+        // 1,593,851ms/steps=1/output=0 的 run 实证「零 diff 且空输出」= 中途夭折，
+        // 该批记忆实际未处理）。判据：output=0 **不是** no-op（10-21 steps=20/
+        // output=0 但 updated=8），只有「零 diff 且 output=0」才阻断；有输出的
+        // 零 diff = 模型明确判无可更新，照常推进。防风暴：同 group 连续 3 次
+        // 阻断后 quarantine 放行，避免病态批次无限重投烧配额。
+        const outputChars = (extractResult as { outputChars?: number }).outputChars ?? 0;
+        const gateKey = `${ctx.userId}\u0000${ctx.agentId}\u0000${ctx.sessionId}`;
+        if (outputChars === 0) {
+          const gate = nextZeroDiffEmptyOutputGate(l2ZeroDiffEmptyOutputStrikes.get(gateKey) ?? 0);
+          if (gate.gate) {
+            l2ZeroDiffEmptyOutputStrikes.set(gateKey, gate.strikes);
+            logger.warn?.(
+              `${TAG} [L2] zero-diff + empty output → 不推进游标（疑似中途夭折，重投 ${L2_ZERO_DIFF_EMPTY_OUTPUT_MAX - gate.strikes} 次后放行）group=${gateKey.replace(/\u0000/g, "|")}`,
+            );
+            continue;
+          }
+          logger.error?.(
+            `${TAG} [L2] zero-diff + empty output ×${L2_ZERO_DIFF_EMPTY_OUTPUT_MAX} → quarantine 放行（游标照常推进，防无限重投）group=${gateKey.replace(/\u0000/g, "|")}`,
+          );
+        } else {
+          l2ZeroDiffEmptyOutputStrikes.delete(gateKey);
+        }
         logger.debug?.(`${TAG} [L2] No changed Scene profiles, skipping generation provenance`);
         await checkpoint.incrementScenesProcessed();
         await checkpoint.incrementMemoriesSincePersona(extractResult.memoriesProcessed);
         processedTotal += extractResult.memoriesProcessed;
         continue;
       }
+      l2ZeroDiffEmptyOutputStrikes.delete(`${ctx.userId}\u0000${ctx.agentId}\u0000${ctx.sessionId}`);
       const l2Identity = buildGenerationLogIdentity("l2", l2FinishedAt, changedProfiles[0]?.id);
       const l2Provenance = buildGenerationProvenance(l2Identity, l2PromptRef);
       const rootStorage = storage ?? new StorageAdapter(new LocalStorageBackend(pluginDataDir));
