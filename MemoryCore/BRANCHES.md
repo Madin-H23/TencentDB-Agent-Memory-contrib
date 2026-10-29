@@ -45,3 +45,5 @@ node scripts/l2-score.mjs --fixtures D:/Develop/tdai-workspace/exp-l2/fixtures/s
 ## 分支交付记录
 
 （各分支完成后在此追加：分支名 | commit | 评分 | 一句话结论）
+
+exp/l2-plan-c-write-cap | 5092d76 | vitest 514/514 全绿（新增 29 用例）+ tsc 230（零新增） | write/edit 后像尺寸帽（persona.sceneCharCap 默认 32000，0=off）落盘前拒绝并返回含压缩指令 hint 的结构化 JSON；prefix 空（L3 persona）与 [DELETED] 不受限，read 侧保持基线未动
