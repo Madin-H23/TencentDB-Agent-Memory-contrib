@@ -130,6 +130,12 @@ describe("storage-tools read 分段读（offset/limit）", () => {
     expect(out).toBe("三四五六\n[... omitted 6 chars, offset=3 limit=4 of 10 total ...]");
   });
 
+  it("代理对中间切分外扩到码点边界（P2 穿透）：offset=1 limit=1 返回整对 👍", async () => {
+    const tools = createStorageTools(makeStorage("a👍b🎉c"), "scene_blocks/", makeLogger());
+    const out = await (tools.read as any).execute({ path: "f.md", offset: 1, limit: 1 });
+    expect(out).toBe("👍\n[... omitted 5 chars, offset=1 limit=2 of 7 total ...]");
+  });
+
   it("大文件（200KB）分段读切片精确", async () => {
     const big = Array.from({ length: 20_000 }, (_, i) => `line-${i}`).join("\n");
     const tools = createStorageTools(makeStorage(big), "scene_blocks/", makeLogger());

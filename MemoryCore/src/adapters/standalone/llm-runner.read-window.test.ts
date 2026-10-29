@@ -196,6 +196,14 @@ describe("llm-runner 沙箱 read 分段读（offset/limit）", () => {
     });
   });
 
+  it("代理对中间切分外扩到码点边界（P2 穿透）：offset=1 limit=1 返回整对 👍", async () => {
+    await withSandbox({ "f.md": "a👍b🎉c" }, async (dir) => {
+      const read = await getReadTool(dir, makeLogger());
+      const out = await read.execute({ path: "f.md", offset: 1, limit: 1 });
+      expect(out).toBe("👍\n[... omitted 5 chars, offset=1 limit=2 of 7 total ...]");
+    });
+  });
+
   it("大文件（200KB）分段读切片精确", async () => {
     const big = Array.from({ length: 20_000 }, (_, i) => `line-${i}`).join("\n");
     await withSandbox({ "big.md": big }, async (dir) => {

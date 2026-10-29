@@ -707,6 +707,22 @@ export class StandaloneLLMRunner implements LLMRunner {
         `${TAG} run() completed: ${totalMs}ms, steps=${steps.length}, output=${text.length} chars`,
       );
 
+      // 撞顶可见性（P1-2，2026-10-30 交叉评审修复）：steps 数达到 maxIterations
+      // 且末步仍含工具调用 = stopWhen(stepCountIs) 截断了仍想继续调工具的模型，
+      // 工具循环未正常收尾（抽取结果大概率残缺）。此前只有 debug 级可见（近于
+      // 静默），升级为 warn 作为可见失败信号；既有 debug 行保留。
+      const lastStep = steps[steps.length - 1];
+      if (
+        steps.length >= maxIterations &&
+        lastStep != null &&
+        (lastStep.toolCalls?.length ?? 0) > 0
+      ) {
+        this.logger?.warn?.(
+          `${TAG} run() hit tool-iteration cap: steps=${steps.length} >= maxIterations=${maxIterations}, ` +
+          `last step finishReason=${lastStep.finishReason} still has tool calls — 工具循环被截断，结果可能残缺`,
+        );
+      }
+
       // Log each step's activity (tool calls + text output)
       for (const step of steps) {
         const calls = step.toolCalls ?? [];

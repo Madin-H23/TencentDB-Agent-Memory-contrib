@@ -15,6 +15,10 @@
  * - 越界安全：offset ≥ 总长 → 返回空串 + 标注（不抛错）。
  * - 兼容钉：无 offset/limit（默认全文）时切片 = 全文且不截断 → 不追加任何
  *   标注，返回值与旧实现逐字节一致。
+ * - 码点边界外扩（P2，2026-10-30 交叉评审修复）：切片端点落在 UTF-16 代理对
+ *   中间时向外扩到码点边界——start 左移 / end 右移，宁可多给字符也不产生孤立
+ *   代理项；空窗口（limit=0 或 offset ≥ 总长）不外扩。标注中的 offset/limit
+ *   反映外扩后实际生效的窗口。
  * - 异常输入钳制：负 offset → 0；负 limit → 0；非有限数值（NaN/Infinity）视同
  *   缺省；非整数向下取整。
  */
@@ -22,6 +26,14 @@
 export interface ReadWindowParams {
   offset?: number;
   limit?: number;
+}
+
+function isHighSurrogate(u: number): boolean {
+  return u >= 0xd800 && u <= 0xdbff;
+}
+
+function isLowSurrogate(u: number): boolean {
+  return u >= 0xdc00 && u <= 0xdfff;
 }
 
 export function formatReadWindowMarker(
@@ -49,13 +61,39 @@ export function applyReadWindow(content: string, params: ReadWindowParams = {}):
     limit = Math.max(0, total - start);
   }
 
-  const end = Math.min(total, start + limit);
+  const end0 = Math.min(total, start + limit);
+  let end = end0;
+
+  // 码点边界外扩（P2）：端点落在代理对中间（前一码元为高代理、当前为低代理）
+  // 时向外扩到码点边界——宁可多给字符也不产生孤立代理项（拆散的代理对一半会
+  // 破坏下游 JSON 序列化与字符串比对）。空窗口（limit=0 或 offset ≥ 总长）不
+  // 外扩：空切片本就不含孤立代理项。退化输入（源本身已含孤立代理）按码元原样
+  // 切片，不做也无法做配对修复。
+  if (start < end0) {
+    if (
+      start > 0 &&
+      isHighSurrogate(content.charCodeAt(start - 1)) &&
+      isLowSurrogate(content.charCodeAt(start))
+    ) {
+      start -= 1;
+    }
+    if (
+      end < total &&
+      isHighSurrogate(content.charCodeAt(end - 1)) &&
+      isLowSurrogate(content.charCodeAt(end))
+    ) {
+      end += 1;
+    }
+  }
   const slice = content.slice(start, end);
 
   const truncated = start > 0 || end < total;
   if (!truncated) return slice;
 
   const omitted = total - slice.length;
-  const marker = formatReadWindowMarker(omitted, start, limit, total);
+  // 标注反映实际生效的窗口：offset=start（码点外扩后），limit=end-start（与
+  // 切片长度一致；越界/空窗口时钳 0，与旧实现数值兼容）。
+  const effectiveLimit = Math.max(0, end - start);
+  const marker = formatReadWindowMarker(omitted, start, effectiveLimit, total);
   return slice.length > 0 ? `${slice}\n${marker}` : marker;
 }
