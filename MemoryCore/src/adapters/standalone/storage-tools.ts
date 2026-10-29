@@ -16,6 +16,7 @@ import {
   formatReadBudgetObservation,
 } from "../../utils/read-budget.js";
 import { readCacheMetrics, formatReadCacheNote } from "../../utils/read-cache-metrics.js";
+import { applyReadWindow } from "../../utils/read-window.js";
 
 const TAG = "[memory-tdai] [storage-tools]";
 
@@ -69,15 +70,18 @@ export function createStorageTools(
   const readBudget = new ReadBudgetTracker();
   return {
     read: tool({
-      description: "Read the contents of a file at the given relative path.",
-      inputSchema: jsonSchema<{ path: string }>({
+      description:
+        "Read the contents of a file at the given relative path. Supports optional offset/limit (character window) to read large files section by section.",
+      inputSchema: jsonSchema<{ path: string; offset?: number; limit?: number }>({
         type: "object",
         properties: {
           path: { type: "string", description: "Relative file path to read." },
+          offset: { type: "number", description: "Character offset to start reading from (default 0)." },
+          limit: { type: "number", description: "Maximum number of characters to return (default: read to end of file)." },
         },
         required: ["path"],
       }),
-      execute: (async (args: { path: string }) => {
+      execute: (async (args: { path: string; offset?: number; limit?: number }) => {
         const key = resolveStorageKey(prefix, args.path);
         if (!key) return JSON.stringify({ error: `Path "${args.path}" escapes workspace boundary.` });
         try {
@@ -87,15 +91,18 @@ export function createStorageTools(
             return JSON.stringify({ error: `File not found: ${args.path}` });
           }
           logger?.debug?.(`${TAG} read: "${args.path}" → ${content.length} chars`);
-          // 影子缓存计量（2026-10-27）：只统计 would-hit，仍返回全文。
+          // 影子缓存计量（2026-10-27）：只统计 would-hit，仍按全文哈希。
           const cacheNote = readCacheMetrics.note(key, content);
           logger?.debug?.(`${TAG} ${formatReadCacheNote(cacheNote, args.path, content.length, taskId)}`);
-          const obs = readBudget.observe(args.path, content.length);
+          // 方案B 分段读：无 offset/limit 时切片 = 全文且无标注（与旧实现逐字节一致）。
+          const returned = applyReadWindow(content, { offset: args.offset, limit: args.limit });
+          // read-budget 计量口径不变：observe 记实际返回的 chars（含截断标注行）。
+          const obs = readBudget.observe(args.path, returned.length);
           logger?.debug?.(`${TAG} ${formatReadBudgetObservation(obs, taskId)}`);
           if (obs.overFile || obs.crossedRunBudget) {
             logger?.warn?.(`${TAG} ${formatReadBudgetObservation(obs, taskId)} (shadow-only, no enforcement)`);
           }
-          return content;
+          return returned;
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           logger?.warn(`${TAG} read failed (key=${key}): ${msg}`);

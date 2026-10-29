@@ -85,6 +85,7 @@ function buildSceneSystemPrompt(maxScenes: number): string {
 5. **场景索引和系统配置由工程系统自动维护**，你只需专注于操作 \`.md\` 场景文件
 6. **删除文件的唯一方式**：使用 **write** 工具将文件内容写为 \`[DELETED]\` 标记（\`path\`=文件名, \`content\`=\`[DELETED]\`）。系统会自动清理带有此标记的文件。**禁止**写入空字符串（会被系统拒绝）。**禁止**用 \`[ARCHIVE]\`、\`[CONSOLIDATED]\` 等其他标记替代删除——只有 \`[DELETED]\` 标记会触发系统清理。
 7. **禁止创建报告/整合/汇总类文件**。你的输出必须是有意义的场景叙事文件（如"技术架构与工程实践.md"、"日常生活与工作节奏.md"）。禁止创建以 BATCH、REPORT、CONSOLIDATION、INTEGRATION、ARCHIVE、SUMMARY 等为前缀的文件。
+8. **大文件分段读**：**read** 支持可选 \`offset\`/\`limit\`（字符窗口，缺省读全文）。文件较长（如超过 3000 字符）时先用 \`offset\`/\`limit\` 分段预览（例如先 \`{path, offset:0, limit:1500}\`，再按需续读），返回值末尾的 \`[... omitted N chars ...]\` 标注表示还有未读内容；**edit 的 \`oldText\` 必须逐字来自已读片段**，禁止凭摘要或记忆猜测构造 oldText。
 
 ## 📛 文件命名规范（强制）
 
@@ -315,6 +316,7 @@ function buildWorkSceneSystemPrompt(maxScenes: number): string {
 5. **场景索引和系统配置由工程系统自动维护**，你只需专注于操作 \`.md\` 场景文件。
 6. **删除文件的唯一方式**：使用 **write** 工具将文件内容写为 \`[DELETED]\` 标记（\`path\`=文件名, \`content\`=\`[DELETED]\`）。系统会自动清理带有此标记的文件。**禁止**写入空字符串。**禁止**用 \`[ARCHIVE]\`、\`[CONSOLIDATED]\` 等其他标记替代删除。
 7. **禁止创建报告/整合/汇总类文件**。你的输出必须是有意义的工作场景文件，如 \`Agent-Memory-群聊抽取.md\`、\`后端接口-查询能力.md\`、\`团队记忆-SOP与禁忌.md\`。禁止创建以 BATCH、REPORT、CONSOLIDATION、INTEGRATION、ARCHIVE、SUMMARY 等为前缀的文件。
+8. **大文件分段读**：**read** 支持可选 \`offset\`/\`limit\`（字符窗口，缺省读全文）。文件较长（如超过 3000 字符）时先用 \`offset\`/\`limit\` 分段预览（例如先 \`{path, offset:0, limit:1500}\`，再按需续读），返回值末尾的 \`[... omitted N chars ...]\` 标注表示还有未读内容；**edit 的 \`oldText\` 必须逐字来自已读片段**，禁止凭摘要或记忆猜测构造 oldText。
 
 ---
 
