@@ -47,3 +47,4 @@ node scripts/l2-score.mjs --fixtures D:/Develop/tdai-workspace/exp-l2/fixtures/s
 （各分支完成后在此追加：分支名 | commit | 评分 | 一句话结论）
 
 exp/l2-plan-b-section-read | 86a681c | 静态门 PASS（vitest 556/556 全绿，tsc 230 与基线持平 ≤230）| read 支持 offset/limit 字符窗口（默认调用兼容钉 15/15 与旧实现逐字节一致）；两处 read 工具（storage-tools / llm-runner）共用 read-window 纯函数，零语义差；read-budget 计量口径不变（observe 记实际返回 chars 含标注行）；提示词两个 family 各追加第 8 条「大文件分段预览 + oldText 来自已读片段」规则，既有规则零删除。
+exp/l2-plan-b-section-read | 6d6a12c | 静态门 PASS（修复后 vitest 651/651 全绿，tsc 230 与基线持平 ≤230）| 按 2026-10-30 交叉评审修复：①P0-C 提示词 write 护栏（两 family 第 4 条改条件式「大范围重写仅当本次已完整读过该文件或文件是新建」+ 第 8 条追加「已存在且未完整读过的文件禁止 write 整体重写（仅限新建与 [DELETED]）；更新一律 edit；残缺视图宁对已读片段 edit 追加，不重构未读部分」，既有规则锚点零删除）；②P1-2 撞顶可见性（第 8 条示例 limit 1500→15000，12000~16000 区间 + 步数预算 ≤15 步 + 优先读文件尾指引；llm-runner steps≥maxIterations 且末步含工具调用 → debug 升级 warn）；③P2 码点边界（read-window 切片端点落在 UTF-16 代理对中间向外扩到码点边界，标注记实际生效窗口，"a👍b🎉c" 全 offset/limit 矩阵 63 例无孤立代理项）。待独立复跑核验。
