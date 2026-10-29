@@ -45,3 +45,5 @@ node scripts/l2-score.mjs --fixtures D:/Develop/tdai-workspace/exp-l2/fixtures/s
 ## 分支交付记录
 
 （各分支完成后在此追加：分支名 | commit | 评分 | 一句话结论）
+
+exp/l2-plan-b-section-read | 86a681c | 静态门 PASS（vitest 556/556 全绿，tsc 230 与基线持平 ≤230）| read 支持 offset/limit 字符窗口（默认调用兼容钉 15/15 与旧实现逐字节一致）；两处 read 工具（storage-tools / llm-runner）共用 read-window 纯函数，零语义差；read-budget 计量口径不变（observe 记实际返回 chars 含标注行）；提示词两个 family 各追加第 8 条「大文件分段预览 + oldText 来自已读片段」规则，既有规则零删除。
