@@ -22,6 +22,8 @@
  */
 
 import type { MemoryPromptMode } from "../../config.js";
+import { normalizeSceneSummary } from "../scene/scene-format.js";
+import type { SceneIndexEntry } from "../scene/scene-index.js";
 
 export interface SceneExtractionPromptParams {
   memoriesJson: string;
@@ -34,6 +36,12 @@ export interface SceneExtractionPromptParams {
   maxScenes: number;
   /** Prompt family for L2 scene extraction (default: chat). */
   promptMode?: MemoryPromptMode;
+  /**
+   * 方案D（exp/l2-plan-d-summary-index）：预构建的场景索引段。缺省/undefined =
+   * off，提示词与基线逐字节一致；由调用方（scene-extractor）在
+   * `persona.sceneIndexInPrompt` 开启时用内存中的 scene_index 构建传入。
+   */
+  sceneIndexSection?: string;
 }
 
 export interface SceneExtractionPromptResult {
@@ -81,10 +89,11 @@ function buildSceneSystemPrompt(maxScenes: number): string {
 1. **所有文件操作使用相对文件名**（如 \`技术研究-Rust学习.md\`），当前工作目录已设为场景文件目录
 2. **read 只能读取用户消息中"已有场景文件清单"列出的文件**，禁止猜测或编造不在清单中的文件名
 3. **创建新场景文件时**，使用 **write** 工具。参数：\`path\`=文件名, \`content\`=完整内容
-4. **局部更新场景文件**：使用 **edit** 工具。参数：\`path\`=文件名, \`edits\`=[{\`oldText\`: 旧内容, \`newText\`: 新内容}]。对于大范围重写或结构性变更，建议使用 **read** + **write** 整体重写。
+4. **局部更新场景文件**：使用 **edit** 工具。参数：\`path\`=文件名, \`edits\`=[{\`oldText\`: 旧内容, \`newText\`: 新内容}]。大范围重写仅当**本次已完整读过该文件**（或文件是新建）才允许 read + write 整体重写。
 5. **场景索引和系统配置由工程系统自动维护**，你只需专注于操作 \`.md\` 场景文件
 6. **删除文件的唯一方式**：使用 **write** 工具将文件内容写为 \`[DELETED]\` 标记（\`path\`=文件名, \`content\`=\`[DELETED]\`）。系统会自动清理带有此标记的文件。**禁止**写入空字符串（会被系统拒绝）。**禁止**用 \`[ARCHIVE]\`、\`[CONSOLIDATED]\` 等其他标记替代删除——只有 \`[DELETED]\` 标记会触发系统清理。
 7. **禁止创建报告/整合/汇总类文件**。你的输出必须是有意义的场景叙事文件（如"技术架构与工程实践.md"、"日常生活与工作节奏.md"）。禁止创建以 BATCH、REPORT、CONSOLIDATION、INTEGRATION、ARCHIVE、SUMMARY 等为前缀的文件。
+8. **大文件分段读**：**read** 支持可选 \`offset\`/\`limit\`（字符窗口，缺省读全文）。文件较长（如超过 3000 字符）时先用 \`offset\`/\`limit\` 分段预览（例如先 \`{path, offset:0, limit:15000}\`，单段 limit 建议 12000~16000，按文件规模选 limit（总长/limit≈步数预算，≤15 步），优先读文件尾最新批次，再按需续读），返回值末尾的 \`[... omitted N chars ...]\` 标注表示还有未读内容；**edit 的 \`oldText\` 必须逐字来自已读片段**，禁止凭摘要或记忆猜测构造 oldText。已存在且未完整读过的文件**禁止**用 write 整体重写（write 仅限新建文件与 \`[DELETED]\` 标记）；更新一律 edit，newText 只含新增/替换部分；分段读覆盖不了时，宁可只对已读片段做 edit 追加并如实说明，不得凭残缺视图重构未读部分。
 
 ## 📛 文件命名规范（强制）
 
@@ -311,10 +320,11 @@ function buildWorkSceneSystemPrompt(maxScenes: number): string {
 1. **所有文件操作使用相对文件名**（如 \`Agent-Memory-群聊抽取.md\`），当前工作目录已设为场景文件目录。
 2. **read 只能读取用户消息中"已有场景文件清单"列出的文件**，禁止猜测或编造不在清单中的文件名。
 3. **创建新场景文件时**，使用 **write** 工具。参数：\`path\`=文件名, \`content\`=完整内容。
-4. **局部更新场景文件**：使用 **edit** 工具。参数：\`path\`=文件名, \`edits\`=[{\`oldText\`: 旧内容, \`newText\`: 新内容}]。对于大范围重写或结构性变更，建议使用 **read** + **write** 整体重写。
+4. **局部更新场景文件**：使用 **edit** 工具。参数：\`path\`=文件名, \`edits\`=[{\`oldText\`: 旧内容, \`newText\`: 新内容}]。大范围重写仅当**本次已完整读过该文件**（或文件是新建）才允许 read + write 整体重写。
 5. **场景索引和系统配置由工程系统自动维护**，你只需专注于操作 \`.md\` 场景文件。
 6. **删除文件的唯一方式**：使用 **write** 工具将文件内容写为 \`[DELETED]\` 标记（\`path\`=文件名, \`content\`=\`[DELETED]\`）。系统会自动清理带有此标记的文件。**禁止**写入空字符串。**禁止**用 \`[ARCHIVE]\`、\`[CONSOLIDATED]\` 等其他标记替代删除。
 7. **禁止创建报告/整合/汇总类文件**。你的输出必须是有意义的工作场景文件，如 \`Agent-Memory-群聊抽取.md\`、\`后端接口-查询能力.md\`、\`团队记忆-SOP与禁忌.md\`。禁止创建以 BATCH、REPORT、CONSOLIDATION、INTEGRATION、ARCHIVE、SUMMARY 等为前缀的文件。
+8. **大文件分段读**：**read** 支持可选 \`offset\`/\`limit\`（字符窗口，缺省读全文）。文件较长（如超过 3000 字符）时先用 \`offset\`/\`limit\` 分段预览（例如先 \`{path, offset:0, limit:15000}\`，单段 limit 建议 12000~16000，按文件规模选 limit（总长/limit≈步数预算，≤15 步），优先读文件尾最新批次，再按需续读），返回值末尾的 \`[... omitted N chars ...]\` 标注表示还有未读内容；**edit 的 \`oldText\` 必须逐字来自已读片段**，禁止凭摘要或记忆猜测构造 oldText。已存在且未完整读过的文件**禁止**用 write 整体重写（write 仅限新建文件与 \`[DELETED]\` 标记）；更新一律 edit，newText 只含新增/替换部分；分段读覆盖不了时，宁可只对已读片段做 edit 追加并如实说明，不得凭残缺视图重构未读部分。
 
 ---
 
@@ -533,6 +543,29 @@ function getSceneSystemPrompt(maxScenes: number, promptMode: MemoryPromptMode = 
 // User Prompt builder (dynamic data)
 // ============================
 
+/** 方案D：场景索引段标题（模拟评测脚本 scripts/l2-index-sim.mjs 按同款格式计量）。 */
+export const SCENE_INDEX_HEADER = "### 🗂️ 场景索引（path | heat | summary）";
+
+/**
+ * 方案D：用 scene_index（内存已有，零新增 I/O）构建「每场景一行」的紧凑索引段。
+ *
+ * - 摘要复用 normalizeSceneSummary（PII 脱敏 + SCENE_SUMMARY_CHAR_BUDGET=300 截断），
+ *   不新造摘要；索引条目本身来自 syncSceneIndex（已规范化），此处再过一遍是幂等的，
+ *   同时兜底 rowfs 之外直接读 JSON 的路径。
+ * - 空索引返回 undefined：不产生空段，调用方无需再做条件判断。
+ */
+export function buildSceneIndexSection(entries: SceneIndexEntry[]): string | undefined {
+  if (!entries || entries.length === 0) return undefined;
+  const lines: string[] = [
+    SCENE_INDEX_HEADER,
+    "配合场景索引按需读取所需场景，无需读取全部场景全文。",
+  ];
+  for (const entry of entries) {
+    lines.push(`- ${entry.filename} | heat=${entry.heat} | ${normalizeSceneSummary(entry.summary)}`);
+  }
+  return lines.join("\n");
+}
+
 export function buildSceneExtractionPrompt(params: SceneExtractionPromptParams): SceneExtractionPromptResult {
   const {
     memoriesJson,
@@ -542,6 +575,7 @@ export function buildSceneExtractionPrompt(params: SceneExtractionPromptParams):
     existingSceneFiles,
     maxScenes,
     promptMode = "chat",
+    sceneIndexSection,
   } = params;
 
   const warningSection = sceneCountWarning
@@ -551,6 +585,10 @@ export function buildSceneExtractionPrompt(params: SceneExtractionPromptParams):
   const fileListSection = existingSceneFiles && existingSceneFiles.length > 0
     ? `### 📁 已有场景文件清单（仅以下文件可 read）\n${existingSceneFiles.map((f) => `- \`${f}\``).join("\n")}\n`
     : `### 📁 已有场景文件清单\n（当前无已有场景文件）\n`;
+
+  // 方案D：off（undefined）时条件段为空串，模板逐字节回到基线；on 时在时间戳
+  // 与文件清单之间追加索引段。
+  const sceneIndexBlock = sceneIndexSection ? `\n${sceneIndexSection}\n` : "";
 
   const userPrompt = `**输出语言**：场景文件内容使用下方 New Memories List 中记忆的主导语言。
 ${warningSection}
@@ -562,7 +600,7 @@ ${sceneSummaries}
 
 ### 3️⃣ Current Timestamp
 ${currentTimestamp}
-
+${sceneIndexBlock}
 ${fileListSection}`;
 
   return {

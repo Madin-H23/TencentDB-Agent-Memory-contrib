@@ -28,6 +28,8 @@ import {
   formatReadBudgetObservation,
 } from "../../utils/read-budget.js";
 import { readCacheMetrics, formatReadCacheNote } from "../../utils/read-cache-metrics.js";
+import { applyReadWindow } from "../../utils/read-window.js";
+import { checkSceneCharCap } from "../../utils/scene-char-cap.js";
 import type {
   LLMRunner,
   LLMRunParams,
@@ -283,34 +285,43 @@ function resolveSandboxedPath(workspaceDir: string, relativePath: string): strin
 // Tool definitions (Vercel AI SDK `tool()` format)
 // ============================
 
-function createSandboxedTools(workspaceDir: string, logger?: Logger, taskId?: string) {
+function createSandboxedTools(workspaceDir: string, logger?: Logger, taskId?: string, sceneCharCap?: number) {
   // S0 影子计量：一次 toolset = 一次 run，累计量随工具集生命周期归零。
   const readBudget = new ReadBudgetTracker();
+  // 方案C（exp/l2-plan-c-write-cap）：写入后像尺寸帽（字符数，≤0/undefined=off）。
+  // 作用域由调用方决定 —— 只有 L2 场景抽取装配点传 sceneCharCap，L3 persona 不传（不受限）。
+  const effectiveCharCap = sceneCharCap ?? 0;
   return {
     read: tool({
-      description: "Read the contents of a file at the given relative path.",
-      inputSchema: jsonSchema<{ path: string }>({
+      description:
+        "Read the contents of a file at the given relative path. Supports optional offset/limit (character window) to read large files section by section. 配合场景索引按需读取所需场景。",
+      inputSchema: jsonSchema<{ path: string; offset?: number; limit?: number }>({
         type: "object",
         properties: {
           path: { type: "string", description: "Relative file path to read." },
+          offset: { type: "number", description: "Character offset to start reading from (default 0)." },
+          limit: { type: "number", description: "Maximum number of characters to return (default: read to end of file)." },
         },
         required: ["path"],
       }),
-      execute: (async (args: { path: string }) => {
+      execute: (async (args: { path: string; offset?: number; limit?: number }) => {
         const resolved = resolveSandboxedPath(workspaceDir, args.path);
         if (!resolved) return JSON.stringify({ error: `Path "${args.path}" escapes workspace boundary.` });
         try {
           const content = await fsPromises.readFile(resolved, "utf-8");
           logger?.debug?.(`${TAG} read: "${args.path}" → ${content.length} chars`);
-          // 影子缓存计量（2026-10-27）：只统计 would-hit，仍返回全文。
+          // 影子缓存计量（2026-10-27）：只统计 would-hit，仍按全文哈希。
           const cacheNote = readCacheMetrics.note(resolved, content);
           logger?.debug?.(`${TAG} ${formatReadCacheNote(cacheNote, args.path, content.length, taskId)}`);
-          const obs = readBudget.observe(args.path, content.length);
+          // 方案B 分段读：无 offset/limit 时切片 = 全文且无标注（与旧实现逐字节一致）。
+          const returned = applyReadWindow(content, { offset: args.offset, limit: args.limit });
+          // read-budget 计量口径不变：observe 记实际返回的 chars（含截断标注行）。
+          const obs = readBudget.observe(args.path, returned.length);
           logger?.debug?.(`${TAG} ${formatReadBudgetObservation(obs, taskId)}`);
           if (obs.overFile || obs.crossedRunBudget) {
             logger?.warn?.(`${TAG} ${formatReadBudgetObservation(obs, taskId)} (shadow-only, no enforcement)`);
           }
-          return content;
+          return returned;
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           logger?.warn?.(`${TAG} read failed: ${msg}`);
@@ -332,6 +343,16 @@ function createSandboxedTools(workspaceDir: string, logger?: Logger, taskId?: st
       execute: (async (args: { path: string; content: string }) => {
         const resolved = resolveSandboxedPath(workspaceDir, args.path);
         if (!resolved) return JSON.stringify({ error: `Path "${args.path}" escapes workspace boundary.` });
+        // 方案C：写入后像尺寸帽 —— 超帽拒绝且不落盘。"[DELETED]" 删除标记不受限。
+        const capRejection = args.content === "[DELETED]"
+          ? null
+          : checkSceneCharCap(args.content, effectiveCharCap);
+        if (capRejection) {
+          logger?.warn?.(
+            `${TAG} write rejected (over_scene_char_cap): "${args.path}" ${capRejection.chars}/${capRejection.cap} chars`,
+          );
+          return JSON.stringify(capRejection);
+        }
         try {
           await fsPromises.mkdir(path.dirname(resolved), { recursive: true });
           await fsPromises.writeFile(resolved, args.content, "utf-8");
@@ -382,6 +403,14 @@ function createSandboxedTools(workspaceDir: string, logger?: Logger, taskId?: st
             // special patterns -- `$'` (matched substring's suffix) duplicates the rest
             // of the file on every edit, growing scene blocks exponentially.
             content = content.replace(edit.oldText, () => edit.newText);
+          }
+          // 方案C：edit 后像（应用全部替换后的完整内容）尺寸帽 —— 超帽拒绝且不落盘。
+          const capRejection = checkSceneCharCap(content, effectiveCharCap);
+          if (capRejection) {
+            logger?.warn?.(
+              `${TAG} edit rejected (over_scene_char_cap): "${args.path}" ${capRejection.chars}/${capRejection.cap} chars`,
+            );
+            return JSON.stringify(capRejection);
           }
           await fsPromises.writeFile(resolved, content, "utf-8");
           logger?.debug?.(
@@ -591,10 +620,11 @@ export class StandaloneLLMRunner implements LLMRunner {
       this.logger?.debug?.(`${TAG} Using caller-provided tools: [${Object.keys(tools!).join(", ")}]`);
     } else if (effectiveEnableTools && params.storage) {
       const { createStorageTools } = await import("./storage-tools.js");
-      tools = createStorageTools(params.storage, params.storagePrefix ?? "", this.logger, params.taskId);
+      // 方案C：sceneCharCap 经 LLMRunParams 透传；storage 工厂内按 prefix 定作用域。
+      tools = createStorageTools(params.storage, params.storagePrefix ?? "", this.logger, params.taskId, params.sceneCharCap);
       this.logger?.debug?.(`${TAG} Using storage-backed tools (prefix="${params.storagePrefix ?? ""}")`);
     } else if (effectiveEnableTools) {
-      tools = createSandboxedTools(workspaceDir, this.logger, params.taskId);
+      tools = createSandboxedTools(workspaceDir, this.logger, params.taskId, params.sceneCharCap);
     } else {
       tools = undefined; // pure-text task — never expose any tool to the model
     }
@@ -699,6 +729,22 @@ export class StandaloneLLMRunner implements LLMRunner {
       this.logger?.debug?.(
         `${TAG} run() completed: ${totalMs}ms, steps=${steps.length}, output=${text.length} chars`,
       );
+
+      // 撞顶可见性（P1-2，2026-10-30 交叉评审修复）：steps 数达到 maxIterations
+      // 且末步仍含工具调用 = stopWhen(stepCountIs) 截断了仍想继续调工具的模型，
+      // 工具循环未正常收尾（抽取结果大概率残缺）。此前只有 debug 级可见（近于
+      // 静默），升级为 warn 作为可见失败信号；既有 debug 行保留。
+      const lastStep = steps[steps.length - 1];
+      if (
+        steps.length >= maxIterations &&
+        lastStep != null &&
+        (lastStep.toolCalls?.length ?? 0) > 0
+      ) {
+        this.logger?.warn?.(
+          `${TAG} run() hit tool-iteration cap: steps=${steps.length} >= maxIterations=${maxIterations}, ` +
+          `last step finishReason=${lastStep.finishReason} still has tool calls — 工具循环被截断，结果可能残缺`,
+        );
+      }
 
       // Log each step's activity (tool calls + text output)
       for (const step of steps) {

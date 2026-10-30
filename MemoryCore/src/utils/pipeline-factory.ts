@@ -910,6 +910,7 @@ export function createL2Runner(opts: {
         config: openclawConfig!,
         model: cfg.persona.model,
         promptMode: cfg.persona.promptMode,
+        sceneIndexInPrompt: cfg.persona.sceneIndexInPrompt,
         memoryPrompt: l2Prompts.get(memoryPromptResolveKey({
           teamId: ctx.teamId,
           agentId: ctx.agentId,
@@ -917,6 +918,10 @@ export function createL2Runner(opts: {
         })),
         maxScenes: cfg.persona.maxScenes,
         sceneBackupCount: cfg.persona.sceneBackupCount,
+        // 方案C（exp/l2-plan-c-write-cap）：场景块写入后像尺寸帽（persona.sceneCharCap，
+        // 默认 32000，0=off）。经 LLMRunParams 传到 write/edit 工具工厂；只对场景块
+        // 前缀生效，L3 persona 不受限。
+        sceneCharCap: cfg.persona?.sceneCharCap,
         // L2 场景抽取超时（2026-10-21）：此前工厂**不传** timeoutMs → 抽取器内部
         // 回落硬编码 300s（scene-extractor.ts `opts.timeoutMs ?? 300_000`）并以该
         // 值覆盖层配置 ⇒ yaml 的 llm.layers.l2.timeoutMs（600000）对场景抽取

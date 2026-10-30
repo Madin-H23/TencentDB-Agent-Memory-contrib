@@ -113,6 +113,18 @@ export interface PersonaConfig {
    * 限量后单轮提示词约 N×390 字符；yaml `persona.maxL2Batch` 可随时调。
    */
   maxL2Batch: number;
+  /**
+   * 方案D（exp/l2-plan-d-summary-index）：L2 提示词追加场景索引段
+   * （每场景一行 path | heat | summary≤300）。默认 false=off，行为与基线零差异。
+   */
+  sceneIndexInPrompt: boolean;
+  /**
+   * L2 场景块写入后像尺寸帽（方案C，exp/l2-plan-c-write-cap，default: 32000，0=off）。
+   * L2 write/edit 工具落盘前检查写入后像（write 的 content / edit 应用替换后的完整内容）
+   * 字符数，超帽 → 拒绝且不落盘，返回含压缩指令 hint 的结构化 JSON。
+   * 只对场景块前缀（storagePrefix 非空）生效；L3 persona（prefix 为空）不受限。
+   */
+  sceneCharCap: number;
   /** LLM model for persona generation, format: "provider/model" (falls back to OpenClaw default model when omitted) */
   model?: string;
   /** Prompt family for L2/L3 prompts (default: chat; code prompts will be wired as they are added). */
@@ -737,6 +749,9 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       backupCount: num(personaGroup, "backupCount") ?? 3,
       sceneBackupCount: num(personaGroup, "sceneBackupCount") ?? 10,
       maxL2Batch: num(personaGroup, "maxL2Batch") ?? 50,
+      sceneIndexInPrompt: bool(personaGroup, "sceneIndexInPrompt") ?? false,
+      // 方案C（exp/l2-plan-c-write-cap）：显式 0=off 必须原样通过（num() 只滤非有限数值，?? 不吃 0）。
+      sceneCharCap: num(personaGroup, "sceneCharCap") ?? 32_000,
       model: optStr(personaGroup, "model"),
       promptMode: normalizePromptMode(str(personaGroup, "promptMode"), globalPromptMode),
       triggerMode,

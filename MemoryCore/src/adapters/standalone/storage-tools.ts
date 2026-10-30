@@ -16,6 +16,8 @@ import {
   formatReadBudgetObservation,
 } from "../../utils/read-budget.js";
 import { readCacheMetrics, formatReadCacheNote } from "../../utils/read-cache-metrics.js";
+import { applyReadWindow } from "../../utils/read-window.js";
+import { checkSceneCharCap } from "../../utils/scene-char-cap.js";
 
 const TAG = "[memory-tdai] [storage-tools]";
 
@@ -64,20 +66,31 @@ export function createStorageTools(
   logger?: Logger,
   /** 2026-10-27：run 归属，写进 read-budget 锚点（验收按 run 聚合）。 */
   taskId?: string,
+  /**
+   * 方案C（exp/l2-plan-c-write-cap）：L2 场景块写入后像尺寸帽（字符数，≤0/undefined=off）。
+   * 只对场景块前缀（prefix 非空）生效；L3 persona（prefix 为空）不受限 —— 作用域在工厂
+   * 内定死，调用方传错也不会殃及 persona。
+   */
+  sceneCharCap?: number,
 ) {
   // S0 影子计量：一次 toolset = 一次 run，累计量随工具集生命周期归零。
   const readBudget = new ReadBudgetTracker();
+  // 方案C：帽作用域 = 非空前缀。空 prefix（L3 persona）→ 0（off）。
+  const effectiveCharCap = prefix ? (sceneCharCap ?? 0) : 0;
   return {
     read: tool({
-      description: "Read the contents of a file at the given relative path.",
-      inputSchema: jsonSchema<{ path: string }>({
+      description:
+        "Read the contents of a file at the given relative path. Supports optional offset/limit (character window) to read large files section by section. 配合场景索引按需读取所需场景。",
+      inputSchema: jsonSchema<{ path: string; offset?: number; limit?: number }>({
         type: "object",
         properties: {
           path: { type: "string", description: "Relative file path to read." },
+          offset: { type: "number", description: "Character offset to start reading from (default 0)." },
+          limit: { type: "number", description: "Maximum number of characters to return (default: read to end of file)." },
         },
         required: ["path"],
       }),
-      execute: (async (args: { path: string }) => {
+      execute: (async (args: { path: string; offset?: number; limit?: number }) => {
         const key = resolveStorageKey(prefix, args.path);
         if (!key) return JSON.stringify({ error: `Path "${args.path}" escapes workspace boundary.` });
         try {
@@ -87,15 +100,18 @@ export function createStorageTools(
             return JSON.stringify({ error: `File not found: ${args.path}` });
           }
           logger?.debug?.(`${TAG} read: "${args.path}" → ${content.length} chars`);
-          // 影子缓存计量（2026-10-27）：只统计 would-hit，仍返回全文。
+          // 影子缓存计量（2026-10-27）：只统计 would-hit，仍按全文哈希。
           const cacheNote = readCacheMetrics.note(key, content);
           logger?.debug?.(`${TAG} ${formatReadCacheNote(cacheNote, args.path, content.length, taskId)}`);
-          const obs = readBudget.observe(args.path, content.length);
+          // 方案B 分段读：无 offset/limit 时切片 = 全文且无标注（与旧实现逐字节一致）。
+          const returned = applyReadWindow(content, { offset: args.offset, limit: args.limit });
+          // read-budget 计量口径不变：observe 记实际返回的 chars（含截断标注行）。
+          const obs = readBudget.observe(args.path, returned.length);
           logger?.debug?.(`${TAG} ${formatReadBudgetObservation(obs, taskId)}`);
           if (obs.overFile || obs.crossedRunBudget) {
             logger?.warn?.(`${TAG} ${formatReadBudgetObservation(obs, taskId)} (shadow-only, no enforcement)`);
           }
-          return content;
+          return returned;
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           logger?.warn(`${TAG} read failed (key=${key}): ${msg}`);
@@ -117,6 +133,16 @@ export function createStorageTools(
       execute: (async (args: { path: string; content: string }) => {
         const key = resolveStorageKey(prefix, args.path);
         if (!key) return JSON.stringify({ error: `Path "${args.path}" escapes workspace boundary.` });
+        // 方案C：写入后像尺寸帽 —— 超帽拒绝且不落盘。"[DELETED]" 删除标记不受限。
+        const capRejection = args.content === "[DELETED]"
+          ? null
+          : checkSceneCharCap(args.content, effectiveCharCap);
+        if (capRejection) {
+          logger?.warn(
+            `${TAG} write rejected (over_scene_char_cap): "${args.path}" ${capRejection.chars}/${capRejection.cap} chars`,
+          );
+          return JSON.stringify(capRejection);
+        }
         try {
           await storage.writeFile(key, args.content);
           logger?.debug?.(`${TAG} write: "${args.path}" → ${Buffer.byteLength(args.content, "utf8")} bytes`);
@@ -171,6 +197,14 @@ export function createStorageTools(
             // special patterns -- `$'` (matched substring's suffix) duplicates the rest
             // of the file on every edit, growing scene blocks exponentially.
             content = content.replace(edit.oldText, () => edit.newText);
+          }
+          // 方案C：edit 后像（应用全部替换后的完整内容）尺寸帽 —— 超帽拒绝且不落盘。
+          const capRejection = checkSceneCharCap(content, effectiveCharCap);
+          if (capRejection) {
+            logger?.warn(
+              `${TAG} edit rejected (over_scene_char_cap): "${args.path}" ${capRejection.chars}/${capRejection.cap} chars`,
+            );
+            return JSON.stringify(capRejection);
           }
           await storage.writeFile(key, content);
           logger?.debug?.(
