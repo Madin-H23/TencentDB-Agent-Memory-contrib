@@ -22,6 +22,8 @@
  */
 
 import type { MemoryPromptMode } from "../../config.js";
+import { normalizeSceneSummary } from "../scene/scene-format.js";
+import type { SceneIndexEntry } from "../scene/scene-index.js";
 
 export interface SceneExtractionPromptParams {
   memoriesJson: string;
@@ -34,6 +36,12 @@ export interface SceneExtractionPromptParams {
   maxScenes: number;
   /** Prompt family for L2 scene extraction (default: chat). */
   promptMode?: MemoryPromptMode;
+  /**
+   * 方案D（exp/l2-plan-d-summary-index）：预构建的场景索引段。缺省/undefined =
+   * off，提示词与基线逐字节一致；由调用方（scene-extractor）在
+   * `persona.sceneIndexInPrompt` 开启时用内存中的 scene_index 构建传入。
+   */
+  sceneIndexSection?: string;
 }
 
 export interface SceneExtractionPromptResult {
@@ -535,6 +543,29 @@ function getSceneSystemPrompt(maxScenes: number, promptMode: MemoryPromptMode = 
 // User Prompt builder (dynamic data)
 // ============================
 
+/** 方案D：场景索引段标题（模拟评测脚本 scripts/l2-index-sim.mjs 按同款格式计量）。 */
+export const SCENE_INDEX_HEADER = "### 🗂️ 场景索引（path | heat | summary）";
+
+/**
+ * 方案D：用 scene_index（内存已有，零新增 I/O）构建「每场景一行」的紧凑索引段。
+ *
+ * - 摘要复用 normalizeSceneSummary（PII 脱敏 + SCENE_SUMMARY_CHAR_BUDGET=300 截断），
+ *   不新造摘要；索引条目本身来自 syncSceneIndex（已规范化），此处再过一遍是幂等的，
+ *   同时兜底 rowfs 之外直接读 JSON 的路径。
+ * - 空索引返回 undefined：不产生空段，调用方无需再做条件判断。
+ */
+export function buildSceneIndexSection(entries: SceneIndexEntry[]): string | undefined {
+  if (!entries || entries.length === 0) return undefined;
+  const lines: string[] = [
+    SCENE_INDEX_HEADER,
+    "配合场景索引按需读取所需场景，无需读取全部场景全文。",
+  ];
+  for (const entry of entries) {
+    lines.push(`- ${entry.filename} | heat=${entry.heat} | ${normalizeSceneSummary(entry.summary)}`);
+  }
+  return lines.join("\n");
+}
+
 export function buildSceneExtractionPrompt(params: SceneExtractionPromptParams): SceneExtractionPromptResult {
   const {
     memoriesJson,
@@ -544,6 +575,7 @@ export function buildSceneExtractionPrompt(params: SceneExtractionPromptParams):
     existingSceneFiles,
     maxScenes,
     promptMode = "chat",
+    sceneIndexSection,
   } = params;
 
   const warningSection = sceneCountWarning
@@ -553,6 +585,10 @@ export function buildSceneExtractionPrompt(params: SceneExtractionPromptParams):
   const fileListSection = existingSceneFiles && existingSceneFiles.length > 0
     ? `### 📁 已有场景文件清单（仅以下文件可 read）\n${existingSceneFiles.map((f) => `- \`${f}\``).join("\n")}\n`
     : `### 📁 已有场景文件清单\n（当前无已有场景文件）\n`;
+
+  // 方案D：off（undefined）时条件段为空串，模板逐字节回到基线；on 时在时间戳
+  // 与文件清单之间追加索引段。
+  const sceneIndexBlock = sceneIndexSection ? `\n${sceneIndexSection}\n` : "";
 
   const userPrompt = `**输出语言**：场景文件内容使用下方 New Memories List 中记忆的主导语言。
 ${warningSection}
@@ -564,7 +600,7 @@ ${sceneSummaries}
 
 ### 3️⃣ Current Timestamp
 ${currentTimestamp}
-
+${sceneIndexBlock}
 ${fileListSection}`;
 
   return {

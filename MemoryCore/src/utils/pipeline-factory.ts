@@ -910,6 +910,7 @@ export function createL2Runner(opts: {
         config: openclawConfig!,
         model: cfg.persona.model,
         promptMode: cfg.persona.promptMode,
+        sceneIndexInPrompt: cfg.persona.sceneIndexInPrompt,
         memoryPrompt: l2Prompts.get(memoryPromptResolveKey({
           teamId: ctx.teamId,
           agentId: ctx.agentId,

@@ -113,6 +113,11 @@ export interface PersonaConfig {
    * 限量后单轮提示词约 N×390 字符；yaml `persona.maxL2Batch` 可随时调。
    */
   maxL2Batch: number;
+  /**
+   * 方案D（exp/l2-plan-d-summary-index）：L2 提示词追加场景索引段
+   * （每场景一行 path | heat | summary≤300）。默认 false=off，行为与基线零差异。
+   */
+  sceneIndexInPrompt: boolean;
   /** LLM model for persona generation, format: "provider/model" (falls back to OpenClaw default model when omitted) */
   model?: string;
   /** Prompt family for L2/L3 prompts (default: chat; code prompts will be wired as they are added). */
@@ -737,6 +742,7 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       backupCount: num(personaGroup, "backupCount") ?? 3,
       sceneBackupCount: num(personaGroup, "sceneBackupCount") ?? 10,
       maxL2Batch: num(personaGroup, "maxL2Batch") ?? 50,
+      sceneIndexInPrompt: bool(personaGroup, "sceneIndexInPrompt") ?? false,
       model: optStr(personaGroup, "model"),
       promptMode: normalizePromptMode(str(personaGroup, "promptMode"), globalPromptMode),
       triggerMode,

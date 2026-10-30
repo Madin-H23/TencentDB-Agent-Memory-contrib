@@ -27,7 +27,7 @@ import { normalizeSceneFilenames } from "./filename-normalizer.js";
 import { isNoopSceneDiff } from "./noop-detect.js";
 import { writeSceneSnapshot } from "./scene-snapshot.js";
 import type { MemoryPromptMode } from "../../config.js";
-import { buildSceneExtractionPrompt } from "../prompts/scene-extraction.js";
+import { buildSceneExtractionPrompt, buildSceneIndexSection } from "../prompts/scene-extraction.js";
 import { report } from "../report/reporter.js";
 import { reportL2LatencyMetrics } from "../report/metric-tracking-l2-latency.js";
 import type { LLMRunner, Logger, TraceContext } from "../types.js";
@@ -81,6 +81,12 @@ export interface SceneExtractorOptions {
   maxScenes?: number;
   /** Prompt family for L2 scene extraction (default: chat). */
   promptMode?: MemoryPromptMode;
+  /**
+   * 方案D（exp/l2-plan-d-summary-index）：在 L2 提示词追加场景索引段
+   * （每场景一行 path | heat | summary，数据来自内存中的 scene_index，零新增 I/O）。
+   * 默认 false=off，提示词与基线逐字节一致；yaml `persona.sceneIndexInPrompt` 控制。
+   */
+  sceneIndexInPrompt?: boolean;
   /** Resolved custom strategy. Undefined preserves the current system prompt exactly. */
   memoryPrompt?: ResolvedMemoryPrompt;
   sceneBackupCount?: number;
@@ -129,6 +135,7 @@ export class SceneExtractor {
   private maxScenes: number;
   private sceneBackupCount: number;
   private promptMode: MemoryPromptMode;
+  private sceneIndexInPrompt: boolean;
   private memoryPrompt: ResolvedMemoryPrompt | undefined;
   private timeoutMs: number;
   private logger: ExtractorLogger | undefined;
@@ -140,6 +147,7 @@ export class SceneExtractor {
     this.dataDir = opts.dataDir;
     this.maxScenes = opts.maxScenes ?? 15;
     this.promptMode = opts.promptMode ?? "chat";
+    this.sceneIndexInPrompt = opts.sceneIndexInPrompt ?? false;
     this.memoryPrompt = opts.memoryPrompt;
     this.sceneBackupCount = opts.sceneBackupCount ?? 10;
     this.timeoutMs = opts.timeoutMs ?? 300_000; // 5 min — LLM may do multiple tool calls
@@ -219,6 +227,13 @@ export class SceneExtractor {
     const { summaries: sceneSummaries, filenames: existingSceneFiles } =
       this.buildSceneSummaries(index);
 
+    // 方案D：开关开启时用内存中的 scene_index 构建紧凑索引段（零新增 I/O）；
+    // 空索引/开关关闭均不注入。
+    const sceneIndexSection = this.sceneIndexInPrompt ? buildSceneIndexSection(index) : undefined;
+    if (sceneIndexSection) {
+      this.logger?.debug?.(`${TAG} extract() scene index section injected: ${sceneIndexSection.length} chars`);
+    }
+
     // Build scene count warning (tiered system)
     let sceneCountWarning: string | undefined;
     const sceneCount = index.length;
@@ -275,6 +290,7 @@ export class SceneExtractor {
       existingSceneFiles,
       maxScenes: this.maxScenes,
       promptMode: this.promptMode,
+      sceneIndexSection,
     });
     const systemPrompt = composeMemorySystemPrompt(baseSystemPrompt, this.memoryPrompt);
     this.logger?.debug?.(`${TAG} extract() prompt built: ${userPrompt.length} chars (${Date.now() - promptStartMs}ms)`);

@@ -71,7 +71,7 @@ export function createStorageTools(
   return {
     read: tool({
       description:
-        "Read the contents of a file at the given relative path. Supports optional offset/limit (character window) to read large files section by section.",
+        "Read the contents of a file at the given relative path. Supports optional offset/limit (character window) to read large files section by section. 配合场景索引按需读取所需场景。",
       inputSchema: jsonSchema<{ path: string; offset?: number; limit?: number }>({
         type: "object",
         properties: {
