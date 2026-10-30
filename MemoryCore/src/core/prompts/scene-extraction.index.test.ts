@@ -49,13 +49,21 @@ function baselineJoined(): string {
 }
 
 describe("buildSceneExtractionPrompt 兼容钉（off 逐字节一致）", () => {
-  it("不传 sceneIndexSection 时输出与基线逐字节一致", () => {
+  // 2026-10-30 合流修订：原「绝对 len/sha 钉」的基线取自 efbdd14（无 B 规则），
+  // 在候选分支（已并 B 的第 4/8 条护栏与 offset/limit 指引）上必然不同——跨分支
+  // 硬编码数字不可移植。改用语义钉：off 时无索引段、含 B 护栏、且调用确定性。
+  it("不传 sceneIndexSection 时：无索引段、含 B 护栏、输出确定", () => {
     const joined = baselineJoined();
-    // 改动前实测：len=14476, sha256 如下
-    expect(joined.length).toBe(14476);
-    expect(createHash("sha256").update(joined, "utf-8").digest("hex")).toBe(
-      "0b06ae16073a0b91787d836747bb926b9803c654a2df2a54f2881dd44ba5bcb9",
-    );
+    // off = 不注入索引段（D 的硬边界）
+    expect(joined).not.toContain(SCENE_INDEX_HEADER);
+    expect(joined).not.toContain("🗂️ 场景索引");
+    // 候选分支已并入 B 的提示词护栏（规则 4 条件式 + 规则 8 write 禁令）
+    expect(joined).toContain("本次已完整读过该文件");
+    expect(joined).toContain("禁止");
+    expect(joined).toContain("write 整体重写");
+    expect(joined).toContain("offset");
+    // 确定性：两次调用逐字节相同
+    expect(baselineJoined()).toBe(joined);
   });
 
   it("显式传 undefined 等价于不传（off）", () => {

@@ -118,6 +118,7 @@ export interface PersonaConfig {
    * （每场景一行 path | heat | summary≤300）。默认 false=off，行为与基线零差异。
    */
   sceneIndexInPrompt: boolean;
+  /**
    * L2 场景块写入后像尺寸帽（方案C，exp/l2-plan-c-write-cap，default: 32000，0=off）。
    * L2 write/edit 工具落盘前检查写入后像（write 的 content / edit 应用替换后的完整内容）
    * 字符数，超帽 → 拒绝且不落盘，返回含压缩指令 hint 的结构化 JSON。
