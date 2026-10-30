@@ -102,6 +102,11 @@ export interface SceneExtractorOptions {
   llmRunner?: LLMRunner;
   /** StorageAdapter for file operations (COS/local). Falls back to fs when absent. */
   storage?: StorageAdapter;
+  /**
+   * 方案C（exp/l2-plan-c-write-cap）：L2 场景块写入后像尺寸帽（字符数，≤0/undefined=off）。
+   * 经 LLMRunParams.sceneCharCap 传给 runner 的 write/edit 工具工厂；缺省 off。
+   */
+  sceneCharCap?: number;
   /** langfuse 上报身份四元组（team/user/agent/session）。传下来会填充 trace 顶级字段。 */
   traceContext?: TraceContext;
 }
@@ -141,6 +146,7 @@ export class SceneExtractor {
   private logger: ExtractorLogger | undefined;
   private instanceId: string | undefined;
   private storage: StorageAdapter | undefined;
+  private sceneCharCap: number | undefined;
   private traceContext: TraceContext | undefined;
 
   constructor(opts: SceneExtractorOptions) {
@@ -154,6 +160,7 @@ export class SceneExtractor {
     this.logger = opts.logger;
     this.instanceId = opts.instanceId;
     this.storage = opts.storage;
+    this.sceneCharCap = opts.sceneCharCap;
     this.traceContext = opts.traceContext;
 
     // Use injected LLMRunner if available, otherwise fall back to CleanContextRunner
@@ -313,6 +320,9 @@ export class SceneExtractor {
         // Service mode: LLM tools read/write via StorageAdapter (COS) instead of local FS
         storage: this.storage,
         storagePrefix: this.storage ? StoragePaths.sceneBlocksDir : undefined,
+        // 方案C：场景块写入后像尺寸帽（persona.sceneCharCap，0=off）—— 只在 L2 传入，
+        // L3 persona 不传 → 不受限。
+        sceneCharCap: this.sceneCharCap,
         ...traceParams,
       }) ?? "";
       llmDurationMs = Date.now() - runnerStartMs;
