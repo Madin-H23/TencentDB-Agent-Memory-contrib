@@ -3167,6 +3167,29 @@ export class VectorStore implements IMemoryStore {
   }
 
   /**
+   * [P1 票④ capture-dedup-gate] 捕获闸短路命中只推热度时间戳：仅更新
+   * l1_records.updated_time（L1 无独立 heat 列，最近触达时间即热度时间戳；
+   * 票⑦召回排序消费）。不触碰 content/向量/版本。返回是否命中行。
+   */
+  touchL1Heat(recordId: string, atIso: string): boolean {
+    if (this.degraded) {
+      this.logger?.warn(`${TAG} [L1-touch-heat] SKIPPED (degraded mode) id=${recordId}`);
+      return false;
+    }
+    try {
+      const res = this.db
+        .prepare(`UPDATE l1_records SET updated_time = ? WHERE record_id = ?`)
+        .run(atIso, recordId);
+      return Number(res.changes) > 0;
+    } catch (err) {
+      this.logger?.warn(
+        `${TAG} [L1-touch-heat] FAILED (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    }
+  }
+
+  /**
    * FTS5 keyword search on L1 records.
    * Returns top-`limit` results sorted by BM25 relevance (highest first).
    *

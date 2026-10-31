@@ -615,6 +615,13 @@ export interface IMemoryStore extends MemoryPromptStore, MemoryGenerationRefStor
   deleteL1(recordId: string, filter?: IsolationFilter): MaybePromise<boolean>;
   deleteL1Batch(recordIds: string[], filter?: IsolationFilter): MaybePromise<boolean>;
   deleteL1Expired(cutoffIso: string): MaybePromise<number>;
+  /**
+   * [P1 票④ capture-dedup-gate] 捕获闸短路命中时只推热度时间戳（可选能力）。
+   * 语义：仅更新该 L1 记忆的最近触达时间（updated_time），不改内容/向量——
+   * 同源重投的「访问热度」凭证，供票⑦召回多信号排序消费。
+   * 未实现此方法的 store（mongodb/tcvdb）装配点跳过该步，行为不变。
+   */
+  touchL1Heat?(recordId: string, atIso: string): MaybePromise<boolean>;
 
   // ── L1 Read ──────────────────────────────────────────────
 

@@ -93,6 +93,14 @@ export interface ExtractionConfig {
    * 召回+字符 4-gram Jaccard 重排。缺省 none；非法值 fail-fast。
    */
   dedupRecallRerank: "none" | "lexical";
+  /**
+   * [P1 票④ 同源重投捕获闸] L0 捕获入口指纹预检：归一化内容指纹命中在案
+   * 近期记忆 → 短路免蒸馏、只推热度时间戳、返回结构化结果
+   * {shortcircuited:true, matchedId}；未命中原路径放行。默认 off——off 时
+   * 捕获路径零额外 I/O、行为与基线逐字节一致（off 兼容钉测试）。
+   * hash 门先行；语义近邻门（票面第二门）待后续票。
+   */
+  captureDedupGate?: boolean;
 }
 
 /** Persona (L2/L3) settings — controls scene extraction (L2) and user profile generation (L3). */
@@ -735,6 +743,7 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       dedupFailFast: bool(extractionGroup, "dedupFailFast") ?? false,
       dedupTimeoutMs: num(extractionGroup, "dedupTimeoutMs"),
       userIdentityNames: strArray(extractionGroup, "userIdentityNames"),
+      captureDedupGate: bool(extractionGroup, "captureDedupGate") ?? false,
       dedupRecallRerank: (() => {
         const raw = str(extractionGroup, "dedupRecallRerank");
         if (raw !== undefined && raw !== "none" && raw !== "lexical") {

@@ -14,11 +14,13 @@ import crypto from "node:crypto";
 import type { MemoryTdaiConfig } from "../../config.js";
 import { CheckpointManager } from "../../utils/checkpoint.js";
 import type { MemoryPipelineManager } from "../../utils/pipeline-manager.js";
+import { captureGateForStore } from "../../utils/capture-dedup-gate.js";
 import { recordConversation } from "../conversation/l0-recorder.js";
 import type { ConversationMessage } from "../conversation/l0-recorder.js";
 import { DEFAULT_ISOLATION_ID, type IMemoryStore, type L0Record } from "../store/types.js";
 import type { EmbeddingService } from "../store/embedding.js";
 import type { StorageAdapter } from "../storage/adapter.js";
+import { report } from "../report/reporter.js";
 
 import type { Logger } from "../types.js";
 
@@ -33,6 +35,14 @@ export interface AutoCaptureResult {
   l0VectorsWritten: number;
   /** Filtered messages for L1 immediate use */
   filteredMessages: ConversationMessage[];
+  /**
+   * [P1 票④ capture-dedup-gate] 同源重投短路：本批内容指纹命中在案近期记忆，
+   * 免蒸馏（不触发 scheduler notify）、只推热度时间戳。仅短路路径携带；
+   * 正常路径不含此键（off/未命中返回形状与基线逐字节一致）。
+   */
+  shortcircuited?: boolean;
+  /** 短路命中的在案记忆 id（真实 record_id 或本进程 pending 占位）。 */
+  matchedId?: string;
 }
 
 /**
@@ -144,6 +154,56 @@ export async function performAutoCapture(params: {
     logger?.error(`${TAG} L0 recording failed: ${err instanceof Error ? err.message : String(err)}`);
   }
   const tL0RecordEnd = performance.now();
+
+  // ============================
+  // Step 1.2: 同源重投捕获闸（extraction.captureDedupGate，默认 off）
+  // ============================
+  // 票④：L0 原始日志已留痕（上方 recordConversation），此处对**可指纹化**消息
+  // 做指纹预检——命中在案近期记忆 → 短路：不写向量、不触发 scheduler（免蒸馏），
+  // 只推命中记忆热度时间戳，返回结构化结果。off/未命中/畸形输入 → 原路径放行。
+  // gate 内部 lookup+remember 无 await（同步临界区）：并发/连发同文恰好一个放行。
+  if (cfg.extraction?.captureDedupGate === true && filteredMessages.length > 0 && vectorStore) {
+    try {
+      const gate = captureGateForStore(vectorStore);
+      gate.seedFromArchive(
+        (await vectorStore.getAllL1Texts()).map((r) => ({ id: r.record_id, content: r.content })),
+      );
+      const decision = gate.evaluate(filteredMessages);
+      if (decision.shortcircuited) {
+        if (vectorStore.touchL1Heat) {
+          try {
+            await vectorStore.touchL1Heat(decision.matchedId, new Date().toISOString());
+          } catch (touchErr) {
+            logger?.warn(
+              `${TAG} [capture-gate] touchL1Heat failed (non-fatal): ${touchErr instanceof Error ? touchErr.message : String(touchErr)}`,
+            );
+          }
+        }
+        logger?.info(
+          `${TAG} metric=capture_dedup_shortcircuit value=1 matched=${decision.matchedId} session=${sessionKey} msgs=${filteredMessages.length}`,
+        );
+        report("capture_dedup_shortcircuit", {
+          sessionKey,
+          matched: decision.matchedId,
+          value: 1,
+          msgs: filteredMessages.length,
+        });
+        return {
+          schedulerNotified: false,
+          l0RecordedCount: filteredMessages.length,
+          l0VectorsWritten: 0,
+          filteredMessages,
+          shortcircuited: true,
+          matchedId: decision.matchedId,
+        };
+      }
+    } catch (gateErr) {
+      // 闸任何异常（如在案读取失败）→ 降级放行，绝不阻塞捕获主路径
+      logger?.warn(
+        `${TAG} [capture-gate] gate error (non-fatal, pass-through): ${gateErr instanceof Error ? gateErr.message : String(gateErr)}`,
+      );
+    }
+  }
 
   // ============================
   // Step 1.5: L0 vector indexing
