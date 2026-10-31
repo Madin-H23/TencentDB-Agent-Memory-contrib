@@ -42,6 +42,13 @@ export interface SceneExtractionPromptParams {
    * `persona.sceneIndexInPrompt` 开启时用内存中的 scene_index 构建传入。
    */
   sceneIndexSection?: string;
+  /**
+   * [P1 票⑥ 显式失效替代硬删] MERGE/折叠语义改 recency-wins：on 时系统提示词的
+   * 删除类指令替换为「标记失效而非删除」（[SUPERSEDED <ISO>] 行前缀 + 锚点迁移
+   * 先于 [DELETED]），并追加失效标记规则块（含 read 过滤/includeInvalidated 审计、
+   * 失效不计帽）。缺省/false=off，提示词与基线逐字节一致（双版本同进程钉测试）。
+   */
+  explicitInvalidation?: boolean;
 }
 
 export interface SceneExtractionPromptResult {
@@ -54,7 +61,44 @@ export interface SceneExtractionPromptResult {
 // Contains maxScenes as a constraint parameter.
 // ============================
 
-function buildSceneSystemPrompt(maxScenes: number): string {
+/**
+ * 票⑥（exp/p1-6-supersede-inval）：失效标记规则块（两个 prompt family 共用正文）。
+ * off（false）返回空串——插入点模板在 off 时逐字节回到基线。
+ * on 时插入：标记格式（[SUPERSEDED <ISO>] 行前缀）、锚点行永不物理删除、
+ * read 默认过滤/includeInvalidated 审计、失效不计尺寸帽。
+ */
+function supersedeRulesBlock(explicitInvalidation: boolean): string {
+  if (!explicitInvalidation) return "";
+  return `
+## 🚦 失效标记规则（recency-wins，显式失效）
+新事实替代旧事实时，**标记失效而非删除**：
+- 被替代的旧事实行/段落**整行加前缀** \`[SUPERSEDED <ISO时间>]\`（取"当前时间"的 ISO 格式）后**原地留存**，原行内容与锚点 id（\`m_<ts>_<hash>\`）保持原样
+- **锚点行永不物理删除**：含 \`m_<ts>_<hash>\` 的行只能加失效标记，不能删除——任何丢失锚点的写入会被系统拒绝（anchor_loss_forbidden）且不落盘
+- **read 默认过滤已失效行**：读取结果不含 \`[SUPERSEDED ...]\` 行，体积更小；需要审计全量历史时传 \`includeInvalidated: true\`
+- 失效行不计入文件尺寸帽：标记失效会腾出可写空间，无需为容纳新内容而删除历史
+`;
+}
+
+function buildSceneSystemPrompt(maxScenes: number, explicitInvalidation = false): string {
+  // 票⑥：off 分支 = 基线原文逐字节；on 分支 = recency-wins 变体（双分支字面量，钉测试护栏）。
+  const mergeOldFilesDirective = explicitInvalidation
+    ? `**并先把被合并旧文件中的事实锚点行（\`m_<ts>_<hash>\`）移入合并后的新文件**（被新事实替代的行加 \`[SUPERSEDED <ISO时间>]\` 前缀留存）`
+    : `**并删除被合并的旧文件**`;
+  const mergeOldFilesBullet = explicitInvalidation
+    ? `   - **⚠️ 合并后旧文件先迁移锚点再删除**：先将被合并旧文件中的全部事实锚点行（\`m_<ts>_<hash>\`）移入合并后的新文件——被新事实替代的行加 \`[SUPERSEDED <ISO时间>]\` 前缀标记失效后留存；随后旧文件才通过 **write** 写入 \`[DELETED]\` 标记删除。**未迁移锚点就写 \`[DELETED]\` 会被系统拒绝（anchor_loss_forbidden）。仅仅打标记（如 [ARCHIVE]、[CONSOLIDATED]）不算删除，文件仍会占用配额。**`
+    : `   - **⚠️ 合并后必须删除旧文件**：被合并的旧场景文件必须通过 **write** 写入 \`[DELETED]\` 标记。**仅仅打标记（如 [ARCHIVE]、[CONSOLIDATED]）不算删除，文件仍会占用配额。**`;
+  const mergeExampleSteps = explicitInvalidation
+    ? `3. 整合 A + B + 新记忆 → 生成新内容 C（\`heat = heatA + heatB + 1\`），**并把 A、B 中的全部事实锚点行（\`m_<ts>_<hash>\`）移入 C**——被新事实替代的行加 \`[SUPERSEDED <ISO时间>]\` 前缀标记失效后留存
+4. **write**(\`path\`='后端开发技术栈.md', \`content\`=C) → 创建合并后的新文件（已含 A、B 的全部锚点行）
+5. **write**(\`path\`='Python后端开发.md', \`content\`='[DELETED]') → **删除旧文件 A**（锚点已迁移，可删）
+6. **write**(\`path\`='Go后端开发.md', \`content\`='[DELETED]') → **删除旧文件 B**（锚点已迁移，可删）
+**关键**：步骤 3 的锚点迁移必须先于步骤 5-6！未迁移锚点就写 \`[DELETED]\` = 被系统拒绝（anchor_loss_forbidden）。`
+    : `3. 整合 A + B + 新记忆 → 生成新内容 C（\`heat = heatA + heatB + 1\`）
+4. **write**(\`path\`='后端开发技术栈.md', \`content\`=C) → 创建合并后的新文件
+5. **write**(\`path\`='Python后端开发.md', \`content\`='[DELETED]') → **⚠️ 删除旧文件 A**
+6. **write**(\`path\`='Go后端开发.md', \`content\`='[DELETED]') → **⚠️ 删除旧文件 B**
+**关键**：步骤 5-6 是必须的！不执行删除 = 文件总数不减少 = 合并无效。`;
+  const invalRules = supersedeRulesBlock(explicitInvalidation);
   return `# Memory Consolidation Architect
 
 **输出语言**：\`.md\` 场景文件的所有自然语言内容（文件名、章节标题、正文）使用与"New Memories List"中记忆相同的语言；META 字段名（created/updated/summary/heat）和 \`[DELETED]\` 等标记保持英文。模板中给出的中文章节标题（\`## 用户核心特征\` 等）作为结构骨架——非中文输出时请用目标语言的等价表达替换。
@@ -129,7 +173,7 @@ function buildSceneSystemPrompt(maxScenes: number): string {
 1. **统计当前场景总数**：查看 "Existing Scene Blocks Summary" 顶部标注的当前场景总数
 2. **最终目标**：处理完成后，目录中的场景文件数量必须 **严格小于 ${maxScenes}**
 3. **遵守分级预警**：
-   - 红色预警（≥ ${maxScenes}）：**必须先通过 MERGE 减少文件数量**，将最相似的 2-4 个场景合并为 1 个，**并删除被合并的旧文件**，直到文件数 < ${maxScenes} 后，再处理新记忆
+   - 红色预警（≥ ${maxScenes}）：**必须先通过 MERGE 减少文件数量**，将最相似的 2-4 个场景合并为 1 个，${mergeOldFilesDirective}，直到文件数 < ${maxScenes} 后，再处理新记忆
    - 橙色预警（= ${maxScenes - 1}）：**只能 UPDATE 现有场景，不能 CREATE 新场景**
    - 黄色预警（接近 ${maxScenes}）：**优先 UPDATE 或主动 MERGE 相似场景**
 
@@ -155,7 +199,7 @@ function buildSceneSystemPrompt(maxScenes: number): string {
    - 合并的新 block 应该是生成概括性更强的场景，包含已有的多个相似场景
    - **强制合并**：当前 Block 总数 **≥ ${maxScenes}** 时，必须先将多个相似记忆合并
    - **主动合并**：即使未达上限，如果两个 Block 属于同一叙事弧线，也应合并以增加深度
-   - **⚠️ 合并后必须删除旧文件**：被合并的旧场景文件必须通过 **write** 写入 \`[DELETED]\` 标记。**仅仅打标记（如 [ARCHIVE]、[CONSOLIDATED]）不算删除，文件仍会占用配额。**
+${mergeOldFilesBullet}
 3. **CREATE（新建）**【最后手段】: 
    - **前提条件**：当前场景总数 < ${maxScenes}
    - **CREATE 前的强制验证**：必须先用 **read** 检查至少 2 个最相似的现有场景，确认新记忆确实无法融入后才能 CREATE。跳过验证直接 CREATE 是被禁止的
@@ -169,15 +213,11 @@ function buildSceneSystemPrompt(maxScenes: number): string {
 3. **write**(\`path\`='Python后端开发.md', \`content\`=B) → **整体重写该场景文件**
    或 **edit**(\`path\`='Python后端开发.md', \`edits\`=[{\`oldText\`: 旧章节, \`newText\`: 新章节}]) → **局部更新某部分**
 
-**示例 B：合并多个 block（MERGE — 合并后必须删除旧文件）**
+**示例 B：合并多个 block（MERGE — ${explicitInvalidation ? "先迁移锚点再删除旧文件" : "合并后必须删除旧文件"}）**
 **具体操作步骤（工具调用）**：
 1. **read**(\`path\`='Python后端开发.md') → 获取内容 A
 2. **read**(\`path\`='Go后端开发.md') → 获取内容 B
-3. 整合 A + B + 新记忆 → 生成新内容 C（\`heat = heatA + heatB + 1\`）
-4. **write**(\`path\`='后端开发技术栈.md', \`content\`=C) → 创建合并后的新文件
-5. **write**(\`path\`='Python后端开发.md', \`content\`='[DELETED]') → **⚠️ 删除旧文件 A**
-6. **write**(\`path\`='Go后端开发.md', \`content\`='[DELETED]') → **⚠️ 删除旧文件 B**
-**关键**：步骤 5-6 是必须的！不执行删除 = 文件总数不减少 = 合并无效。
+${mergeExampleSteps}
 
 ### 阶段 3：撰写与合成（核心任务）
 深度整合: 严禁简单的文本追加。你必须结合上下文（基于摘要或提供的原始内容）重写叙事，将新信息自然地融入其中。
@@ -192,7 +232,7 @@ function buildSceneSystemPrompt(maxScenes: number): string {
 新建 Block: heat: 1
 更新 Block: heat: 旧heat + 1
 合并 Block: heat: sum(所有相关block的heat) + 1
-
+${invalRules}
 ## 输出规范 (Output Specification)
 
 ### 📄 场景文件内容（必须输出）
@@ -264,7 +304,15 @@ reason: 具体原因描述
    - **删除文件**：使用 **write**(\`path\`=文件名, \`content\`='[DELETED]') 写入删除标记。系统会自动清理这些文件。**重要**：只有 \`[DELETED]\` 标记会触发系统清理。写入空字符串会被系统拒绝，写入 \`[ARCHIVE]\`、\`[CONSOLIDATED]\` 等标记**不会删除文件**，文件会继续占用场景配额。`;
 }
 
-function buildWorkSceneSystemPrompt(maxScenes: number): string {
+function buildWorkSceneSystemPrompt(maxScenes: number, explicitInvalidation = false): string {
+  // 票⑥：off 分支 = 基线原文逐字节；on 分支 = recency-wins 变体（同 chat family 口径）。
+  const mergeOldFilesDirective = explicitInvalidation
+    ? `**并先把被合并旧文件中的事实锚点行（\`m_<ts>_<hash>\`）移入合并后的新文件**（被新事实替代的行加 \`[SUPERSEDED <ISO时间>]\` 前缀留存）`
+    : `**并删除被合并的旧文件**`;
+  const mergeOldFilesBullet = explicitInvalidation
+    ? `   - **⚠️ 合并后旧文件先迁移锚点再删除**：先将被合并旧文件中的全部事实锚点行（\`m_<ts>_<hash>\`）移入合并后的新文件——被新事实替代的行加 \`[SUPERSEDED <ISO时间>]\` 前缀标记失效后留存；随后旧文件才通过 **write** 写入 \`[DELETED]\` 标记删除。**未迁移锚点就写 \`[DELETED]\` 会被系统拒绝（anchor_loss_forbidden）。**`
+    : `   - **⚠️ 合并后必须删除旧文件**：被合并的旧场景文件必须通过 **write** 写入 \`[DELETED]\` 标记。`;
+  const invalRules = supersedeRulesBlock(explicitInvalidation);
   return `# Team Work Method Memory Consolidation Architect
 
 **输出语言**：\`.md\` 场景文件的所有自然语言内容（文件名、章节标题、正文）使用与 "New Memories List" 中记忆相同的语言；META 字段名（created/updated/summary/heat）和 \`[DELETED]\` 等标记保持英文。模板中的中文章节标题仅作为结构骨架，非中文输出时请用目标语言的等价表达替换。
@@ -362,7 +410,7 @@ function buildWorkSceneSystemPrompt(maxScenes: number): string {
 1. **统计当前场景总数**：查看 "Existing Scene Blocks Summary" 顶部标注的当前场景总数。
 2. **最终目标**：处理完成后，目录中的场景文件数量必须 **严格小于 ${maxScenes}**。
 3. **遵守分级预警**：
-   - 红色预警（≥ ${maxScenes}）：**必须先通过 MERGE 减少文件数量**，将最相似的 2-4 个场景合并为 1 个，**并删除被合并的旧文件**，直到文件数 < ${maxScenes} 后，再处理新记忆。
+   - 红色预警（≥ ${maxScenes}）：**必须先通过 MERGE 减少文件数量**，将最相似的 2-4 个场景合并为 1 个，${mergeOldFilesDirective}，直到文件数 < ${maxScenes} 后，再处理新记忆。
    - 橙色预警（= ${maxScenes - 1}）：**只能 UPDATE 现有场景，不能 CREATE 新场景**。
    - 黄色预警（接近 ${maxScenes}）：**优先 UPDATE 或主动 MERGE 相似场景**。
 
@@ -414,7 +462,7 @@ function buildWorkSceneSystemPrompt(maxScenes: number): string {
    - 合并后的新 block 应该是概括性更强的工作场景，包含多个相似场景。
    - **强制合并**：当前 Block 总数 **≥ ${maxScenes}** 时，必须先将多个相似场景合并。
    - **主动合并**：即使未达上限，如果两个 Block 属于同一项目链路、同一工作流或同一方法体系，也应合并以增加深度。
-   - **⚠️ 合并后必须删除旧文件**：被合并的旧场景文件必须通过 **write** 写入 \`[DELETED]\` 标记。
+${mergeOldFilesBullet}
 
 3. **CREATE（新建）【最后手段】**
    - **前提条件**：当前场景总数 < ${maxScenes}
@@ -457,7 +505,7 @@ function buildWorkSceneSystemPrompt(maxScenes: number): string {
 - 新建 Block: heat: 1
 - 更新 Block: heat: 旧heat + 1
 - 合并 Block: heat: sum(所有相关 block 的 heat) + 1
-
+${invalRules}
 ---
 
 ## 输出规范 (Output Specification)
@@ -535,8 +583,14 @@ reason: 具体原因描述
 - **删除文件**：使用 **write**(\`path\`=文件名, \`content\`='[DELETED]') 写入删除标记。系统会自动清理这些文件。**重要**：只有 \`[DELETED]\` 标记会触发系统清理。写入空字符串会被系统拒绝，写入 \`[ARCHIVE]\`、\`[CONSOLIDATED]\` 等标记不会删除文件。`;
 }
 
-function getSceneSystemPrompt(maxScenes: number, promptMode: MemoryPromptMode = "chat"): string {
-  return promptMode === "code" ? buildWorkSceneSystemPrompt(maxScenes) : buildSceneSystemPrompt(maxScenes);
+function getSceneSystemPrompt(
+  maxScenes: number,
+  promptMode: MemoryPromptMode = "chat",
+  explicitInvalidation = false,
+): string {
+  return promptMode === "code"
+    ? buildWorkSceneSystemPrompt(maxScenes, explicitInvalidation)
+    : buildSceneSystemPrompt(maxScenes, explicitInvalidation);
 }
 
 // ============================
@@ -576,6 +630,7 @@ export function buildSceneExtractionPrompt(params: SceneExtractionPromptParams):
     maxScenes,
     promptMode = "chat",
     sceneIndexSection,
+    explicitInvalidation = false,
   } = params;
 
   const warningSection = sceneCountWarning
@@ -604,7 +659,7 @@ ${sceneIndexBlock}
 ${fileListSection}`;
 
   return {
-    systemPrompt: getSceneSystemPrompt(maxScenes, promptMode),
+    systemPrompt: getSceneSystemPrompt(maxScenes, promptMode, explicitInvalidation),
     userPrompt,
   };
 }

@@ -30,6 +30,15 @@ import {
 import { readCacheMetrics, formatReadCacheNote } from "../../utils/read-cache-metrics.js";
 import { applyReadWindow } from "../../utils/read-window.js";
 import { checkSceneCharCap } from "../../utils/scene-char-cap.js";
+import {
+  checkAnchorPreservation,
+  checkSceneCharCapWithSupersede,
+  filterSupersededLines,
+  findUnrelocatedAnchors,
+  supersedeDelta,
+  type AnchorLossRejection,
+  RELOCATE_HINT,
+} from "../../utils/supersede.js";
 import type {
   LLMRunner,
   LLMRunParams,
@@ -285,26 +294,92 @@ function resolveSandboxedPath(workspaceDir: string, relativePath: string): strin
 // Tool definitions (Vercel AI SDK `tool()` format)
 // ============================
 
-function createSandboxedTools(workspaceDir: string, logger?: Logger, taskId?: string, sceneCharCap?: number) {
+function createSandboxedTools(workspaceDir: string, logger?: Logger, taskId?: string, sceneCharCap?: number, explicitInvalidation?: boolean) {
   // S0 影子计量：一次 toolset = 一次 run，累计量随工具集生命周期归零。
   const readBudget = new ReadBudgetTracker();
   // 方案C（exp/l2-plan-c-write-cap）：写入后像尺寸帽（字符数，≤0/undefined=off）。
   // 作用域由调用方决定 —— 只有 L2 场景抽取装配点传 sceneCharCap，L3 persona 不传（不受限）。
   const effectiveCharCap = sceneCharCap ?? 0;
+  // 票⑥（exp/p1-6-supersede-inval）：显式失效语义。作用域由调用方决定（只有 L2 传）；
+  // off 时 read/write/edit 全部走基线路径（schema/行为逐字节一致）。
+  const effectiveInval = explicitInvalidation ?? false;
+  /**
+   * 票⑥ 写路径守卫（on 专属，落盘前）：普通写入=行级保锚；[DELETED] 软删流=
+   * 文件级重定位（同 workspaceDir 其余 .md 场景文件须已含被删文件全部锚点）。
+   * 与 storage-tools 的 supersedeWriteGuard 同构（枚举面不同：fs vs StorageAdapter）。
+   */
+  const supersedeWriteGuard = async (
+    relPath: string,
+    resolved: string,
+    content: string,
+  ): Promise<{ rejection: AnchorLossRejection | null; pre: string | null }> => {
+    let pre: string | null = null;
+    try {
+      pre = await fsPromises.readFile(resolved, "utf-8");
+    } catch {
+      pre = null;
+    }
+    if (content === "[DELETED]") {
+      if (pre === null) return { rejection: null, pre };
+      let names: string[] = [];
+      try {
+        names = (await fsPromises.readdir(workspaceDir)).filter((f) => f.endsWith(".md"));
+      } catch {
+        names = [];
+      }
+      const others: string[] = [];
+      for (const name of names) {
+        if (name === relPath) continue;
+        try {
+          others.push(await fsPromises.readFile(path.join(workspaceDir, name), "utf-8"));
+        } catch {
+          // 读不到的文件按「不含锚点」处理（fail-closed：缺口只会更严不会放行）
+        }
+      }
+      const unrelocated = findUnrelocatedAnchors(pre, others);
+      if (unrelocated.length > 0) {
+        return {
+          rejection: {
+            error: "anchor_loss_forbidden",
+            lostCount: unrelocated.length,
+            lost: unrelocated.slice(0, 5),
+            hint: RELOCATE_HINT,
+          },
+          pre,
+        };
+      }
+      return { rejection: null, pre };
+    }
+    return { rejection: checkAnchorPreservation(pre, content), pre };
+  };
   return {
     read: tool({
-      description:
-        "Read the contents of a file at the given relative path. Supports optional offset/limit (character window) to read large files section by section. 配合场景索引按需读取所需场景。",
-      inputSchema: jsonSchema<{ path: string; offset?: number; limit?: number }>({
-        type: "object",
-        properties: {
-          path: { type: "string", description: "Relative file path to read." },
-          offset: { type: "number", description: "Character offset to start reading from (default 0)." },
-          limit: { type: "number", description: "Maximum number of characters to return (default: read to end of file)." },
-        },
-        required: ["path"],
-      }),
-      execute: (async (args: { path: string; offset?: number; limit?: number }) => {
+      description: effectiveInval
+        ? "Read the contents of a file at the given relative path. Supports optional offset/limit (character window) to read large files section by section. 配合场景索引按需读取所需场景。已失效行（[SUPERSEDED ...] 标记）默认被过滤；includeInvalidated:true 返回含失效行的全量原文（审计）。"
+        : "Read the contents of a file at the given relative path. Supports optional offset/limit (character window) to read large files section by section. 配合场景索引按需读取所需场景。",
+      inputSchema: jsonSchema<{ path: string; offset?: number; limit?: number; includeInvalidated?: boolean }>(
+        effectiveInval
+          ? {
+              type: "object",
+              properties: {
+                path: { type: "string", description: "Relative file path to read." },
+                offset: { type: "number", description: "Character offset to start reading from (default 0)." },
+                limit: { type: "number", description: "Maximum number of characters to return (default: read to end of file)." },
+                includeInvalidated: { type: "boolean", description: "Include [SUPERSEDED] invalidated lines (audit view). Default false." },
+              },
+              required: ["path"],
+            }
+          : {
+              type: "object",
+              properties: {
+                path: { type: "string", description: "Relative file path to read." },
+                offset: { type: "number", description: "Character offset to start reading from (default 0)." },
+                limit: { type: "number", description: "Maximum number of characters to return (default: read to end of file)." },
+              },
+              required: ["path"],
+            },
+      ),
+      execute: (async (args: { path: string; offset?: number; limit?: number; includeInvalidated?: boolean }) => {
         const resolved = resolveSandboxedPath(workspaceDir, args.path);
         if (!resolved) return JSON.stringify({ error: `Path "${args.path}" escapes workspace boundary.` });
         try {
@@ -315,13 +390,18 @@ function createSandboxedTools(workspaceDir: string, logger?: Logger, taskId?: st
           logger?.debug?.(`${TAG} ${formatReadCacheNote(cacheNote, args.path, content.length, taskId)}`);
           // 方案B 分段读：无 offset/limit 时切片 = 全文且无标注（与旧实现逐字节一致）。
           const returned = applyReadWindow(content, { offset: args.offset, limit: args.limit });
+          // 票⑥ on：默认过滤失效行（装配点 = applyReadWindow 之后的输出组装；窗口坐标
+          // 保持原文坐标，includeInvalidated:true 逐字节回到基线 read）。off：returned 原样。
+          const output = effectiveInval
+            ? filterSupersededLines(returned, { includeInvalidated: args.includeInvalidated === true })
+            : returned;
           // read-budget 计量口径不变：observe 记实际返回的 chars（含截断标注行）。
-          const obs = readBudget.observe(args.path, returned.length);
+          const obs = readBudget.observe(args.path, output.length);
           logger?.debug?.(`${TAG} ${formatReadBudgetObservation(obs, taskId)}`);
           if (obs.overFile || obs.crossedRunBudget) {
             logger?.warn?.(`${TAG} ${formatReadBudgetObservation(obs, taskId)} (shadow-only, no enforcement)`);
           }
-          return returned;
+          return output;
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           logger?.warn?.(`${TAG} read failed: ${msg}`);
@@ -343,10 +423,28 @@ function createSandboxedTools(workspaceDir: string, logger?: Logger, taskId?: st
       execute: (async (args: { path: string; content: string }) => {
         const resolved = resolveSandboxedPath(workspaceDir, args.path);
         if (!resolved) return JSON.stringify({ error: `Path "${args.path}" escapes workspace boundary.` });
+        // 票⑥ on：落盘前显式失效守卫（与 storage-tools 同构）—— [DELETED] 软删流走
+        // 文件级重定位；普通写入走行级保锚；metric=l2_supersede 记失效增量。
+        if (effectiveInval) {
+          const inval = await supersedeWriteGuard(args.path, resolved, args.content);
+          if (inval.rejection) {
+            logger?.warn?.(
+              `${TAG} write rejected (${inval.rejection.error}): "${args.path}" lost=${inval.rejection.lostCount}`,
+            );
+            return JSON.stringify(inval.rejection);
+          }
+          if (args.content !== "[DELETED]") {
+            const delta = supersedeDelta(inval.pre, args.content);
+            if (delta > 0) logger?.info?.(`${TAG} metric=l2_supersede value=${delta} path=${args.path}`);
+          }
+        }
         // 方案C：写入后像尺寸帽 —— 超帽拒绝且不落盘。"[DELETED]" 删除标记不受限。
+        // 票⑥ on：帽改失效排除口径（失效段不计入后像帽）。
         const capRejection = args.content === "[DELETED]"
           ? null
-          : checkSceneCharCap(args.content, effectiveCharCap);
+          : effectiveInval
+            ? checkSceneCharCapWithSupersede(args.content, effectiveCharCap)
+            : checkSceneCharCap(args.content, effectiveCharCap);
         if (capRejection) {
           logger?.warn?.(
             `${TAG} write rejected (over_scene_char_cap): "${args.path}" ${capRejection.chars}/${capRejection.cap} chars`,
@@ -392,7 +490,8 @@ function createSandboxedTools(workspaceDir: string, logger?: Logger, taskId?: st
         if (!resolved) return JSON.stringify({ error: `Path "${args.path}" escapes workspace boundary.` });
         if (!args.edits || args.edits.length === 0) return JSON.stringify({ error: "edits array cannot be empty." });
         try {
-          let content = await fsPromises.readFile(resolved, "utf-8");
+          const preImage = await fsPromises.readFile(resolved, "utf-8");
+          let content = preImage;
           for (const edit of args.edits) {
             if (!edit.oldText) return JSON.stringify({ error: "oldText cannot be empty." });
             if (!content.includes(edit.oldText)) {
@@ -404,13 +503,28 @@ function createSandboxedTools(workspaceDir: string, logger?: Logger, taskId?: st
             // of the file on every edit, growing scene blocks exponentially.
             content = content.replace(edit.oldText, () => edit.newText);
           }
+          // 票⑥ on：行级保锚守卫先行 —— edit 后像丢失前像锚点 → 拒绝且不落盘。
+          const anchorRejection = effectiveInval ? checkAnchorPreservation(preImage, content) : null;
+          if (anchorRejection) {
+            logger?.warn?.(
+              `${TAG} edit rejected (${anchorRejection.error}): "${args.path}" lost=${anchorRejection.lostCount}`,
+            );
+            return JSON.stringify(anchorRejection);
+          }
           // 方案C：edit 后像（应用全部替换后的完整内容）尺寸帽 —— 超帽拒绝且不落盘。
-          const capRejection = checkSceneCharCap(content, effectiveCharCap);
+          // 票⑥ on：帽改失效排除口径（失效段不计入后像帽）。
+          const capRejection = effectiveInval
+            ? checkSceneCharCapWithSupersede(content, effectiveCharCap)
+            : checkSceneCharCap(content, effectiveCharCap);
           if (capRejection) {
             logger?.warn?.(
               `${TAG} edit rejected (over_scene_char_cap): "${args.path}" ${capRejection.chars}/${capRejection.cap} chars`,
             );
             return JSON.stringify(capRejection);
+          }
+          if (effectiveInval) {
+            const delta = supersedeDelta(preImage, content);
+            if (delta > 0) logger?.info?.(`${TAG} metric=l2_supersede value=${delta} path=${args.path}`);
           }
           await fsPromises.writeFile(resolved, content, "utf-8");
           logger?.debug?.(
@@ -621,10 +735,11 @@ export class StandaloneLLMRunner implements LLMRunner {
     } else if (effectiveEnableTools && params.storage) {
       const { createStorageTools } = await import("./storage-tools.js");
       // 方案C：sceneCharCap 经 LLMRunParams 透传；storage 工厂内按 prefix 定作用域。
-      tools = createStorageTools(params.storage, params.storagePrefix ?? "", this.logger, params.taskId, params.sceneCharCap);
+      // 票⑥：explicitInvalidation 同路透传（read 过滤/write-edit 锚点守卫，off=基线）。
+      tools = createStorageTools(params.storage, params.storagePrefix ?? "", this.logger, params.taskId, params.sceneCharCap, params.explicitInvalidation);
       this.logger?.debug?.(`${TAG} Using storage-backed tools (prefix="${params.storagePrefix ?? ""}")`);
     } else if (effectiveEnableTools) {
-      tools = createSandboxedTools(workspaceDir, this.logger, params.taskId, params.sceneCharCap);
+      tools = createSandboxedTools(workspaceDir, this.logger, params.taskId, params.sceneCharCap, params.explicitInvalidation);
     } else {
       tools = undefined; // pure-text task — never expose any tool to the model
     }

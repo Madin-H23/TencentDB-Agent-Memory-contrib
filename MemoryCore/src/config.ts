@@ -133,6 +133,14 @@ export interface PersonaConfig {
    * 只对场景块前缀（storagePrefix 非空）生效；L3 persona（prefix 为空）不受限。
    */
   sceneCharCap: number;
+  /**
+   * [P1 票⑥ 显式失效替代硬删] L2 MERGE/折叠语义改为 recency-wins：被替换的旧事实行
+   * 加 `[SUPERSEDED <ISO时间>]` 前缀标记失效后留存（锚点行 m_<ts>_<hash> 永不物理
+   * 删除，write/edit 落盘前锚点守卫拒绝丢失）；read 默认过滤失效行
+   * （includeInvalidated:true 审计全量）；失效段不计入后像尺寸帽。
+   * 默认 false=off——off 时 L2 写/读路径与基线逐字节一致（off 兼容钉测试）。
+   */
+  explicitInvalidation: boolean;
   /** LLM model for persona generation, format: "provider/model" (falls back to OpenClaw default model when omitted) */
   model?: string;
   /** Prompt family for L2/L3 prompts (default: chat; code prompts will be wired as they are added). */
@@ -761,6 +769,8 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       sceneIndexInPrompt: bool(personaGroup, "sceneIndexInPrompt") ?? false,
       // 方案C（exp/l2-plan-c-write-cap）：显式 0=off 必须原样通过（num() 只滤非有限数值，?? 不吃 0）。
       sceneCharCap: num(personaGroup, "sceneCharCap") ?? 32_000,
+      // 票⑥（exp/p1-6-supersede-inval）：显式失效替代硬删，默认 off=行为与基线逐字节一致。
+      explicitInvalidation: bool(personaGroup, "explicitInvalidation") ?? false,
       model: optStr(personaGroup, "model"),
       promptMode: normalizePromptMode(str(personaGroup, "promptMode"), globalPromptMode),
       triggerMode,

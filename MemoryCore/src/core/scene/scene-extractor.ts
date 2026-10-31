@@ -107,6 +107,13 @@ export interface SceneExtractorOptions {
    * 经 LLMRunParams.sceneCharCap 传给 runner 的 write/edit 工具工厂；缺省 off。
    */
   sceneCharCap?: number;
+  /**
+   * [P1 票⑥ 显式失效替代硬删]：L2 MERGE/折叠语义改 recency-wins——提示词 MERGE
+   * 指令改「标记失效而非删除」，write/edit/read 工具启用锚点守卫/失效过滤/
+   * 失效帽排除口径（经 LLMRunParams.explicitInvalidation 透传）。缺省 off=
+   * 提示词与工具行为和基线逐字节一致。yaml `persona.explicitInvalidation` 控制。
+   */
+  explicitInvalidation?: boolean;
   /** langfuse 上报身份四元组（team/user/agent/session）。传下来会填充 trace 顶级字段。 */
   traceContext?: TraceContext;
 }
@@ -147,6 +154,7 @@ export class SceneExtractor {
   private instanceId: string | undefined;
   private storage: StorageAdapter | undefined;
   private sceneCharCap: number | undefined;
+  private explicitInvalidation: boolean;
   private traceContext: TraceContext | undefined;
 
   constructor(opts: SceneExtractorOptions) {
@@ -161,6 +169,7 @@ export class SceneExtractor {
     this.instanceId = opts.instanceId;
     this.storage = opts.storage;
     this.sceneCharCap = opts.sceneCharCap;
+    this.explicitInvalidation = opts.explicitInvalidation ?? false;
     this.traceContext = opts.traceContext;
 
     // Use injected LLMRunner if available, otherwise fall back to CleanContextRunner
@@ -298,6 +307,7 @@ export class SceneExtractor {
       maxScenes: this.maxScenes,
       promptMode: this.promptMode,
       sceneIndexSection,
+      explicitInvalidation: this.explicitInvalidation,
     });
     const systemPrompt = composeMemorySystemPrompt(baseSystemPrompt, this.memoryPrompt);
     this.logger?.debug?.(`${TAG} extract() prompt built: ${userPrompt.length} chars (${Date.now() - promptStartMs}ms)`);
@@ -323,6 +333,8 @@ export class SceneExtractor {
         // 方案C：场景块写入后像尺寸帽（persona.sceneCharCap，0=off）—— 只在 L2 传入，
         // L3 persona 不传 → 不受限。
         sceneCharCap: this.sceneCharCap,
+        // 票⑥：显式失效语义（persona.explicitInvalidation，默认 off）—— 只在 L2 传入。
+        explicitInvalidation: this.explicitInvalidation,
         ...traceParams,
       }) ?? "";
       llmDurationMs = Date.now() - runnerStartMs;
