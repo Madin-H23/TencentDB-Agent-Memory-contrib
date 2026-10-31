@@ -14,11 +14,13 @@ import crypto from "node:crypto";
 import type { MemoryTdaiConfig } from "../../config.js";
 import { CheckpointManager } from "../../utils/checkpoint.js";
 import type { MemoryPipelineManager } from "../../utils/pipeline-manager.js";
+import { captureGateForStore } from "../../utils/capture-dedup-gate.js";
 import { recordConversation } from "../conversation/l0-recorder.js";
 import type { ConversationMessage } from "../conversation/l0-recorder.js";
 import { DEFAULT_ISOLATION_ID, type IMemoryStore, type L0Record } from "../store/types.js";
 import type { EmbeddingService } from "../store/embedding.js";
 import type { StorageAdapter } from "../storage/adapter.js";
+import { report } from "../report/reporter.js";
 
 import type { Logger } from "../types.js";
 
@@ -33,6 +35,19 @@ export interface AutoCaptureResult {
   l0VectorsWritten: number;
   /** Filtered messages for L1 immediate use */
   filteredMessages: ConversationMessage[];
+  /**
+   * [P1 票④ capture-dedup-gate] 同源重投短路：本批内容指纹命中在案近期记忆，
+   * 免蒸馏（不触发 scheduler notify）、只推热度时间戳。仅短路路径携带；
+   * 正常路径不含此键（off/未命中返回形状与基线逐字节一致）。
+   */
+  shortcircuited?: boolean;
+  /** 短路命中的在案记忆 id（真实 record_id 或本进程 pending 占位）。 */
+  matchedId?: string;
+  /**
+   * [P1 票④修复·消息级闸] 部分命中时被排除消息数：命中项（已在案/已在 L0 近窗）
+   * 跳过向量写入，其余照常。仅 >0 时携带（返回形状与基线一致）。
+   */
+  gateExcludedCount?: number;
 }
 
 /**
@@ -146,6 +161,73 @@ export async function performAutoCapture(params: {
   const tL0RecordEnd = performance.now();
 
   // ============================
+  // Step 1.2: 同源重投捕获闸（extraction.captureDedupGate，默认 off）
+  // ============================
+  // 票④：L0 原始日志已留痕（上方 recordConversation），此处对**可指纹化**消息
+  // 做指纹预检——全部命中 → 整批短路：不写向量、不触发 scheduler（免蒸馏），
+  // 只推在案命中记忆热度时间戳；部分命中 → 消息级排除（v2：命中项跳过向量写入，
+  // 其内容已在案/已在 L0 近窗，信息零丢失；其余照常走原路径）。off/未命中/畸形
+  // 输入 → 原路径放行。gate 内部 lookup+记账无 await（同步临界区）：并发/连发
+  // 同文恰好一个放行。种子经 seedFromStore（全量一次+水位增量，P1-1/P2 修复）。
+  let gateExcludedIdx: Set<number> | null = null;
+  let gateExcludedCount = 0;
+  if (cfg.extraction?.captureDedupGate === true && filteredMessages.length > 0 && vectorStore) {
+    try {
+      const gate = captureGateForStore(vectorStore);
+      await gate.seedFromStore(vectorStore);
+      const decision = gate.evaluate(filteredMessages);
+      if (decision.shortcircuited) {
+        // 仅在案（archive）命中推 L1 热度；pending/持久近窗命中非 L1 id，不推
+        if (decision.heatId && vectorStore.touchL1Heat) {
+          try {
+            await vectorStore.touchL1Heat(decision.heatId, new Date().toISOString());
+          } catch (touchErr) {
+            logger?.warn(
+              `${TAG} [capture-gate] touchL1Heat failed (non-fatal): ${touchErr instanceof Error ? touchErr.message : String(touchErr)}`,
+            );
+          }
+        }
+        logger?.info(
+          `${TAG} metric=capture_dedup_shortcircuit value=1 matched=${decision.matchedId} session=${sessionKey} msgs=${filteredMessages.length}`,
+        );
+        report("capture_dedup_shortcircuit", {
+          sessionKey,
+          matched: decision.matchedId,
+          value: 1,
+          msgs: filteredMessages.length,
+        });
+        return {
+          schedulerNotified: false,
+          l0RecordedCount: filteredMessages.length,
+          l0VectorsWritten: 0,
+          filteredMessages,
+          shortcircuited: true,
+          matchedId: decision.matchedId,
+        };
+      }
+      if (decision.excluded && decision.excluded.length > 0) {
+        gateExcludedIdx = new Set(decision.excluded);
+        gateExcludedCount = decision.excluded.length;
+        logger?.info(
+          `${TAG} metric=capture_dedup_excluded value=${gateExcludedCount} session=${sessionKey} msgs=${filteredMessages.length}`,
+        );
+        report("capture_dedup_excluded", {
+          sessionKey,
+          value: gateExcludedCount,
+          msgs: filteredMessages.length,
+        });
+      }
+    } catch (gateErr) {
+      // 闸任何异常（如在案读取失败）→ 降级放行，绝不阻塞捕获主路径
+      gateExcludedIdx = null;
+      gateExcludedCount = 0;
+      logger?.warn(
+        `${TAG} [capture-gate] gate error (non-fatal, pass-through): ${gateErr instanceof Error ? gateErr.message : String(gateErr)}`,
+      );
+    }
+  }
+
+  // ============================
   // Step 1.5: L0 vector indexing
   // ============================
   // Two paths depending on store capabilities:
@@ -179,6 +261,7 @@ export async function performAutoCapture(params: {
     );
 
     for (let i = 0; i < filteredMessages.length; i++) {
+      if (gateExcludedIdx?.has(i)) continue; // 消息级闸（v2）：命中项已在案/已在 L0 近窗，跳过向量写入
       const msg = filteredMessages[i];
       try {
         const l0Record: L0Record = {
@@ -323,6 +406,7 @@ export async function performAutoCapture(params: {
       l0RecordedCount: filteredMessages.length,
       l0VectorsWritten,
       filteredMessages,
+      ...(gateExcludedCount > 0 ? { gateExcludedCount } : {}),
     };
   }
 
@@ -343,5 +427,6 @@ export async function performAutoCapture(params: {
     l0RecordedCount: filteredMessages.length,
     l0VectorsWritten,
     filteredMessages,
+    ...(gateExcludedCount > 0 ? { gateExcludedCount } : {}),
   };
 }

@@ -615,12 +615,28 @@ export interface IMemoryStore extends MemoryPromptStore, MemoryGenerationRefStor
   deleteL1(recordId: string, filter?: IsolationFilter): MaybePromise<boolean>;
   deleteL1Batch(recordIds: string[], filter?: IsolationFilter): MaybePromise<boolean>;
   deleteL1Expired(cutoffIso: string): MaybePromise<number>;
+  /**
+   * [P1 票④ capture-dedup-gate] 捕获闸短路命中时只推热度时间戳（可选能力）。
+   * 语义：仅更新该 L1 记忆的最近触达时间（updated_time），不改内容/向量——
+   * 同源重投的「访问热度」凭证，供票⑦召回多信号排序消费。
+   * 未实现此方法的 store（mongodb/tcvdb）装配点跳过该步，行为不变。
+   */
+  touchL1Heat?(recordId: string, atIso: string): MaybePromise<boolean>;
 
   // ── L1 Read ──────────────────────────────────────────────
 
   countL1(filter?: L1CountFilter): MaybePromise<number>;
   queryL1Records(filter?: L1QueryFilter): MaybePromise<L1RecordRow[]>;
   getAllL1Texts(): MaybePromise<Array<{ record_id: string; content: string; updated_time: string }>>;
+  /**
+   * [P1 票④修复 P2] 增量拉取 updated_time ≥ since 的 L1 文本（捕获闸种子水位增量化，可选能力）。
+   * 返回按 updated_time 升序、至多 limit 条。未实现时装配点降级为每批 getAllL1Texts()
+   * 全量再种子（行为同 v1，正确性不变，仅多 O(全库) 扫描）。
+   */
+  getL1TextsSince?(
+    sinceUpdatedTime: string,
+    limit: number,
+  ): MaybePromise<Array<{ record_id: string; content: string; updated_time: string }>>;
 
   // ── L1 Search ────────────────────────────────────────────
 
@@ -658,6 +674,17 @@ export interface IMemoryStore extends MemoryPromptStore, MemoryGenerationRefStor
   queryL0ForL1(sessionKey: string, afterRecordedAtMs?: number, limit?: number): MaybePromise<L0QueryRow[]>;
   queryL0GroupedBySessionId(sessionKey: string, afterRecordedAtMs?: number, limit?: number): MaybePromise<L0SessionGroup[]>;
   getAllL0Texts(): MaybePromise<Array<{ record_id: string; message_text: string; recorded_at: string }>>;
+  /**
+   * [P1 票④修复·持久 L0 近窗] 拉取 timestamp ≥ afterTs 的最新至多 limit 条 L0 消息
+   * （可选能力，按 timestamp 降序）。供捕获闸跨重启接住 L0 冗余重投：在案存储已有
+   * message_text + timestamp（idx_l0_timestamp）但无指纹列——零 schema 变更，指纹由
+   * 闸按同一归一化口径现算（TTL 7 天、容量封顶在闸侧）。未实现时持久层静默缺席
+   * （pending/archive 仍有效，行为同 v1）。
+   */
+  getRecentL0Texts?(
+    afterTs: number,
+    limit: number,
+  ): MaybePromise<Array<{ record_id: string; message_text: string; timestamp: number }>>;
 
   // ── L0 Search ────────────────────────────────────────────
 
