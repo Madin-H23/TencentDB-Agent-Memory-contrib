@@ -634,6 +634,9 @@ export class VectorStore implements IMemoryStore {
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_scene ON l1_records(scene_name)");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_ts_start ON l1_records(timestamp_start)");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_ts_end ON l1_records(timestamp_end)");
+    // 裸 updated_time 范围扫描（P1 票④修复 P2：捕获闸种子按 updated_time 水位增量拉取；
+    // 组合索引均带前缀列，SQLite 无法用于无前缀的纯范围查询）
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_updated ON l1_records(updated_time)");
     // Composite index: session_id exact match + updated_time range scan (for incremental L2 queries)
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_l1_session_updated ON l1_records(session_id, updated_time)");
     // Composite index: session_key exact match + updated_time range scan (for pipeline cursor queries)
@@ -2263,6 +2266,54 @@ export class VectorStore implements IMemoryStore {
     } catch (err) {
       this.logger?.warn(
         `${TAG} getAllL0Texts failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return [];
+    }
+  }
+
+  /**
+   * [P1 票④修复 P2] 增量拉取 updated_time ≥ since 的 L1 文本（捕获闸种子水位增量化）。
+   * 返回按 updated_time 升序、至多 limit 条，配合 idx_l1_updated 走范围扫描。
+   * degraded/查询失败返回 []（非致命，与 getAllL1Texts 同向）。
+   */
+  getL1TextsSince(
+    sinceUpdatedTime: string,
+    limit: number,
+  ): Array<{ record_id: string; content: string; updated_time: string }> {
+    if (this.degraded) return [];
+    try {
+      return this.db
+        .prepare(
+          "SELECT record_id, content, updated_time FROM l1_records WHERE updated_time >= ? ORDER BY updated_time ASC LIMIT ?",
+        )
+        .all(sinceUpdatedTime, limit) as Array<{ record_id: string; content: string; updated_time: string }>;
+    } catch (err) {
+      this.logger?.warn(
+        `${TAG} getL1TextsSince failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return [];
+    }
+  }
+
+  /**
+   * [P1 票④修复·持久 L0 近窗] 拉取 timestamp ≥ afterTs 的最新至多 limit 条 L0 消息
+   * （按 timestamp 降序，走 idx_l0_timestamp）。无指纹列——指纹由捕获闸按同一归一化
+   * 口径现算，零 schema 变更。degraded/查询失败返回 []（非致命）。
+   */
+  getRecentL0Texts(
+    afterTs: number,
+    limit: number,
+  ): Array<{ record_id: string; message_text: string; timestamp: number }> {
+    if (this.degraded) return [];
+    try {
+      return this.db
+        .prepare(
+          "SELECT record_id, message_text, timestamp FROM l0_conversations WHERE timestamp >= ? ORDER BY timestamp DESC LIMIT ?",
+        )
+        .all(afterTs, limit) as Array<{ record_id: string; message_text: string; timestamp: number }>;
+    } catch (err) {
+      this.logger?.warn(
+        `${TAG} getRecentL0Texts failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
       );
       return [];
     }
