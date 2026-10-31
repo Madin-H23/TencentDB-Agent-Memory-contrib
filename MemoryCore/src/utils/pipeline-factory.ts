@@ -926,6 +926,9 @@ export function createL2Runner(opts: {
         // 默认 off=行为与基线逐字节一致）。经 LLMRunParams 传到 read/write/edit 工具工厂
         // 与提示词层；只在 L2 传入。
         explicitInvalidation: cfg.persona?.explicitInvalidation,
+        // 票⑤（exp/p1-5-scene-format-v2）：场景格式 v2 双层化（persona.sceneFormatV2，
+        // 默认 off=行为与基线逐字节一致）。只在 L2 传入。
+        sceneFormatV2: cfg.persona?.sceneFormatV2,
         // L2 场景抽取超时（2026-10-21）：此前工厂**不传** timeoutMs → 抽取器内部
         // 回落硬编码 300s（scene-extractor.ts `opts.timeoutMs ?? 300_000`）并以该
         // 值覆盖层配置 ⇒ yaml 的 llm.layers.l2.timeoutMs（600000）对场景抽取

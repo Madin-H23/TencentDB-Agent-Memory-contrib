@@ -118,6 +118,15 @@ export interface LLMRunParams {
    * 缺省 off——off 时工具 schema/行为与基线逐字节一致。
    */
   explicitInvalidation?: boolean;
+  /**
+   * [P1 票⑤ 场景格式 v2 双层化] L2 read/write/edit 工具的三层结构语义：
+   * read 默认返回 META+要点+事实 两层（`## 活动` 段折叠，includeArchive:true 审计；
+   * v2 on 时 read 管线=折叠→失效过滤→窗口）；write/edit 落盘前把 `## 要点` 段
+   * 单向同步为 META.summary + metric=l2_format_v2。
+   * 只有 L2 场景抽取装配点传入（scene-extractor ← persona.sceneFormatV2）；
+   * 缺省 off——off 时提示词/工具 schema/行为与基线逐字节一致。
+   */
+  sceneFormatV2?: boolean;
   /** Plugin instance ID for metric reporting (optional). */
   instanceId?: string;
   /**

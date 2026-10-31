@@ -49,6 +49,12 @@ export interface SceneExtractionPromptParams {
    * 失效不计帽）。缺省/false=off，提示词与基线逐字节一致（双版本同进程钉测试）。
    */
   explicitInvalidation?: boolean;
+  /**
+   * [P1 票⑤ 场景格式 v2 双层化] on 时系统提示词追加 v2 三层结构规则块
+   * （`## 要点`/`## 事实`/`## 活动` 段定义 + 写路径按层路由 + 失效行落 `## 事实`
+   * 段内原地标记）。缺省/false=off，提示词与基线逐字节一致（双版本同进程钉测试）。
+   */
+  sceneFormatV2?: boolean;
 }
 
 export interface SceneExtractionPromptResult {
@@ -79,7 +85,29 @@ function supersedeRulesBlock(explicitInvalidation: boolean): string {
 `;
 }
 
-function buildSceneSystemPrompt(maxScenes: number, explicitInvalidation = false): string {
+/**
+ * 票⑤（exp/p1-5-scene-format-v2）：v2 三层结构规则块。
+ * off（false）返回空串——插入点模板在 off 时逐字节回到基线。
+ * on 时插入：段定义（`## 要点`/`## 事实`/`## 活动`）+ 写路径按层路由 + read 默认
+ * 两层口径；explicitInvalidation 同时 on 时追加「失效行落 `## 事实` 段内原地标记」
+ * 一行（与票⑥规则块衔接：原地=事实段内，不移活动区）。
+ */
+function sceneFormatV2RulesBlock(sceneFormatV2: boolean, explicitInvalidation: boolean): string {
+  if (!sceneFormatV2) return "";
+  const invalLayerLine = explicitInvalidation
+    ? "- 被替代的旧事实行在 \`## 事实\` 段内**原地**加 \`[SUPERSEDED <ISO时间>]\` 前缀标记失效（**不移入 \`## 活动\` 段**；失效行默认 read 不可见）\n"
+    : "";
+  return `
+## 🗂️ 场景文件格式 v2（三层结构）
+场景文件正文按三层组织，**段标题必须逐字使用**（\`## 要点\`、\`## 事实\`、\`## 活动\`，各占一行）：
+- **\`## 要点\`**：≤300 字的稳定摘要（2-3 句话浓缩本场景"是什么/当前状态/核心方法"），不写流水账、不逐条记事件；该段会被系统自动同步为 META.summary 并进入场景索引
+- **\`## 事实\`**：**唯一事实载体**——每条事实独立一行，行内带锚点 id（\`m_<ts>_<hash>\`）；新事实追加到此段
+- **\`## 活动\`**：批次叙事归档（按批次组织的过程叙述），只追加不重写；该段默认不进入读取视图（read 默认只返回 META+要点+事实，\`includeArchive: true\` 才返回活动归档全文）
+**写路径按层路由**：新事实 → \`## 事实\` 追加；过程叙事 → \`## 活动\` 追加；要点演变 → 重写 \`## 要点\`（≤300 字）。折叠/归档只发生在 \`## 活动\` 段，不得触碰要点与事实两层。
+${invalLayerLine}`;
+}
+
+function buildSceneSystemPrompt(maxScenes: number, explicitInvalidation = false, sceneFormatV2 = false): string {
   // 票⑥：off 分支 = 基线原文逐字节；on 分支 = recency-wins 变体（双分支字面量，钉测试护栏）。
   const mergeOldFilesDirective = explicitInvalidation
     ? `**并先把被合并旧文件中的事实锚点行（\`m_<ts>_<hash>\`）移入合并后的新文件**（被新事实替代的行加 \`[SUPERSEDED <ISO时间>]\` 前缀留存）`
@@ -99,6 +127,7 @@ function buildSceneSystemPrompt(maxScenes: number, explicitInvalidation = false)
 6. **write**(\`path\`='Go后端开发.md', \`content\`='[DELETED]') → **⚠️ 删除旧文件 B**
 **关键**：步骤 5-6 是必须的！不执行删除 = 文件总数不减少 = 合并无效。`;
   const invalRules = supersedeRulesBlock(explicitInvalidation);
+  const v2Rules = sceneFormatV2RulesBlock(sceneFormatV2, explicitInvalidation);
   return `# Memory Consolidation Architect
 
 **输出语言**：\`.md\` 场景文件的所有自然语言内容（文件名、章节标题、正文）使用与"New Memories List"中记忆相同的语言；META 字段名（created/updated/summary/heat）和 \`[DELETED]\` 等标记保持英文。模板中给出的中文章节标题（\`## 用户核心特征\` 等）作为结构骨架——非中文输出时请用目标语言的等价表达替换。
@@ -232,7 +261,7 @@ ${mergeExampleSteps}
 新建 Block: heat: 1
 更新 Block: heat: 旧heat + 1
 合并 Block: heat: sum(所有相关block的heat) + 1
-${invalRules}
+${invalRules}${v2Rules}
 ## 输出规范 (Output Specification)
 
 ### 📄 场景文件内容（必须输出）
@@ -304,7 +333,7 @@ reason: 具体原因描述
    - **删除文件**：使用 **write**(\`path\`=文件名, \`content\`='[DELETED]') 写入删除标记。系统会自动清理这些文件。**重要**：只有 \`[DELETED]\` 标记会触发系统清理。写入空字符串会被系统拒绝，写入 \`[ARCHIVE]\`、\`[CONSOLIDATED]\` 等标记**不会删除文件**，文件会继续占用场景配额。`;
 }
 
-function buildWorkSceneSystemPrompt(maxScenes: number, explicitInvalidation = false): string {
+function buildWorkSceneSystemPrompt(maxScenes: number, explicitInvalidation = false, sceneFormatV2 = false): string {
   // 票⑥：off 分支 = 基线原文逐字节；on 分支 = recency-wins 变体（同 chat family 口径）。
   const mergeOldFilesDirective = explicitInvalidation
     ? `**并先把被合并旧文件中的事实锚点行（\`m_<ts>_<hash>\`）移入合并后的新文件**（被新事实替代的行加 \`[SUPERSEDED <ISO时间>]\` 前缀留存）`
@@ -313,6 +342,7 @@ function buildWorkSceneSystemPrompt(maxScenes: number, explicitInvalidation = fa
     ? `   - **⚠️ 合并后旧文件先迁移锚点再删除**：先将被合并旧文件中的全部事实锚点行（\`m_<ts>_<hash>\`）移入合并后的新文件——被新事实替代的行加 \`[SUPERSEDED <ISO时间>]\` 前缀标记失效后留存；随后旧文件才通过 **write** 写入 \`[DELETED]\` 标记删除。**未迁移锚点就写 \`[DELETED]\` 会被系统拒绝（anchor_loss_forbidden）。**`
     : `   - **⚠️ 合并后必须删除旧文件**：被合并的旧场景文件必须通过 **write** 写入 \`[DELETED]\` 标记。`;
   const invalRules = supersedeRulesBlock(explicitInvalidation);
+  const v2Rules = sceneFormatV2RulesBlock(sceneFormatV2, explicitInvalidation);
   return `# Team Work Method Memory Consolidation Architect
 
 **输出语言**：\`.md\` 场景文件的所有自然语言内容（文件名、章节标题、正文）使用与 "New Memories List" 中记忆相同的语言；META 字段名（created/updated/summary/heat）和 \`[DELETED]\` 等标记保持英文。模板中的中文章节标题仅作为结构骨架，非中文输出时请用目标语言的等价表达替换。
@@ -505,7 +535,7 @@ ${mergeOldFilesBullet}
 - 新建 Block: heat: 1
 - 更新 Block: heat: 旧heat + 1
 - 合并 Block: heat: sum(所有相关 block 的 heat) + 1
-${invalRules}
+${invalRules}${v2Rules}
 ---
 
 ## 输出规范 (Output Specification)
@@ -587,10 +617,11 @@ function getSceneSystemPrompt(
   maxScenes: number,
   promptMode: MemoryPromptMode = "chat",
   explicitInvalidation = false,
+  sceneFormatV2 = false,
 ): string {
   return promptMode === "code"
-    ? buildWorkSceneSystemPrompt(maxScenes, explicitInvalidation)
-    : buildSceneSystemPrompt(maxScenes, explicitInvalidation);
+    ? buildWorkSceneSystemPrompt(maxScenes, explicitInvalidation, sceneFormatV2)
+    : buildSceneSystemPrompt(maxScenes, explicitInvalidation, sceneFormatV2);
 }
 
 // ============================
@@ -631,6 +662,7 @@ export function buildSceneExtractionPrompt(params: SceneExtractionPromptParams):
     promptMode = "chat",
     sceneIndexSection,
     explicitInvalidation = false,
+    sceneFormatV2 = false,
   } = params;
 
   const warningSection = sceneCountWarning
@@ -659,7 +691,7 @@ ${sceneIndexBlock}
 ${fileListSection}`;
 
   return {
-    systemPrompt: getSceneSystemPrompt(maxScenes, promptMode, explicitInvalidation),
+    systemPrompt: getSceneSystemPrompt(maxScenes, promptMode, explicitInvalidation, sceneFormatV2),
     userPrompt,
   };
 }

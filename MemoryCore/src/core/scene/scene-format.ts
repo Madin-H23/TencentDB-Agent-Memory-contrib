@@ -17,8 +17,9 @@ export interface SceneBlock {
   content: string;
 }
 
-const META_START = "-----META-START-----";
-const META_END = "-----META-END-----";
+// 票⑤（exp/p1-5-scene-format-v2）：导出供 v2 模块定位 META 块（值口径不变）。
+export const META_START = "-----META-START-----";
+export const META_END = "-----META-END-----";
 
 /**
  * Parse a Scene Block file into structured data.

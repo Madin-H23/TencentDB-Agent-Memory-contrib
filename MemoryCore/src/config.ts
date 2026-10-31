@@ -141,6 +141,14 @@ export interface PersonaConfig {
    * 默认 false=off——off 时 L2 写/读路径与基线逐字节一致（off 兼容钉测试）。
    */
   explicitInvalidation: boolean;
+  /**
+   * [P1 票⑤ 场景格式 v2 双层化] L2 场景文件改三层结构：`## 要点`（≤300 字稳定摘要，
+   * 工具层自动同步为 META.summary 并进场景索引）+ `## 事实`（锚点行，唯一事实载体）
+   * + `## 活动`（批次叙事归档，默认 read 折叠，includeArchive:true 审计）。
+   * 默认 false=off——off 时 L2 提示词/读写工具/存储行为与基线逐字节一致
+   * （双版本同进程钉测试，基线 07d9057 经 git show 独立再生）。
+   */
+  sceneFormatV2: boolean;
   /** LLM model for persona generation, format: "provider/model" (falls back to OpenClaw default model when omitted) */
   model?: string;
   /** Prompt family for L2/L3 prompts (default: chat; code prompts will be wired as they are added). */
@@ -771,6 +779,8 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       sceneCharCap: num(personaGroup, "sceneCharCap") ?? 32_000,
       // 票⑥（exp/p1-6-supersede-inval）：显式失效替代硬删，默认 off=行为与基线逐字节一致。
       explicitInvalidation: bool(personaGroup, "explicitInvalidation") ?? false,
+      // 票⑤（exp/p1-5-scene-format-v2）：场景格式 v2 双层化，默认 off=行为与基线逐字节一致。
+      sceneFormatV2: bool(personaGroup, "sceneFormatV2") ?? false,
       model: optStr(personaGroup, "model"),
       promptMode: normalizePromptMode(str(personaGroup, "promptMode"), globalPromptMode),
       triggerMode,
