@@ -902,7 +902,7 @@ export function createL2Runner(opts: {
       const groupScope = buildIsolationScope(ctx);
       const groupProfileOptions = profileOptionsForScope(groupScope);
       const groupBaseline = vectorStore?.pullProfiles && !vectorStore.isDegraded()
-        ? await pullProfilesToLocal(groupDataDir, vectorStore, logger, groupStorage, groupProfileOptions)
+        ? await pullProfilesToLocal(groupDataDir, vectorStore, logger, groupStorage, groupProfileOptions, cfg.persona?.recallRanking)
         : profileBaseline;
 
       const extractor = new SceneExtractor({
@@ -929,6 +929,9 @@ export function createL2Runner(opts: {
         // 票⑤（exp/p1-5-scene-format-v2）：场景格式 v2 双层化（persona.sceneFormatV2，
         // 默认 off=行为与基线逐字节一致）。只在 L2 传入。
         sceneFormatV2: cfg.persona?.sceneFormatV2,
+        // 票⑦（exp/p1-7-recall-ranking）：召回多信号排序（persona.recallRanking，
+        // 默认 off=导航排序与基线逐字节一致）。只在 L2 传入。
+        recallRanking: cfg.persona?.recallRanking,
         // L2 场景抽取超时（2026-10-21）：此前工厂**不传** timeoutMs → 抽取器内部
         // 回落硬编码 300s（scene-extractor.ts `opts.timeoutMs ?? 300_000`）并以该
         // 值覆盖层配置 ⇒ yaml 的 llm.layers.l2.timeoutMs（600000）对场景抽取
@@ -1351,7 +1354,7 @@ export function createL3Runner(opts: {
       // for the optimistic-lock check instead of defaulting to 0.
       let profileBaseline = new Map<string, { version: number; contentMd5: string; createdAtMs: number }>();
       if (vectorStore?.pullProfiles && !vectorStore.isDegraded()) {
-        profileBaseline = await pullProfilesToLocal(scopedDir, vectorStore, logger, scopedStore, profileOptions);
+        profileBaseline = await pullProfilesToLocal(scopedDir, vectorStore, logger, scopedStore, profileOptions, cfg.persona?.recallRanking);
       }
 
       if (context?.signal?.aborted) {
@@ -1379,6 +1382,8 @@ export function createL3Runner(opts: {
         instanceId,
         llmRunner,
         storage: scopedStore,
+        // 票⑦（exp/p1-7-recall-ranking）：召回多信号排序（persona.recallRanking，默认 off）。
+        recallRanking: cfg.persona?.recallRanking,
         traceContext: scopeIsolation,
       });
       const genResult = await generator.generateLocalPersona(generationReason);

@@ -8,6 +8,10 @@
 import path from "node:path";
 import type { SceneIndexEntry } from "./scene-index.js";
 import { redactPii } from "../../utils/pii-redact.js";
+// 票⑦（exp/p1-7-recall-ranking）：召回多信号排序——纯模块（零 I/O），
+// off（不传 opts.ranking）时本文件排序行为与基线逐字节一致。
+import { formatRecallRankAnchor, rankSceneEntries } from "./recall-ranking.js";
+import type { ResolvedRecallRanking } from "./recall-ranking.js";
 
 const NAV_HEADER = "---\n## 🗺️ Scene Navigation (Scene Index)";
 
@@ -38,6 +42,18 @@ export interface SceneNavigationRenderOptions {
   /** Tool the model should call, named in the intro line. */
   readTool: string;
   footer: string;
+  /**
+   * [P1 票⑦] 召回多信号排序（已解析配置）。缺省 undefined=off——保持基线的
+   * 热度降序逐字节不变；传入时按 recall-ranking.ts 的多信号公式排序。
+   */
+  ranking?: ResolvedRecallRanking;
+  /** on 时用于计算天龄的当前时刻（默认 Date.now()）；测试注入以保确定性。 */
+  nowMs?: number;
+  /**
+   * on 时接收一行观测锚点（`metric=l2_recall_rank value=1 ...`），由调用方
+   * 自行落日志（本模块保持渲染纯函数、不做 I/O）。off 时回调不被调用。
+   */
+  onRanked?: (anchorLine: string) => void;
 }
 
 /**
@@ -59,6 +75,8 @@ function heatEmoji(heat: number): string {
  * @param dataDir - Absolute path to the plugin data directory; when provided
  *                  and useCos=false, paths are absolute for read_file.
  * @param useCos  - When true, paths use scenes/ prefix and footer says tdai_read_file.
+ * @param ranking - [P1 票⑦] 召回多信号排序配置（undefined=off，基线热度降序）。
+ * @param onRanked - [P1 票⑦] on 时接收观测锚点行（off 不调用）。
  *
  * ⚠️ KNOWN BROKEN — the `useCos=true` branch emits unreadable paths. Do not
  * build on it, and do not "fix" it by renaming scenes/ -> scene_blocks/ alone.
@@ -81,7 +99,13 @@ function heatEmoji(heat: number): string {
  * See docs/design/mongodb/design/2026-08-27-core-storage-abstraction-design.md
  * (D13, §10.C3.1, known issue L6).
  */
-export function generateSceneNavigation(entries: SceneIndexEntry[], dataDir?: string, useCos = false): string {
+export function generateSceneNavigation(
+  entries: SceneIndexEntry[],
+  dataDir?: string,
+  useCos = false,
+  ranking?: ResolvedRecallRanking,
+  onRanked?: (anchorLine: string) => void,
+): string {
   return renderSceneNavigation(entries, {
     pathFor: (e) =>
       useCos
@@ -91,6 +115,8 @@ export function generateSceneNavigation(entries: SceneIndexEntry[], dataDir?: st
           : `scene_blocks/${e.filename}`,
     readTool: useCos ? "tdai_read_file" : "read",
     footer: useCos ? storageNavFooter("tdai_read_file") : NAV_FOOTER_LOCAL,
+    ...(ranking !== undefined ? { ranking } : {}),
+    ...(onRanked !== undefined ? { onRanked } : {}),
   });
 }
 
@@ -100,6 +126,10 @@ export function generateSceneNavigation(entries: SceneIndexEntry[], dataDir?: st
  * Taking `pathFor` instead of a mode flag is the point: a backend renders the
  * paths it actually serves, so navigation and reads cannot drift apart the way
  * the `useCos` branch above did.
+ *
+ * 排序（票⑦）：opts.ranking 缺省=基线热度降序（逐字节兼容）；传入=多信号排序
+ * （热度归一×w1 + 指数衰减新近×w2 + 相关性×w3 + 使用计数×w4，纯函数见
+ * recall-ranking.ts），on 时经 onRanked 回调上报观测锚点恰一行、off 零输出。
  */
 export function renderSceneNavigation(
   entries: SceneIndexEntry[],
@@ -107,7 +137,11 @@ export function renderSceneNavigation(
 ): string {
   if (entries.length === 0) return "";
 
-  const sorted = [...entries].sort((a, b) => b.heat - a.heat);
+  // 票⑦：off 分支保持基线表达式逐字节不动（heat 降序；V8 稳定排序=平票保输入序）。
+  const sorted = opts.ranking
+    ? rankSceneEntries(entries, opts.ranking, opts.nowMs ?? Date.now())
+    : [...entries].sort((a, b) => b.heat - a.heat);
+  if (opts.ranking) opts.onRanked?.(formatRecallRankAnchor(opts.ranking, entries.length));
 
   const blocks = sorted.map((e) => {
     const pathLine = `### Path: ${opts.pathFor(e)}`;

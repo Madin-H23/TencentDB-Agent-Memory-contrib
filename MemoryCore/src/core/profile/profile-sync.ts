@@ -4,6 +4,7 @@ import path from "node:path";
 import type { IMemoryStore, ProfileRecord, ProfileSyncRecord } from "../store/types.js";
 import { readSceneIndex, syncSceneIndex } from "../scene/scene-index.js";
 import { generateSceneNavigation, stripSceneNavigation } from "../scene/scene-navigation.js";
+import type { ResolvedRecallRanking } from "../scene/recall-ranking.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import { StoragePaths } from "../storage/types.js";
 import type { Logger } from "../types.js";
@@ -61,7 +62,12 @@ async function statTimes(filePath: string): Promise<{ createdAtMs: number; updat
   }
 }
 
-async function refreshPersonaNavigation(dataDir: string, storage?: StorageAdapter): Promise<void> {
+async function refreshPersonaNavigation(
+  dataDir: string,
+  storage?: StorageAdapter,
+  recallRanking?: ResolvedRecallRanking,
+  logger?: Logger,
+): Promise<void> {
   // Read persona body
   let body: string;
   if (storage) {
@@ -79,7 +85,10 @@ async function refreshPersonaNavigation(dataDir: string, storage?: StorageAdapte
   if (!body) return;
 
   const index = await readSceneIndex(dataDir, storage);
-  const nav = generateSceneNavigation(index, undefined, false);
+  // 票⑦：persona.recallRanking on 时导航按多信号排序并打观测锚点；off=基线逐字节。
+  const nav = generateSceneNavigation(index, undefined, false, recallRanking, (line) =>
+    logger?.info(`[memory-tdai][profile-sync] ${line}`),
+  );
   const finalContent = nav ? `${body}\n\n${nav}\n` : `${body}\n`;
 
   if (storage) {
@@ -220,6 +229,7 @@ export async function pullProfilesToLocal(
   logger: Logger,
   storage?: StorageAdapter,
   options?: ProfileScopeOptions,
+  recallRanking?: ResolvedRecallRanking,
 ): Promise<Map<string, ProfileBaseline>> {
   if (!store.pullProfiles) return new Map();
 
@@ -305,7 +315,7 @@ export async function pullProfilesToLocal(
     }
 
     await syncSceneIndex(dataDir, storage);
-    await refreshPersonaNavigation(dataDir, storage);
+    await refreshPersonaNavigation(dataDir, storage, recallRanking, logger);
     logger.debug?.(`[memory-tdai][profile-sync] Pulled ${records.length} profile(s) to storage`);
     return baseline;
   }
@@ -409,7 +419,7 @@ export async function pullProfilesToLocal(
     }
 
     await syncSceneIndex(dataDir);
-    await refreshPersonaNavigation(dataDir);
+    await refreshPersonaNavigation(dataDir, undefined, recallRanking, logger);
     logger.debug?.(`[memory-tdai][profile-sync] Pulled ${records.length} profile(s) to local cache`);
     return baseline;
   } finally {

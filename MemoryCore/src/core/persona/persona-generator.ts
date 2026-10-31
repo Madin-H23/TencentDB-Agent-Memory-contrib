@@ -7,6 +7,7 @@ import type { MemoryPromptMode } from "../../config.js";
 import { CleanContextRunner } from "../../utils/clean-context-runner.js";
 import { CheckpointManager } from "../../utils/checkpoint.js";
 import { readSceneIndex } from "../scene/scene-index.js";
+import type { ResolvedRecallRanking } from "../scene/recall-ranking.js";
 import { generateSceneNavigation, stripSceneNavigation } from "../scene/scene-navigation.js";
 import { buildPersonaPrompt } from "../prompts/persona-generation.js";
 import { BackupManager } from "../../utils/backup.js";
@@ -33,6 +34,7 @@ export class PersonaGenerator {
   private memoryPrompt: ResolvedMemoryPrompt | undefined;
   private instanceId: string | undefined;
   private storage: StorageAdapter | undefined;
+  private recallRanking: ResolvedRecallRanking | undefined;
   private traceContext: TraceContext | undefined;
   /** 最近一次生成失败的简短原因（成功/未跑时为 undefined；供上游把原因带进任务级错误消息） */
   private lastFailureReason: string | undefined;
@@ -57,6 +59,11 @@ export class PersonaGenerator {
     llmRunner?: LLMRunner;
     /** StorageAdapter for file operations (COS/local). Falls back to fs when absent. */
     storage?: StorageAdapter;
+    /**
+     * [P1 票⑦ 召回多信号排序] L3 生成时 persona.md 导航段的排序口径（undefined=off=
+     * 基线热度降序逐字节不变）。yaml `persona.recallRanking` 控制，经 createL3Runner 传入。
+     */
+    recallRanking?: ResolvedRecallRanking;
     /** langfuse 上报身份四元组（team/user/agent/session），填充 trace 顶级字段。 */
     traceContext?: TraceContext;
   }) {
@@ -67,6 +74,7 @@ export class PersonaGenerator {
     this.backupCount = opts.backupCount ?? 3;
     this.instanceId = opts.instanceId;
     this.storage = opts.storage;
+    this.recallRanking = opts.recallRanking;
     this.traceContext = opts.traceContext;
     // Use injected LLMRunner if available, otherwise fall back to CleanContextRunner
     this.runner = opts.llmRunner ?? new CleanContextRunner({
@@ -291,7 +299,10 @@ export class PersonaGenerator {
     const personaUnchanged = personaBodyUnchanged(personaText, existingPersona);
 
     // 11. Append fresh scene navigation and write final content
-    const nav = generateSceneNavigation(index, undefined, false);
+    // 票⑦：persona.recallRanking on 时导航按多信号排序并打观测锚点；off=基线逐字节。
+    const nav = generateSceneNavigation(index, undefined, false, this.recallRanking, (line) =>
+      this.logger?.info(`${TAG} ${line}`),
+    );
     const finalContent = nav ? `${personaText}\n\n${nav}\n` : personaText;
     if (this.storage) {
       await this.storage.writeFile(targetFile, finalContent);
