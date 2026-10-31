@@ -114,6 +114,13 @@ export interface SceneExtractorOptions {
    * 提示词与工具行为和基线逐字节一致。yaml `persona.explicitInvalidation` 控制。
    */
   explicitInvalidation?: boolean;
+  /**
+   * [P1 票⑤ 场景格式 v2 双层化]：场景文件三层结构（要点/事实/活动）——提示词追加
+   * v2 规则块，read 默认两层（活动区折叠，includeArchive 审计），write/edit 落盘前
+   * 要点段→META.summary 同步（经 LLMRunParams.sceneFormatV2 透传）。缺省 off=
+   * 提示词与工具行为和基线逐字节一致。yaml `persona.sceneFormatV2` 控制。
+   */
+  sceneFormatV2?: boolean;
   /** langfuse 上报身份四元组（team/user/agent/session）。传下来会填充 trace 顶级字段。 */
   traceContext?: TraceContext;
 }
@@ -155,6 +162,7 @@ export class SceneExtractor {
   private storage: StorageAdapter | undefined;
   private sceneCharCap: number | undefined;
   private explicitInvalidation: boolean;
+  private sceneFormatV2: boolean;
   private traceContext: TraceContext | undefined;
 
   constructor(opts: SceneExtractorOptions) {
@@ -170,6 +178,7 @@ export class SceneExtractor {
     this.storage = opts.storage;
     this.sceneCharCap = opts.sceneCharCap;
     this.explicitInvalidation = opts.explicitInvalidation ?? false;
+    this.sceneFormatV2 = opts.sceneFormatV2 ?? false;
     this.traceContext = opts.traceContext;
 
     // Use injected LLMRunner if available, otherwise fall back to CleanContextRunner
@@ -308,6 +317,7 @@ export class SceneExtractor {
       promptMode: this.promptMode,
       sceneIndexSection,
       explicitInvalidation: this.explicitInvalidation,
+      sceneFormatV2: this.sceneFormatV2,
     });
     const systemPrompt = composeMemorySystemPrompt(baseSystemPrompt, this.memoryPrompt);
     this.logger?.debug?.(`${TAG} extract() prompt built: ${userPrompt.length} chars (${Date.now() - promptStartMs}ms)`);
@@ -335,6 +345,8 @@ export class SceneExtractor {
         sceneCharCap: this.sceneCharCap,
         // 票⑥：显式失效语义（persona.explicitInvalidation，默认 off）—— 只在 L2 传入。
         explicitInvalidation: this.explicitInvalidation,
+        // 票⑤：场景格式 v2 双层化（persona.sceneFormatV2，默认 off）—— 只在 L2 传入。
+        sceneFormatV2: this.sceneFormatV2,
         ...traceParams,
       }) ?? "";
       llmDurationMs = Date.now() - runnerStartMs;

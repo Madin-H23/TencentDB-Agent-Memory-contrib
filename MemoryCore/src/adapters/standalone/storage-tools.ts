@@ -19,6 +19,11 @@ import { readCacheMetrics, formatReadCacheNote } from "../../utils/read-cache-me
 import { applyReadWindow } from "../../utils/read-window.js";
 import { checkSceneCharCap } from "../../utils/scene-char-cap.js";
 import {
+  buildV2ReadView,
+  isV2Format,
+  syncV2MetaSummary,
+} from "../../core/scene/scene-format-v2.js";
+import {
   checkAnchorPreservation,
   checkSceneCharCapWithSupersede,
   filterSupersededLines,
@@ -88,6 +93,13 @@ export function createStorageTools(
    * 作用域同 sceneCharCap（只对非空前缀生效）；缺省 off=工具 schema/行为与基线逐字节一致。
    */
   explicitInvalidation?: boolean,
+  /**
+   * [P1 票⑤ 场景格式 v2 双层化]：read 默认返回 META+要点+事实 两层（`## 活动` 段
+   * 折叠，includeArchive:true 审计）；write/edit 落盘前把 `## 要点` 段单向同步为
+   * META.summary（要点是源）+ metric=l2_format_v2。作用域同上；缺省 off=schema/行为
+   * 与基线（含票⑥ on 形态）逐字节一致。
+   */
+  sceneFormatV2?: boolean,
 ) {
   // S0 影子计量：一次 toolset = 一次 run，累计量随工具集生命周期归零。
   const readBudget = new ReadBudgetTracker();
@@ -95,6 +107,8 @@ export function createStorageTools(
   const effectiveCharCap = prefix ? (sceneCharCap ?? 0) : 0;
   // 票⑥：失效语义作用域 = 非空前缀（同帽）。off 时 read/write/edit 全部走基线路径。
   const effectiveInval = prefix ? (explicitInvalidation ?? false) : false;
+  // 票⑤：v2 双层化作用域 = 非空前缀（同帽）。off 时全部走基线路径。
+  const effectiveV2 = prefix ? (sceneFormatV2 ?? false) : false;
   /**
    * 票⑥ 写路径守卫（on 专属，落盘前）：普通写入=行级保锚（前像锚点多重集必须
    * 全数存活于后像）；[DELETED] 软删流=文件级重定位（被删文件锚点必须已在同前缀
@@ -149,32 +163,31 @@ export function createStorageTools(
   };
   return {
     read: tool({
-      description: effectiveInval
-        ? "Read the contents of a file at the given relative path. Supports optional offset/limit (character window) to read large files section by section. 配合场景索引按需读取所需场景。已失效行（[SUPERSEDED ...] 标记）默认被过滤；includeInvalidated:true 返回含失效行的全量原文（审计）。"
-        : "Read the contents of a file at the given relative path. Supports optional offset/limit (character window) to read large files section by section. 配合场景索引按需读取所需场景。",
-      inputSchema: jsonSchema<{ path: string; offset?: number; limit?: number; includeInvalidated?: boolean }>(
-        effectiveInval
-          ? {
-              type: "object",
-              properties: {
-                path: { type: "string", description: "Relative file path to read." },
-                offset: { type: "number", description: "Character offset to start reading from (default 0)." },
-                limit: { type: "number", description: "Maximum number of characters to return (default: read to end of file)." },
-                includeInvalidated: { type: "boolean", description: "Include [SUPERSEDED] invalidated lines (audit view). Default false." },
-              },
-              required: ["path"],
-            }
-          : {
-              type: "object",
-              properties: {
-                path: { type: "string", description: "Relative file path to read." },
-                offset: { type: "number", description: "Character offset to start reading from (default 0)." },
-                limit: { type: "number", description: "Maximum number of characters to return (default: read to end of file)." },
-              },
-              required: ["path"],
-            },
+      description:
+        (effectiveInval
+          ? "Read the contents of a file at the given relative path. Supports optional offset/limit (character window) to read large files section by section. 配合场景索引按需读取所需场景。已失效行（[SUPERSEDED ...] 标记）默认被过滤；includeInvalidated:true 返回含失效行的全量原文（审计）。"
+          : "Read the contents of a file at the given relative path. Supports optional offset/limit (character window) to read large files section by section. 配合场景索引按需读取所需场景。")
+        + (effectiveV2
+          ? "场景格式 v2：默认返回 META+要点+事实 两层（活动归档段已折叠，窗口作用于折叠后的视图）；includeArchive:true 返回含活动归档的全量原文。"
+          : ""),
+      inputSchema: jsonSchema<{ path: string; offset?: number; limit?: number; includeInvalidated?: boolean; includeArchive?: boolean }>(
+        {
+          type: "object",
+          properties: {
+            path: { type: "string", description: "Relative file path to read." },
+            offset: { type: "number", description: "Character offset to start reading from (default 0)." },
+            limit: { type: "number", description: "Maximum number of characters to return (default: read to end of file)." },
+            ...(effectiveInval
+              ? { includeInvalidated: { type: "boolean", description: "Include [SUPERSEDED] invalidated lines (audit view). Default false." } }
+              : {}),
+            ...(effectiveV2
+              ? { includeArchive: { type: "boolean", description: "Include the archive section (## 活动, audit view; default folded). Default false." } }
+              : {}),
+          },
+          required: ["path"],
+        },
       ),
-      execute: (async (args: { path: string; offset?: number; limit?: number; includeInvalidated?: boolean }) => {
+      execute: (async (args: { path: string; offset?: number; limit?: number; includeInvalidated?: boolean; includeArchive?: boolean }) => {
         const key = resolveStorageKey(prefix, args.path);
         if (!key) return JSON.stringify({ error: `Path "${args.path}" escapes workspace boundary.` });
         try {
@@ -187,13 +200,25 @@ export function createStorageTools(
           // 影子缓存计量（2026-10-27）：只统计 would-hit，仍按全文哈希。
           const cacheNote = readCacheMetrics.note(key, content);
           logger?.debug?.(`${TAG} ${formatReadCacheNote(cacheNote, args.path, content.length, taskId)}`);
-          // 方案B 分段读：无 offset/limit 时切片 = 全文且无标注（与旧实现逐字节一致）。
-          const returned = applyReadWindow(content, { offset: args.offset, limit: args.limit });
-          // 票⑥ on：默认过滤失效行（装配点 = applyReadWindow 之后的输出组装；窗口坐标
-          // 保持原文坐标，includeInvalidated:true 逐字节回到基线 read）。off：returned 原样。
-          const output = effectiveInval
-            ? filterSupersededLines(returned, { includeInvalidated: args.includeInvalidated === true })
-            : returned;
+          let output: string;
+          if (effectiveV2) {
+            // 票⑤ v2 on：管线 = 活动段折叠（includeArchive:true 跳过）→ 失效行过滤
+            // （票⑥ on 时）→ 窗口（过滤→窗口口径：offset/limit/标注都作用于过滤后的
+            // 两层视图，翻页自洽）。v1 文件不变形（buildV2ReadView 原样返回）。
+            const view = args.includeArchive === true ? content : buildV2ReadView(content);
+            const filtered = effectiveInval
+              ? filterSupersededLines(view, { includeInvalidated: args.includeInvalidated === true })
+              : view;
+            output = applyReadWindow(filtered, { offset: args.offset, limit: args.limit });
+          } else {
+            // 方案B 分段读：无 offset/limit 时切片 = 全文且无标注（与旧实现逐字节一致）。
+            const returned = applyReadWindow(content, { offset: args.offset, limit: args.limit });
+            // 票⑥ on：默认过滤失效行（装配点 = applyReadWindow 之后的输出组装；窗口坐标
+            // 保持原文坐标，includeInvalidated:true 逐字节回到基线 read）。off：returned 原样。
+            output = effectiveInval
+              ? filterSupersededLines(returned, { includeInvalidated: args.includeInvalidated === true })
+              : returned;
+          }
           // read-budget 计量口径不变：observe 记实际返回的 chars（含截断标注行）。
           const obs = readBudget.observe(args.path, output.length);
           logger?.debug?.(`${TAG} ${formatReadBudgetObservation(obs, taskId)}`);
@@ -238,13 +263,21 @@ export function createStorageTools(
             if (delta > 0) logger?.info?.(`${TAG} metric=l2_supersede value=${delta} path=${args.path}`);
           }
         }
+        // 票⑤ v2 on：`## 要点` 段 → META.summary 单向覆盖（要点是源，落盘前同步；
+        // 幂等——摘要已同步时逐字节原样）。v2 写入观测锚点：后像为 v2 格式即打点。
+        let toPersist = args.content;
+        if (effectiveV2 && toPersist !== "[DELETED]") {
+          toPersist = syncV2MetaSummary(toPersist);
+          if (isV2Format(toPersist)) logger?.info?.(`${TAG} metric=l2_format_v2 value=1 path=${args.path}`);
+        }
         // 方案C：写入后像尺寸帽 —— 超帽拒绝且不落盘。"[DELETED]" 删除标记不受限。
         // 票⑥ on：帽改失效排除口径（失效段不计入后像帽——失效越多可写余量越大）。
-        const capRejection = args.content === "[DELETED]"
+        // 票⑤ v2：帽口径不变（仍按整文件后像——同步后的落盘字节）。
+        const capRejection = toPersist === "[DELETED]"
           ? null
           : effectiveInval
-            ? checkSceneCharCapWithSupersede(args.content, effectiveCharCap)
-            : checkSceneCharCap(args.content, effectiveCharCap);
+            ? checkSceneCharCapWithSupersede(toPersist, effectiveCharCap)
+            : checkSceneCharCap(toPersist, effectiveCharCap);
         if (capRejection) {
           logger?.warn(
             `${TAG} write rejected (over_scene_char_cap): "${args.path}" ${capRejection.chars}/${capRejection.cap} chars`,
@@ -252,8 +285,8 @@ export function createStorageTools(
           return JSON.stringify(capRejection);
         }
         try {
-          await storage.writeFile(key, args.content);
-          logger?.debug?.(`${TAG} write: "${args.path}" → ${Buffer.byteLength(args.content, "utf8")} bytes`);
+          await storage.writeFile(key, toPersist);
+          logger?.debug?.(`${TAG} write: "${args.path}" → ${Buffer.byteLength(toPersist, "utf8")} bytes`);
           return JSON.stringify({ success: true });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -316,9 +349,15 @@ export function createStorageTools(
           }
           // 方案C：edit 后像（应用全部替换后的完整内容）尺寸帽 —— 超帽拒绝且不落盘。
           // 票⑥ on：帽改失效排除口径（失效段不计入后像帽）。
+          // 票⑤ v2：落盘前要点段→META.summary 同步；帽按同步后的落盘字节。
+          let toPersist = content;
+          if (effectiveV2) {
+            toPersist = syncV2MetaSummary(content);
+            if (isV2Format(toPersist)) logger?.info?.(`${TAG} metric=l2_format_v2 value=1 path=${args.path}`);
+          }
           const capRejection = effectiveInval
-            ? checkSceneCharCapWithSupersede(content, effectiveCharCap)
-            : checkSceneCharCap(content, effectiveCharCap);
+            ? checkSceneCharCapWithSupersede(toPersist, effectiveCharCap)
+            : checkSceneCharCap(toPersist, effectiveCharCap);
           if (capRejection) {
             logger?.warn(
               `${TAG} edit rejected (over_scene_char_cap): "${args.path}" ${capRejection.chars}/${capRejection.cap} chars`,
@@ -329,9 +368,9 @@ export function createStorageTools(
             const delta = supersedeDelta(existing, content);
             if (delta > 0) logger?.info?.(`${TAG} metric=l2_supersede value=${delta} path=${args.path}`);
           }
-          await storage.writeFile(key, content);
+          await storage.writeFile(key, toPersist);
           logger?.debug?.(
-            `${TAG} edit: "${args.path}" → ${args.edits.length} replacement(s), ${Buffer.byteLength(content, "utf8")} bytes`,
+            `${TAG} edit: "${args.path}" → ${args.edits.length} replacement(s), ${Buffer.byteLength(toPersist, "utf8")} bytes`,
           );
           return JSON.stringify({ success: true });
         } catch (err) {
