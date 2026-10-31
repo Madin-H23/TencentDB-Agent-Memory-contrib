@@ -109,6 +109,15 @@ export interface LLMRunParams {
    * L3 persona（storagePrefix 为空）不受限，不传。缺省 off，既有调用方行为不变。
    */
   sceneCharCap?: number;
+  /**
+   * [P1 票⑥ 显式失效替代硬删] L2 write/edit/read 工具的显式失效语义开关：
+   * write/edit 落盘前行级保锚守卫（锚点 m_<ts>_<hash> 永不物理删除）+ [DELETED]
+   * 软删流文件级重定位守卫 + 失效段不计入尺寸帽 + metric=l2_supersede；
+   * read 默认过滤 [SUPERSEDED] 失效行（includeInvalidated:true 审计全量）。
+   * 只有 L2 场景抽取装配点传入（scene-extractor ← persona.explicitInvalidation）；
+   * 缺省 off——off 时工具 schema/行为与基线逐字节一致。
+   */
+  explicitInvalidation?: boolean;
   /** Plugin instance ID for metric reporting (optional). */
   instanceId?: string;
   /**
