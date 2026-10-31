@@ -231,7 +231,15 @@ async function performAutoRecallCore(params: {
     const sceneIndex = await readSceneIndex(profileDataDir, profileStorage);
     if (sceneIndex.length > 0) {
       const useCos = profileStorage?.type === "cos";
-      sceneNavigation = generateSceneNavigation(sceneIndex, profileDataDir, useCos);
+      // 票⑦：persona.recallRanking on 时召回注入的导航按多信号排序并打观测锚点；
+      // off（缺省 undefined）=基线热度降序逐字节不变。
+      sceneNavigation = generateSceneNavigation(
+        sceneIndex,
+        profileDataDir,
+        useCos,
+        cfg.persona.recallRanking,
+        (line) => logger?.info(`${TAG} ${line}`),
+      );
       logger?.debug?.(
         `${TAG} Scene navigation generated: ${sceneIndex.length} scenes ` +
         `(scope=${profileScope}, useCos=${useCos})`,

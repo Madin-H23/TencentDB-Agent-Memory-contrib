@@ -2706,7 +2706,8 @@ export class TdaiGateway {
     const profileBackend = new ProfileRowStorageBackend({
       store: rowStore,
       // 导航里写给模型看的读取工具名属于挂载面；工具通用改名归专项七。
-      navigation: { readTool: "tdai_read_file" },
+      // 票⑦：persona.recallRanking on 时读时重渲染的导航按多信号排序（默认 off=基线）。
+      navigation: { readTool: "tdai_read_file", ranking: this.config.memory.persona?.recallRanking },
       logger: this.logger,
     });
     const adapter = new StorageAdapter(

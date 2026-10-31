@@ -23,6 +23,7 @@ import { readSceneIndex, syncSceneIndex } from "../scene/scene-index.js";
 import type { SceneIndexEntry } from "../scene/scene-index.js";
 import { parseSceneBlock } from "../scene/scene-format.js";
 import { generateSceneNavigation, stripSceneNavigation } from "../scene/scene-navigation.js";
+import type { ResolvedRecallRanking } from "../scene/recall-ranking.js";
 import { normalizeSceneFilenames } from "./filename-normalizer.js";
 import { isNoopSceneDiff } from "./noop-detect.js";
 import { writeSceneSnapshot } from "./scene-snapshot.js";
@@ -121,6 +122,12 @@ export interface SceneExtractorOptions {
    * 提示词与工具行为和基线逐字节一致。yaml `persona.sceneFormatV2` 控制。
    */
   sceneFormatV2?: boolean;
+  /**
+   * [P1 票⑦ 召回多信号排序]：updateSceneNavigation 的导航排序口径（已解析配置，
+   * undefined=off=基线热度降序逐字节不变）。yaml `persona.recallRanking` 控制，
+   * 经 pipeline-factory 传入。
+   */
+  recallRanking?: ResolvedRecallRanking;
   /** langfuse 上报身份四元组（team/user/agent/session）。传下来会填充 trace 顶级字段。 */
   traceContext?: TraceContext;
 }
@@ -163,6 +170,7 @@ export class SceneExtractor {
   private sceneCharCap: number | undefined;
   private explicitInvalidation: boolean;
   private sceneFormatV2: boolean;
+  private recallRanking: ResolvedRecallRanking | undefined;
   private traceContext: TraceContext | undefined;
 
   constructor(opts: SceneExtractorOptions) {
@@ -179,6 +187,7 @@ export class SceneExtractor {
     this.sceneCharCap = opts.sceneCharCap;
     this.explicitInvalidation = opts.explicitInvalidation ?? false;
     this.sceneFormatV2 = opts.sceneFormatV2 ?? false;
+    this.recallRanking = opts.recallRanking;
     this.traceContext = opts.traceContext;
 
     // Use injected LLMRunner if available, otherwise fall back to CleanContextRunner
@@ -682,7 +691,10 @@ export class SceneExtractor {
    */
   private async updateSceneNavigation(): Promise<void> {
     const index = await readSceneIndex(this.dataDir, this.storage);
-    const nav = generateSceneNavigation(index);
+    // 票⑦：persona.recallRanking on 时导航按多信号排序并打观测锚点；off=基线逐字节。
+    const nav = generateSceneNavigation(index, undefined, false, this.recallRanking, (line) =>
+      this.logger?.info(`${TAG} ${line}`),
+    );
 
     let existing = "";
     try {

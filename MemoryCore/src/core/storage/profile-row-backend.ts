@@ -32,6 +32,7 @@ import {
 import { deriveSceneIndexFromProfiles } from "../scene/scene-derive.js";
 import type { SceneIndexEntry } from "../scene/scene-index.js";
 import { renderSceneNavigation, stripSceneNavigation, storageNavFooter } from "../scene/scene-navigation.js";
+import type { ResolvedRecallRanking } from "../scene/recall-ranking.js";
 import type {
   ProfileFilter,
   ProfileRecord,
@@ -98,7 +99,14 @@ export interface ProfileRowStorageBackendOptions {
    * call belongs to the mounted surface (`tdai_read_file`, a bridge endpoint,
    * …), which the backend cannot know. Absent = the row is returned verbatim.
    */
-  navigation?: { readTool: string };
+  navigation?: {
+    readTool: string;
+    /**
+     * [P1 票⑦ 召回多信号排序] 读时重渲染导航的排序口径（undefined=off=基线热度
+     * 降序逐字节不变）。yaml `persona.recallRanking` 控制，经 server.ts 装配传入。
+     */
+    ranking?: ResolvedRecallRanking;
+  };
   logger?: StorageLogger;
 }
 
@@ -108,7 +116,7 @@ export class ProfileRowStorageBackend implements IStorageBackend {
   private readonly store: ProfileRowCapableStore;
   private readonly isolation?: ProfileIsolation;
   private readonly scope: string;
-  private readonly navigation?: { readTool: string };
+  private readonly navigation?: { readTool: string; ranking?: ResolvedRecallRanking };
   private readonly logger?: StorageLogger;
 
   constructor(opts: ProfileRowStorageBackendOptions) {
@@ -174,10 +182,14 @@ export class ProfileRowStorageBackend implements IStorageBackend {
   private async personaWithNavigation(stored: string): Promise<string> {
     const body = stripSceneNavigation(stored);
     const entries = await deriveSceneIndexFromProfiles(this.store, this.isolation);
+    // 票⑦：navigation.ranking on 时读时重渲染的导航按多信号排序并打观测锚点；
+    // off=基线热度降序逐字节不变。
     const nav = renderSceneNavigation(entries, {
       pathFor: (e) => rowToKey({ type: "l2", filename: e.filename }),
       readTool: this.navigation!.readTool,
       footer: storageNavFooter(this.navigation!.readTool),
+      ...(this.navigation!.ranking !== undefined ? { ranking: this.navigation!.ranking } : {}),
+      ...(this.logger ? { onRanked: (line: string) => this.logger!.info(`${TAG} ${line}`) } : {}),
     });
     return nav ? `${body}\n\n${nav}` : body;
   }

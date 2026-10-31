@@ -12,6 +12,7 @@
 // ============================
 
 import type { LlmLayersOverride } from "./adapters/standalone/llm-runner.js";
+import { parseRecallRankingConfig } from "./core/scene/recall-ranking.js";
 
 /** Prompt family for L1-L3 memory pipeline. */
 export type MemoryPromptMode = "chat" | "code";
@@ -149,6 +150,16 @@ export interface PersonaConfig {
    * （双版本同进程钉测试，基线 07d9057 经 git show 独立再生）。
    */
   sceneFormatV2: boolean;
+  /**
+   * [P1 票⑦ 召回多信号排序] 召回导航排序 = w1·热度归一 + w2·指数衰减新近
+   * （Ebbinghaus 式 2^(-age/halfLife)）+ w3·相关性 + w4·使用计数。
+   * undefined（缺省/false）=off——全部召回面输出顺序与基线逐字节一致（off 兼容钉）；
+   * true=默认权重 on；对象 {w1,w2,w3,w4,halfLifeDays}=自定义权重 on（缺省字段回落
+   * 默认值；负权重/NaN/±Infinity/halfLifeDays≤0/全零权重/其它类型 → 拒绝 throw，
+   * 灰度开关不静默回落）。默认权重 {0.35, 0.30, 0.25, 0.10, halfLifeDays:30}，
+   * 依据见 recall-ranking.ts 模块头。排序纯模块=src/core/scene/recall-ranking.ts。
+   */
+  recallRanking?: import("./core/scene/recall-ranking.js").ResolvedRecallRanking;
   /** LLM model for persona generation, format: "provider/model" (falls back to OpenClaw default model when omitted) */
   model?: string;
   /** Prompt family for L2/L3 prompts (default: chat; code prompts will be wired as they are added). */
@@ -781,6 +792,8 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       explicitInvalidation: bool(personaGroup, "explicitInvalidation") ?? false,
       // 票⑤（exp/p1-5-scene-format-v2）：场景格式 v2 双层化，默认 off=行为与基线逐字节一致。
       sceneFormatV2: bool(personaGroup, "sceneFormatV2") ?? false,
+      // 票⑦（exp/p1-7-recall-ranking）：召回多信号排序，默认 off=排序与基线逐字节一致。
+      recallRanking: parseRecallRankingConfig(personaGroup.recallRanking),
       model: optStr(personaGroup, "model"),
       promptMode: normalizePromptMode(str(personaGroup, "promptMode"), globalPromptMode),
       triggerMode,
