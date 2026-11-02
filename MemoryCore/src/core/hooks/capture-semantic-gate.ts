@@ -22,7 +22,7 @@
 import type { MemoryPromptMode } from "../../config.js";
 import { hasClientEmbedding, type EmbeddingService } from "../store/embedding.js";
 import type { IMemoryStore, IsolationFilter, L1SearchResult } from "../store/types.js";
-import type { ExtractedMemory, MemoryRecord, DedupDecision, MemoryType } from "../record/l1-writer.js";
+import type { ExtractedMemory, MemoryRecord, DedupDecision, DedupAction, MemoryType } from "../record/l1-writer.js";
 import { runLlmJudgment } from "../record/l1-dedup.js";
 import type { CandidateMatch } from "../prompts/l1-dedup.js";
 import type { LLMRunner, Logger } from "../types.js";
@@ -111,6 +111,46 @@ export interface SemanticGateResult {
   topScore: number;
   /** 任一环节失败 → true（该批全部放行）。 */
   failopen: boolean;
+  /**
+   * 每条已判定消息的 top1 相似度直方图（20 桶，下标 = floor(top1/0.05)，
+   * 1.0 归入 19）。REVIEW §shadow 要求：仅记批次 top（最大值）无法事后回算
+   * 其它阈值下的候选率，必须留每条消息的 top1 分布。
+   */
+  top1Buckets: number[];
+  /** 按 role 的候选/命中计数（role 缺省归 unknown）。 */
+  byRole: Record<string, { candidates: number; hits: number }>;
+  /** 按判定动作计数（未达阈值 = none）。 */
+  byAction: Record<DedupAction | "none", number>;
+  /** 按消息码点长度分桶（REVIEW §shadow：长提示词/代码块误判风险观测）。 */
+  byLen: { lt200: number; mid: number; gt1000: number };
+  /**
+   * 候选消息的判定样本（id/role/top1/action/target_ids），**不含正文**：
+   * shadow 期抽检误杀时可按 id 回查 L0 JSONL / L1 记录。
+   */
+  samples: SemanticGateSample[];
+}
+
+/** 单条候选消息的 shadow 抽检样本（无正文，key 不进日志）。 */
+export interface SemanticGateSample {
+  id: string;
+  role: string;
+  top1: number;
+  action: DedupAction | "none";
+  targetIds: string[];
+}
+
+/** 20 桶 top1 直方图下标（0.0~1.0，1.0 归入最后一桶）。 */
+export function top1BucketIndex(score: number): number {
+  if (!Number.isFinite(score) || score <= 0) return 0;
+  return Math.min(19, Math.floor(score / 0.05));
+}
+
+function emptyByAction(): Record<DedupAction | "none", number> {
+  return { store: 0, update: 0, merge: 0, skip: 0, none: 0 };
+}
+
+function emptyByLen(): { lt200: number; mid: number; gt1000: number } {
+  return { lt200: 0, mid: 0, gt1000: 0 };
 }
 
 /**
@@ -192,6 +232,11 @@ export async function evaluateSemanticGate(
     capped: 0,
     topScore: 0,
     failopen: false,
+    top1Buckets: new Array(20).fill(0) as number[],
+    byRole: {},
+    byAction: emptyByAction(),
+    byLen: emptyByLen(),
+    samples: [],
   };
   const logger = deps.logger;
 
@@ -199,6 +244,12 @@ export async function evaluateSemanticGate(
     result.failopen = true;
     result.excludedMessageIds.clear();
     result.hits = 0;
+    // 批次已整体放行：观测聚合不得留下半截样本，否则 shadow 统计口径被污染。
+    result.top1Buckets = new Array(20).fill(0) as number[];
+    result.byRole = {};
+    result.byAction = emptyByAction();
+    result.byLen = emptyByLen();
+    result.samples = [];
     const detail = err === undefined ? "" : ` err=${redactError(err)}`;
     logger?.warn?.(`${TAG} metric=capture_semantic_gate status=failopen reason=${reason}${detail}`);
     return result;
@@ -259,6 +310,8 @@ export async function evaluateSemanticGate(
 
   // ④ KNN + 模块内阈值过滤（searchL1Vector 无内建阈值）
   const matches: CandidateMatch[] = [];
+  /** 每条已判定消息的观测快照（直方图/角色/动作/样本用；不含正文）。 */
+  const observed: Array<{ id: string; role: string; top1: number; hasCandidate: boolean }> = [];
   for (let i = 0; i < judged.length; i++) {
     let hits: L1SearchResult[];
     try {
@@ -273,19 +326,43 @@ export async function evaluateSemanticGate(
     }
     if (!Array.isArray(hits)) return failopen("vector_search_bad_result");
 
+    let top1 = 0;
     for (const h of hits) {
-      if (typeof h?.score === "number" && Number.isFinite(h.score) && h.score > result.topScore) {
-        result.topScore = h.score;
+      if (typeof h?.score === "number" && Number.isFinite(h.score)) {
+        if (h.score > result.topScore) result.topScore = h.score;
+        if (h.score > top1) top1 = h.score;
       }
     }
+    // REVIEW §shadow：每条消息的 top1 落 20 桶直方图（不是只记批次最大值），
+    // 使事后不重跑即可回算任意阈值下的候选率/排除量。
+    const role = typeof judged[i]!.role === "string" && judged[i]!.role
+      ? judged[i]!.role!
+      : "unknown";
+    if (!result.byRole[role]) result.byRole[role] = { candidates: 0, hits: 0 };
+    result.top1Buckets[top1BucketIndex(top1)]!++;
+    // REVIEW §shadow：长度分桶（问句/长提示词/代码块的误判通道观测）
+    const len = codePointLength(judged[i]!.content);
+    if (len < 200) result.byLen.lt200++;
+    else if (len <= 1000) result.byLen.mid++;
+    else result.byLen.gt1000++;
+
     const above = hits.filter((h) => typeof h?.score === "number" && h.score >= deps.threshold);
-    if (above.length === 0) continue;
+    if (above.length === 0) {
+      observed.push({ id: judged[i]!.id, role, top1, hasCandidate: false });
+      continue;
+    }
     result.candidates++;
+    result.byRole[role]!.candidates++;
     matches.push({ newMemory: toPseudoMemory(judged[i]!), candidates: above.map(toMemoryRecord) });
+    observed.push({ id: judged[i]!.id, role, top1, hasCandidate: true });
   }
 
   // 无候选 → 不调 LLM（SPEC §5：候选非空才判定）
-  if (matches.length === 0) return result;
+  if (matches.length === 0) {
+    // 全部未达阈值：动作统一记 none（shadow 动作分布的分母）
+    result.byAction.none += observed.length;
+    return result;
+  }
 
   // ⑤ 判定链：formatBatchConflictPrompt + runLlmJudgment（不调 batchDedup）
   //
@@ -329,15 +406,38 @@ export async function evaluateSemanticGate(
   // ⑥ 只消费 skip；其余动作一律放行
   const judgedIds = new Set(judged.map((m) => m.id));
   const skipped = new Set<string>();
+  const decisionByMsgId = new Map<string, DedupDecision>();
   for (const d of decisions) {
-    if (!d || d.action !== "skip" || typeof d.record_id !== "string") continue;
+    if (!d || typeof d.record_id !== "string") continue;
     if (!d.record_id.startsWith("sem_")) continue;
     const msgId = d.record_id.slice(4);
-    if (judgedIds.has(msgId)) skipped.add(msgId);
+    if (!judgedIds.has(msgId)) continue;
+    decisionByMsgId.set(msgId, d);
+    if (d.action === "skip") skipped.add(msgId);
   }
   result.hits = skipped.size;
   if (deps.mode === "on") {
     for (const id of skipped) result.excludedMessageIds.add(id);
+  }
+
+  // ⑦ shadow 观测聚合（REVIEW §shadow）：动作分布 / 按 role 命中 / 候选样本
+  for (const o of observed) {
+    if (!o.hasCandidate) {
+      result.byAction.none++;
+      continue;
+    }
+    const d = decisionByMsgId.get(o.id);
+    // runLlmJudgment 默认 fillMissing=true，缺条按 store（放行）；此处同口径兜底。
+    const action: DedupAction = d?.action ?? "store";
+    result.byAction[action]++;
+    if (action === "skip") result.byRole[o.role]!.hits++;
+    result.samples.push({
+      id: o.id,
+      role: o.role,
+      top1: o.top1,
+      action,
+      targetIds: Array.isArray(d?.target_ids) ? [...d.target_ids] : [],
+    });
   }
   // mode=shadow：完整计数但不排除（排除集合保持空）
   return result;

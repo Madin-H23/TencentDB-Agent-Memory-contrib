@@ -206,6 +206,26 @@ describe("performAutoCapture × ④b 语义门接线", () => {
     expect(anchor).toContain("skipped=0");
   });
 
+  it("shadow 锚点补齐 REVIEW 要求：hash_excluded / by_action / by_role / top1_hist / samples", async () => {
+    const store = makeStore({ searchL1Vector: vi.fn(async () => [hit("r1", 0.9)]) });
+    const judge = skipAllJudge();
+    const logger = makeLogger();
+
+    await run({ cfg: makeCfg({ semantic: { mode: "shadow" } }), store, embedding: makeEmbedding(), judge, logger });
+    await drain();
+    const anchor = anchorLines(logger)[0]!;
+
+    expect(anchor).toContain("hash_excluded=0");
+    expect(anchor).toContain("by_action=skip=2,store=0,update=0,merge=0,none=0");
+    expect(anchor).toContain("by_role=user=1/1,assistant=1/1");
+    expect(anchor).toContain("by_len=lt200:2,mid:0,gt1000:0");
+    // 两条消息 top1=0.90 → floor(0.9/0.05)=18，仅第 18 桶计数 2
+    expect(anchor).toContain("top1_hist=0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,0");
+    // 样本带消息 id / 分数 / 动作 / 命中目标（无正文）
+    expect(anchor).toMatch(/samples=[^ ]*\|0\.900\|skip\|r1/);
+    expect(anchor).not.toContain(CONTENT); // 锚点不落正文
+  });
+
   it("shadow 后台化：judge 挂起时 performAutoCapture 已返回、upsertL0 已调用、锚点尚未出现", async () => {
     let release!: (v: string) => void;
     const gateResponse = new Promise<string>((res) => { release = res; });
@@ -385,6 +405,7 @@ describe("performAutoCapture × ④b 语义门接线", () => {
     expect(dedupAnchor).toContain("value=1");
     expect(semAnchor).toContain("value=1"); // ④b 只看 1 条
     expect(semAnchor).toContain("skipped=1");
+    expect(semAnchor).toContain("hash_excluded=1"); // ④ 排除数与 ④b 输入对账
     // 合并后的跳过生效：④ 的 1 条 + ④b 的 1 条 = 0 条向量
     expect(result.l0VectorsWritten).toBe(0);
   });

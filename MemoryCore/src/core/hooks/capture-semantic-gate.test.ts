@@ -557,3 +557,108 @@ describe("并发：两批互不共享可变状态", () => {
     expect(call[3]).toEqual(filter);
   });
 });
+
+// ── shadow 观测（review §shadow 锚点要求）─────────────────────
+//
+// REVIEW-4b-spec-20261102 §Q4/§shadow 明确要求：锚点记录**每条消息的 top1
+// 相似度（20 桶直方图）**、候选数、按 role 分层、按 action 分布——用于事后
+// 不重跑即可回算任意阈值下的候选率，并抽检误杀。仅记批次 top（最大值）不够。
+
+describe("shadow 观测：top1 直方图 / by_role / by_action / samples", () => {
+  it("0.9 落第 18 桶；role 与 action 分层；samples 带 id/top1/action/target_ids", async () => {
+    const r = await evaluateSemanticGate(
+      [
+        { id: "m1", content: "甲", role: "user" },
+        { id: "m2", content: "乙", role: "assistant" },
+      ],
+      deps({
+        threshold: 0.78,
+        embeddingService: makeEmbedding(),
+        vectorStore: makeStore({ hits: [hit("r1", 0.9)] }),
+        judge: makeJudge(async () => JSON.stringify([
+          { record_id: "sem_m1", action: "skip", target_ids: ["r1"] },
+          { record_id: "sem_m2", action: "update", target_ids: ["r1"] },
+        ])),
+      }),
+    );
+
+    expect(r.top1Buckets).toHaveLength(20);
+    expect(r.top1Buckets[18]).toBe(2); // floor(0.9/0.05)=18
+    expect(r.byRole).toEqual({
+      user: { candidates: 1, hits: 1 },
+      assistant: { candidates: 1, hits: 0 },
+    });
+    expect(r.byAction).toEqual({ store: 0, update: 1, merge: 0, skip: 1, none: 0 });
+    expect(r.samples).toEqual([
+      { id: "m1", role: "user", top1: 0.9, action: "skip", targetIds: ["r1"] },
+      { id: "m2", role: "assistant", top1: 0.9, action: "update", targetIds: ["r1"] },
+    ]);
+  });
+
+  it("未达阈值：top1 仍进直方图（action=none），不进 samples/不调 judge", async () => {
+    const judge = makeJudge();
+    const r = await evaluateSemanticGate(
+      [{ id: "m1", content: "甲", role: "user" }],
+      deps({
+        threshold: 0.78,
+        embeddingService: makeEmbedding(),
+        vectorStore: makeStore({ hits: [hit("r1", 0.4)] }),
+        judge,
+      }),
+    );
+
+    expect(r.candidates).toBe(0);
+    expect(r.top1Buckets[8]).toBe(1); // floor(0.4/0.05)=8
+    expect(r.byAction).toEqual({ store: 0, update: 0, merge: 0, skip: 0, none: 1 });
+    expect(r.byRole).toEqual({ user: { candidates: 0, hits: 0 } });
+    expect(r.samples).toEqual([]);
+    expect(judge.run).not.toHaveBeenCalled();
+  });
+
+  it("role 缺省归 unknown；1.0 归入最后一桶（19）", async () => {
+    const r = await evaluateSemanticGate(
+      [MSG("m1", "甲")],
+      deps({
+        embeddingService: makeEmbedding(),
+        vectorStore: makeStore({ hits: [hit("r1", 1.0)] }),
+        judge: makeJudge(async () => skipJson("sem_m1")),
+      }),
+    );
+    expect(r.top1Buckets[19]).toBe(1);
+    expect(r.byRole).toEqual({ unknown: { candidates: 1, hits: 1 } });
+  });
+
+  it("by_len 按码点分桶（<200 / 200-1000 / >1000；REVIEW §shadow）", async () => {
+    const r = await evaluateSemanticGate(
+      [
+        { id: "m1", content: "甲", role: "user" },
+        { id: "m2", content: "x".repeat(500), role: "user" },
+        { id: "m3", content: "x".repeat(1500), role: "user" },
+      ],
+      deps({
+        maxMessageChars: 2000,
+        embeddingService: makeEmbedding(),
+        vectorStore: makeStore({ hits: [] }),
+        judge: makeJudge(),
+      }),
+    );
+    expect(r.byLen).toEqual({ lt200: 1, mid: 1, gt1000: 1 });
+  });
+
+  it("failopen：新聚合字段归零/清空（批次已放行，不得留下半截观测）", async () => {
+    const r = await evaluateSemanticGate(
+      [{ id: "m1", content: "甲", role: "user" }],
+      deps({
+        embeddingService: makeEmbedding({ impl: async () => { throw new Error("boom"); } }),
+        vectorStore: makeStore({ hits: [hit("r1", 0.9)] }),
+        judge: makeJudge(async () => skipJson("sem_m1")),
+      }),
+    );
+    expect(r.failopen).toBe(true);
+    expect(r.top1Buckets).toEqual(new Array(20).fill(0));
+    expect(r.byRole).toEqual({});
+    expect(r.byAction).toEqual({ store: 0, update: 0, merge: 0, skip: 0, none: 0 });
+    expect(r.byLen).toEqual({ lt200: 0, mid: 0, gt1000: 0 });
+    expect(r.samples).toEqual([]);
+  });
+});

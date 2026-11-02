@@ -33,6 +33,32 @@ import type { LLMRunner, Logger } from "../types.js";
 
 const TAG = "[memory-tdai] [capture]";
 
+/** shadow 锚点：by_action 固定键序（便于 grep/面板解析；全 0 也输出）。 */
+function formatSemanticGateByAction(a: Record<string, number>): string {
+  return `skip=${a.skip ?? 0},store=${a.store ?? 0},update=${a.update ?? 0},merge=${a.merge ?? 0},none=${a.none ?? 0}`;
+}
+
+/** shadow 锚点：by_role=<role>=<candidates>/<hits>（无判定消息时为空串）。 */
+function formatSemanticGateByRole(r: Record<string, { candidates: number; hits: number }>): string {
+  return Object.keys(r)
+    .map((role) => `${role}=${r[role]!.candidates}/${r[role]!.hits}`)
+    .join(",");
+}
+
+/** shadow 锚点：by_len 固定键序（避免 < > 字符影响 grep/日志解析）。 */
+function formatSemanticGateByLen(l: { lt200: number; mid: number; gt1000: number }): string {
+  return `lt200:${l.lt200},mid:${l.mid},gt1000:${l.gt1000}`;
+}
+
+/** shadow 锚点：样本 id|top1|action|target_ids（id 内可含 ':'，故不用 ':' 分隔；无正文）。 */
+function formatSemanticGateSamples(
+  samples: Array<{ id: string; top1: number; action: string; targetIds: string[] }>,
+): string {
+  return samples
+    .map((s) => `${s.id}|${s.top1.toFixed(3)}|${s.action}|${s.targetIds.join("+")}`)
+    .join(",");
+}
+
 export interface AutoCaptureResult {
   /** Whether the scheduler was notified (conversation count incremented) */
   schedulerNotified: boolean;
@@ -328,7 +354,12 @@ export async function performAutoCapture(params: {
               `${TAG} metric=capture_semantic_gate mode=${semGateMode} value=${semResult.candidates} ` +
               `hits=${semResult.hits} skipped=${skippedAnchor} oversize=${semResult.oversize} ` +
               `capped=${semResult.capped} top=${semResult.topScore.toFixed(2)} ` +
-              `failopen=${semResult.failopen ? 1 : 0} session=${sessionKey} ` +
+              `failopen=${semResult.failopen ? 1 : 0} hash_excluded=${gateExcludedCount} ` +
+              `by_action=${formatSemanticGateByAction(semResult.byAction)} ` +
+              `by_role=${formatSemanticGateByRole(semResult.byRole)} ` +
+              `by_len=${formatSemanticGateByLen(semResult.byLen)} ` +
+              `top1_hist=${semResult.top1Buckets.join(",")} ` +
+              `samples=${formatSemanticGateSamples(semResult.samples)} session=${sessionKey} ` +
               `ms=${(performance.now() - tSemStart).toFixed(0)}`,
             );
             report("capture_semantic_gate", {
@@ -341,6 +372,12 @@ export async function performAutoCapture(params: {
               capped: semResult.capped,
               topScore: Number(semResult.topScore.toFixed(2)),
               failopen: semResult.failopen ? 1 : 0,
+              hashExcluded: gateExcludedCount,
+              byAction: semResult.byAction,
+              byRole: semResult.byRole,
+              byLen: semResult.byLen,
+              top1Hist: semResult.top1Buckets,
+              samples: semResult.samples,
               ms: Number((performance.now() - tSemStart).toFixed(0)),
             });
           } catch (semErr) {
