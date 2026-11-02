@@ -12,10 +12,12 @@
  * 被替代的旧事实行/段落**整行加前缀留存**，原行内容（含锚点 id）原样保留——锚点行
  * `m_<millis>_<8hex>` 永不物理删除。段落失效 = 段内每行各加前缀（保持行级过滤口径单一）。
  *
- * **判定口径**：行首（允许前导空白）出现 `[SUPERSEDED` 且其后一字符不是字母/数字/连字符
- * → 失效行。半截标记（`[SUPERSEDE`）、变体词（`[SUPERSEDED2`/`[SUPERSEDED-FOO`）、行中引用
- * 字样一律**不判失效**（保守：宁可不过滤也不误滤正常内容）。`[DELETED]` 是文件级软删标记，
- * 与失效行无关。
+ * **判定口径（P2-1 防伪加固，2026-11-02）**：行首（允许前导空白）`[SUPERSEDED <ISO8601时间>]`
+ * 且时间戳可被 `Date.parse` 解析 → 失效行。裸 `[SUPERSEDED]`（无时间戳）、仅日期、
+ * 冒号变体、非法日期、缺时区、变体词（`[SUPERSEDED2`/`[SUPERSEDED-FOO`）、行中引用
+ * 一律**不判失效**（保守：宁可不过滤也不误滤正常内容）。防伪动机：C 帽排除法下
+ * 任何能被轻松伪造的前缀都会成为绕帽的万能钥匙（复核 P2-1 实测裸前缀 800 行可绕帽）。
+ * `[DELETED]` 是文件级软删标记，与失效行无关。
  *
  * **守卫（on 时由工具层在落盘前调用，storage-tools 与 llm-runner 沙箱双工厂共用）**：
  * - a) 行级保锚：write/edit 后像的锚点多重集必须 ≥ 前像多重集（按 id 计数逐 id 比对），
@@ -39,8 +41,20 @@
 
 import { SCENE_CHAR_CAP_HINT, type SceneCharCapRejection } from "./scene-char-cap.js";
 
-/** 失效行前缀判定：行首 `[SUPERSEDED`，其后不得是字母/数字/连字符（防变体词/半截误判）。 */
-const SUPERSEDED_LINE_RE = /^[^\S\r\n]*\[SUPERSEDED(?![A-Za-z0-9-])/;
+/** 失效行前缀判定（P2-1 防伪）：行首 `[SUPERSEDED <ISO8601 时间戳>]`，时间戳另经 Date.parse 校验。
+ *  裸标记/仅日期/非法日期/缺时区/变体词一律不判失效（见模块头判定口径）。 */
+const SUPERSEDED_LINE_RE =
+  /^[^\S\r\n]*\[SUPERSEDED (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2}))\]/;
+
+/** 时间戳合法性（正则位形之外再经 Date.parse：2026-13-40T99:00:00Z 这类假日期不算）。 */
+function isValidIsoTimestamp(ts: string): boolean {
+  return !Number.isNaN(Date.parse(ts));
+}
+
+/** read 过滤专用宽松前缀：`[SUPERSEDED ` + 四位数年份起头即可（窗口切片可能切掉闭合 `]`，
+ *  但「行首标记+时间戳起头」已足够判定这是失效行的残片；宽松只用于可见性过滤——
+ *  帽排除/计量仍走严格 isSupersededLine，防伪面不放松）。 */
+const SUPERSEDED_FILTER_RE = /^[^\S\r\n]*\[SUPERSEDED \d{4}-/;
 
 /** 锚点 id 正则：与 scripts/l2-score.mjs ANCHOR_RE 逐字同款（对账口径）。 */
 export const ANCHOR_RE = /m_\d{13}_[0-9a-f]{8}/g;
@@ -63,7 +77,8 @@ export interface AnchorLossRejection {
 
 /** 单行是否为失效行。 */
 export function isSupersededLine(line: string): boolean {
-  return SUPERSEDED_LINE_RE.test(line);
+  const m = SUPERSEDED_LINE_RE.exec(line);
+  return m !== null && isValidIsoTimestamp(m[1]!);
 }
 
 /**
@@ -80,13 +95,13 @@ export function filterSupersededLines(
   const lines = content.split("\n");
   let hasSuperseded = false;
   for (const line of lines) {
-    if (SUPERSEDED_LINE_RE.test(line)) {
+    if (SUPERSEDED_FILTER_RE.test(line)) {
       hasSuperseded = true;
       break;
     }
   }
   if (!hasSuperseded) return content;
-  return lines.filter((line) => !SUPERSEDED_LINE_RE.test(line)).join("\n");
+  return lines.filter((line) => !SUPERSEDED_FILTER_RE.test(line)).join("\n");
 }
 
 /** 失效行计数。 */
@@ -95,7 +110,7 @@ export function countSupersededLines(content: string): number {
   let n = 0;
   const lines = content.split("\n");
   for (const line of lines) {
-    if (SUPERSEDED_LINE_RE.test(line)) n++;
+    if (isSupersededLine(line)) n++;
   }
   return n;
 }
@@ -109,7 +124,7 @@ export function countSupersededChars(content: string): number {
   const lines = content.split("\n");
   let chars = 0;
   for (let i = 0; i < lines.length; i++) {
-    if (SUPERSEDED_LINE_RE.test(lines[i]!)) {
+    if (isSupersededLine(lines[i]!)) {
       chars += lines[i]!.length + (i < lines.length - 1 ? 1 : 0);
     }
   }

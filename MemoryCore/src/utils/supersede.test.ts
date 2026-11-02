@@ -23,11 +23,21 @@ describe("isSupersededLine：行级失效判定", () => {
   it("标准标记行（ISO 时间 + 正文）", () => {
     expect(isSupersededLine(`${MARK} - [2026-10-22] 记忆ID: m_1787881381525_2eee472e 旧事实`)).toBe(true);
   });
-  it("纯标记（无时间戳，方括号闭合）", () => {
-    expect(isSupersededLine("[SUPERSEDED] 旧事实")).toBe(true);
+  it("P2-1 防伪：裸标记（无时间戳）不判失效", () => {
+    expect(isSupersededLine("[SUPERSEDED] 旧事实")).toBe(false);
   });
-  it("冒号变体", () => {
-    expect(isSupersededLine("[SUPERSEDED: 2026-10-31] 旧事实")).toBe(true);
+  it("P2-1 防伪：冒号变体/非 ISO 形态不判失效", () => {
+    expect(isSupersededLine("[SUPERSEDED: 2026-10-31] 旧事实")).toBe(false);
+    expect(isSupersededLine("[SUPERSEDED 2026-10-31] 旧事实")).toBe(false); // 仅日期非时间戳
+  });
+  it("P2-1 防伪：非法日期/缺时区不判失效（Date.parse 级校验）", () => {
+    expect(isSupersededLine("[SUPERSEDED 2026-13-40T99:00:00Z] x")).toBe(false);
+    expect(isSupersededLine("[SUPERSEDED 2026-10-31T10:00:00] x")).toBe(false); // 无时区
+  });
+  it("合法变体放行：毫秒/无毫秒/±偏移时区", () => {
+    expect(isSupersededLine("[SUPERSEDED 2026-10-31T10:00:00Z] x")).toBe(true);
+    expect(isSupersededLine("[SUPERSEDED 2026-10-31T10:00:00.123456Z] x")).toBe(true);
+    expect(isSupersededLine("[SUPERSEDED 2026-10-31T10:00:00+08:00] x")).toBe(true);
   });
   it("允许前导空白", () => {
     expect(isSupersededLine(`  \t${MARK} x`)).toBe(true);
@@ -66,7 +76,7 @@ describe("filterSupersededLines：read 默认过滤 / includeInvalidated 审计"
     expect(filterSupersededLines(content)).toBe(content);
   });
   it("全标记文件 → 空串（纯标记行畸形输入）", () => {
-    const content = `${MARK} a\n[SUPERSEDED] b\n`;
+    const content = `${MARK} a\n${MARK} b\n`;
     expect(filterSupersededLines(content)).toBe("");
   });
   it("空串输入 → 空串", () => {
@@ -84,6 +94,10 @@ describe("filterSupersededLines：read 默认过滤 / includeInvalidated 审计"
     // 切片把 "[SUPERSED" 切掉，残行 "EDED 2026] A" 不构成前缀
     expect(filterSupersededLines("EDED 2026] A\nB")).toBe("EDED 2026] A\nB");
   });
+  it("P2-1 防伪：裸 [SUPERSEDED] 行默认不过滤（伪装前缀不能隐藏活内容）", () => {
+    const content = "A\n[SUPERSEDED] 伪装行\nB";
+    expect(filterSupersededLines(content)).toBe(content);
+  });
   it("码点边界：星形字符（代理对）所在失效行整行过滤不劈", () => {
     const content = `A\n${MARK} 🌟事实🌟\nB`;
     const out = filterSupersededLines(content);
@@ -99,8 +113,9 @@ describe("filterSupersededLines：read 默认过滤 / includeInvalidated 审计"
 });
 
 describe("countSupersededLines / countSupersededChars：帽排除口径计量", () => {
-  it("行数计数", () => {
-    expect(countSupersededLines(`A\n${MARK} B\n[SUPERSEDED] C`)).toBe(2);
+  it("行数计数（裸前缀不计入）", () => {
+    expect(countSupersededLines(`A\n${MARK} B\n${MARK} C`)).toBe(2);
+    expect(countSupersededLines(`A\n[SUPERSEDED] B`)).toBe(0);
     expect(countSupersededLines("A\nB")).toBe(0);
     expect(countSupersededLines("")).toBe(0);
   });
@@ -217,14 +232,23 @@ describe("checkSceneCharCapWithSupersede：C 帽交互（失效段不计入后�
     expect(r?.supersededChars).toBe(0);
     expect(r?.supersededLines).toBe(0);
   });
+  it("P2-1 防伪：裸 [SUPERSEDED] 伪装行不计入失效排除（不能绕帽）", () => {
+    const fake = Array.from({ length: 50 }, () => "[SUPERSEDED] 伪装行").join("\n");
+    const live = "y".repeat(200);
+    const r = checkSceneCharCapWithSupersede(`${fake}\n${live}`, 100);
+    expect(r).not.toBeNull();
+    expect(r!.error).toBe("over_scene_char_cap");
+    expect(r!.supersededLines).toBe(0);
+    expect(r!.supersededChars).toBe(0);
+  });
 });
 
 describe("supersedeDelta：metric=l2_supersede 的 value 口径", () => {
   it("pre=null（新建）+ post 2 失效行 → 2", () => {
-    expect(supersedeDelta(null, `A\n${MARK} B\n[SUPERSEDED] C`)).toBe(2);
+    expect(supersedeDelta(null, `A\n${MARK} B\n${MARK} C`)).toBe(2);
   });
   it("pre 1 → post 3 → +2", () => {
-    expect(supersedeDelta(`A\n[SUPERSEDED] B`, `${MARK} X\n${MARK} Y\n[SUPERSEDED] Z\nA`)).toBe(2);
+    expect(supersedeDelta(`A\n${MARK} B`, `${MARK} X\n${MARK} Y\n${MARK} Z\nA`)).toBe(2);
   });
   it("失效行被恢复（畸形）→ 负数照实返回", () => {
     expect(supersedeDelta(`${MARK} A\nB`, "B")).toBe(-1);

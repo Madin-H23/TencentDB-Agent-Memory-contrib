@@ -89,7 +89,7 @@ describe("storage-tools read：off 钉 / on 过滤", () => {
   });
 
   it("on：纯标记行文件默认 read → 空串", async () => {
-    const { mock } = makeStorage(PREFIX, { "a.md": `${MARK} a\n[SUPERSEDED] b` });
+    const { mock } = makeStorage(PREFIX, { "a.md": `${MARK} a\n${MARK} b` });
     const { read } = createStorageTools(mock, PREFIX, undefined, "t", 0, true);
     const out = await (read.execute as (a: { path: string }) => Promise<string>)({ path: "a.md" });
     expect(out).toBe("");
