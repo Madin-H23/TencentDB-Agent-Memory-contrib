@@ -13,6 +13,10 @@
 
 import type { LlmLayersOverride } from "./adapters/standalone/llm-runner.js";
 import { parseRecallRankingConfig } from "./core/scene/recall-ranking.js";
+import {
+  parseSemanticGateConfig,
+  type CaptureSemanticGateConfig,
+} from "./core/hooks/capture-semantic-gate.js";
 
 /** Prompt family for L1-L3 memory pipeline. */
 export type MemoryPromptMode = "chat" | "code";
@@ -102,6 +106,13 @@ export interface ExtractionConfig {
    * hash 门先行；语义近邻门（票面第二门）待后续票。
    */
   captureDedupGate?: boolean;
+  /**
+   * [P1 票④b 捕获语义门] 改写型重投识别（hash 门接不住的形态）：候选向量 →
+   * 判定链二段式。缺省 mode=off ⇒ 捕获路径零额外 I/O、逐字节同基线。
+   * shadow=完整计量不排除；on=仅 LLM 判 skip 的消息跳过蒸馏源。
+   * 畸形值 throw（parseSemanticGateConfig，对齐 recallRanking 拒绝先例）。
+   */
+  captureSemanticGate?: CaptureSemanticGateConfig;
 }
 
 /** Persona (L2/L3) settings — controls scene extraction (L2) and user profile generation (L3). */
@@ -216,6 +227,14 @@ export interface EmbeddingConfig {
   baseUrl: string;
   /** API Key (required for remote provider). */
   apiKey: string;
+  /**
+   * Name of the environment variable holding the API key (alternative to the
+   * plaintext `apiKey` — keeps secrets out of repository YAML).
+   * Resolution order: plaintext `apiKey` first, then `process.env[apiKeyEnv]`.
+   * When both are empty, embedding is disabled via the existing configError
+   * path (never throws, plugin keeps running without vector search).
+   */
+  apiKeyEnv?: string;
   /** Model name (required for remote provider). */
   model: string;
   /** Vector dimensions (required for remote provider, must match model). */
@@ -605,7 +624,16 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
   let embeddingConfigError: string | undefined;
 
   // Embedding config: determine provider based on user input and apiKey availability
-  const embeddingApiKey = str(embeddingGroup, "apiKey") ?? "";
+  //
+  // apiKeyEnv（票④b 前置 A1）：仓库 yaml 不落明文 key。解析顺序 =
+  // 明文 apiKey 优先 → process.env[apiKeyEnv]；两者皆空时走既有 configError
+  // 路径禁用 embedding（不抛、不崩）。env 名格式校验对齐 memory.persona.jev。
+  const embeddingApiKeyEnv = str(embeddingGroup, "apiKeyEnv");
+  if (embeddingApiKeyEnv && !/^[A-Z_][A-Z0-9_]*$/.test(embeddingApiKeyEnv)) {
+    throw new Error(`memory.embedding.apiKeyEnv must be an environment variable name, got "${embeddingApiKeyEnv}"`);
+  }
+  const embeddingApiKey = (str(embeddingGroup, "apiKey") ?? "")
+    || (embeddingApiKeyEnv ? process.env[embeddingApiKeyEnv]?.trim() ?? "" : "");
   const embeddingBaseUrl = str(embeddingGroup, "baseUrl") ?? "";
   const embeddingProviderRaw = str(embeddingGroup, "provider") ?? "none";
   const embeddingModelRaw = str(embeddingGroup, "model") ?? "";
@@ -771,6 +799,7 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       dedupTimeoutMs: num(extractionGroup, "dedupTimeoutMs"),
       userIdentityNames: strArray(extractionGroup, "userIdentityNames"),
       captureDedupGate: bool(extractionGroup, "captureDedupGate") ?? false,
+      captureSemanticGate: parseSemanticGateConfig(extractionGroup.captureSemanticGate),
       dedupRecallRerank: (() => {
         const raw = str(extractionGroup, "dedupRecallRerank");
         if (raw !== undefined && raw !== "none" && raw !== "lexical") {
@@ -830,6 +859,7 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       provider: embeddingProvider,
       baseUrl: embeddingBaseUrl,
       apiKey: embeddingApiKey,
+      apiKeyEnv: embeddingApiKeyEnv,
       model: str(embeddingGroup, "model") ?? defaultModel,
       dimensions: num(embeddingGroup, "dimensions") ?? defaultDimensions,
       sendDimensions: bool(embeddingGroup, "sendDimensions") ?? true,

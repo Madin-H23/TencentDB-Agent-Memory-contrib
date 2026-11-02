@@ -794,12 +794,21 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
   // top-level block into MemoryTdaiConfig for backward compatibility.
   const topLevelEmbedding = obj(fileConfig, "embedding");
   if (topLevelEmbedding) {
+    // apiKeyEnv（票④b 前置 A1）：top-level embedding 块绕过 parseMemoryConfig，
+    // 这里按同一规则解析并校验（明文 apiKey 优先 → process.env[apiKeyEnv]）。
+    const topLevelEmbeddingApiKeyEnv = str(topLevelEmbedding, "apiKeyEnv");
+    if (topLevelEmbeddingApiKeyEnv && !/^[A-Z_][A-Z0-9_]*$/.test(topLevelEmbeddingApiKeyEnv)) {
+      throw new Error(`embedding.apiKeyEnv must be an environment variable name, got "${topLevelEmbeddingApiKeyEnv}"`);
+    }
+    const topLevelEmbeddingApiKey = (str(topLevelEmbedding, "apiKey") ?? "")
+      || (topLevelEmbeddingApiKeyEnv ? process.env[topLevelEmbeddingApiKeyEnv]?.trim() ?? "" : "");
     memory.embedding = {
       ...memory.embedding,
       enabled: bool(topLevelEmbedding, "enabled") ?? memory.embedding.enabled,
       provider: str(topLevelEmbedding, "provider") ?? memory.embedding.provider,
       baseUrl: str(topLevelEmbedding, "baseUrl") ?? memory.embedding.baseUrl,
-      apiKey: str(topLevelEmbedding, "apiKey") ?? memory.embedding.apiKey,
+      apiKey: topLevelEmbeddingApiKey || memory.embedding.apiKey,
+      apiKeyEnv: topLevelEmbeddingApiKeyEnv ?? memory.embedding.apiKeyEnv,
       model: str(topLevelEmbedding, "model") ?? memory.embedding.model,
       dimensions: num(topLevelEmbedding, "dimensions") ?? memory.embedding.dimensions,
       sendDimensions: bool(topLevelEmbedding, "sendDimensions") ?? memory.embedding.sendDimensions,
