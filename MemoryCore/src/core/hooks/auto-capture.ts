@@ -19,10 +19,17 @@ import { recordConversation } from "../conversation/l0-recorder.js";
 import type { ConversationMessage } from "../conversation/l0-recorder.js";
 import { DEFAULT_ISOLATION_ID, type IMemoryStore, type L0Record } from "../store/types.js";
 import type { EmbeddingService } from "../store/embedding.js";
+import { hasClientEmbedding } from "../store/embedding.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import { report } from "../report/reporter.js";
+import {
+  evaluateSemanticGate,
+  shouldLogSemanticGateInertOnce,
+  type SemanticGateMessage,
+} from "./capture-semantic-gate.js";
+import { redactError } from "../../utils/redact-secrets.js";
 
-import type { Logger } from "../types.js";
+import type { LLMRunner, Logger } from "../types.js";
 
 const TAG = "[memory-tdai] [capture]";
 
@@ -100,11 +107,16 @@ export async function performAutoCapture(params: {
   bgTaskRegistry?: Set<Promise<void>>;
   /** StorageAdapter for file operations (COS/local). Falls back to fs when absent. */
   storage?: StorageAdapter;
+  /**
+   * [P1 票④b] 捕获语义门判定 runner（tdai-core 的 L1 既有装配点注入，不新建）。
+   * 缺失（host runner 路径）→ 语义门 inert，捕获路径不变。
+   */
+  semanticGateJudge?: LLMRunner;
 }): Promise<AutoCaptureResult> {
   const {
     messages, sessionKey, sessionId, cfg, pluginDataDir, logger, scheduler,
     originalUserText, originalUserMessageCount, pluginStartTimestamp,
-    vectorStore, embeddingService, bgTaskRegistry, storage,
+    vectorStore, embeddingService, bgTaskRegistry, storage, semanticGateJudge,
   } = params;
   const tCaptureStart = performance.now();
 
@@ -224,6 +236,119 @@ export async function performAutoCapture(params: {
       logger?.warn(
         `${TAG} [capture-gate] gate error (non-fatal, pass-through): ${gateErr instanceof Error ? gateErr.message : String(gateErr)}`,
       );
+    }
+  }
+
+  // ============================
+  // Step 1.3: ④b 捕获语义门（extraction.captureSemanticGate，默认 off）
+  // ============================
+  // 票④b：识别「L0 以新措辞复述在案 L1 事实」的改写型重投（④ hash 门接不住的
+  // 形态）。输入只取 ④ 未排除的消息（④ 已排除的不进 ④b，两门计数不重叠）。
+  //   mode=off   → 零额外 I/O、零锚点，逐字节同基线；
+  //   mode=shadow→ 完整跑候选+判定并打锚点，排除集合恒空（零风险计量）；
+  //   mode=on    → 仅 LLM 判 skip 的消息并入 gateExcludedIdx（跳过 upsertL0 =
+  //                不进蒸馏源；L0 JSONL 已在上方留痕）。
+  // 门内任何失败/超时 → 整批放行（failopen），绝不阻塞捕获。
+  const semGateCfg = cfg.extraction?.captureSemanticGate;
+  const semGateMode = semGateCfg?.mode ?? "off";
+  if (semGateMode !== "off" && filteredMessages.length > 0) {
+    const capsVectorReady = (() => {
+      if (!vectorStore) return false;
+      try {
+        const caps = typeof vectorStore.getCapabilities === "function"
+          ? vectorStore.getCapabilities()
+          : undefined;
+        return !caps || caps.vectorSearch !== false;
+      } catch {
+        return false;
+      }
+    })();
+    const inertReason =
+      !embeddingService || !hasClientEmbedding(embeddingService) ? "no_embedding"
+      : !vectorStore ? "no_vector_store"
+      : !capsVectorReady ? "no_vec_table"
+      : !semanticGateJudge ? "no_judge"
+      : undefined;
+
+    if (inertReason) {
+      // 每进程每原因只打一次（成功路径按捕获频率执行，不去重会刷屏）
+      if (shouldLogSemanticGateInertOnce(inertReason)) {
+        logger?.info(
+          `${TAG} metric=capture_semantic_gate mode=${semGateMode} skipped=inert ` +
+          `reason=${inertReason} session=${sessionKey}`,
+        );
+        report("capture_semantic_gate", {
+          sessionKey, mode: semGateMode, skipped: "inert", reason: inertReason,
+        });
+      }
+    } else {
+      const gateInput: SemanticGateMessage[] = [];
+      const indexById = new Map<string, number>();
+      for (let i = 0; i < filteredMessages.length; i++) {
+        if (gateExcludedIdx?.has(i)) continue; // ④ 已排除 → 不进 ④b
+        const msg = filteredMessages[i]!;
+        const id = `${sessionKey}:${msg.timestamp}:${i}`;
+        gateInput.push({ id, content: msg.content, role: msg.role });
+        indexById.set(id, i);
+      }
+
+      if (gateInput.length > 0) {
+        try {
+          const tSemStart = performance.now();
+          const semResult = await evaluateSemanticGate(gateInput, {
+            mode: semGateMode,
+            embeddingService: embeddingService!,
+            vectorStore: vectorStore!,
+            judge: semanticGateJudge!,
+            threshold: semGateCfg!.threshold,
+            topK: semGateCfg!.topK,
+            maxMessageChars: semGateCfg!.maxMessageChars,
+            maxMessagesPerBatch: semGateCfg!.maxMessagesPerBatch,
+            judgeTimeoutMs: semGateCfg!.judgeTimeoutMs,
+            embeddingTimeoutMs: semGateCfg!.embeddingTimeoutMs,
+            logger,
+          });
+
+          let semanticSkipped = 0;
+          if (semGateMode === "on" && semResult.excludedMessageIds.size > 0) {
+            const next = new Set<number>(gateExcludedIdx ?? []);
+            for (const id of semResult.excludedMessageIds) {
+              const idx = indexById.get(id);
+              if (idx !== undefined) {
+                next.add(idx);
+                semanticSkipped++;
+              }
+            }
+            gateExcludedIdx = next;
+          }
+          const skippedAnchor = semGateMode === "shadow" ? 0 : semanticSkipped;
+
+          logger?.info(
+            `${TAG} metric=capture_semantic_gate mode=${semGateMode} value=${semResult.candidates} ` +
+            `hits=${semResult.hits} skipped=${skippedAnchor} oversize=${semResult.oversize} ` +
+            `capped=${semResult.capped} top=${semResult.topScore.toFixed(2)} ` +
+            `failopen=${semResult.failopen ? 1 : 0} session=${sessionKey} ` +
+            `ms=${(performance.now() - tSemStart).toFixed(0)}`,
+          );
+          report("capture_semantic_gate", {
+            sessionKey,
+            mode: semGateMode,
+            candidates: semResult.candidates,
+            hits: semResult.hits,
+            skipped: skippedAnchor,
+            oversize: semResult.oversize,
+            capped: semResult.capped,
+            topScore: Number(semResult.topScore.toFixed(2)),
+            failopen: semResult.failopen ? 1 : 0,
+            ms: Number((performance.now() - tSemStart).toFixed(0)),
+          });
+        } catch (semErr) {
+          // 模块内已满 fail-open；此处仅兜底「绝不影响捕获主路径」
+          logger?.warn(
+            `${TAG} [semantic-gate] unexpected error (non-fatal, pass-through): ${redactError(semErr)}`,
+          );
+        }
+      }
     }
   }
 

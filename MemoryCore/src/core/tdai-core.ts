@@ -38,6 +38,7 @@ import type { StorageAdapter } from "./storage/adapter.js";
 import { performAutoRecall } from "./hooks/auto-recall.js";
 import { reportRecallMetrics } from "./report/metric-tracking-recall.js";
 import { performAutoCapture } from "./hooks/auto-capture.js";
+import { startEmbeddingBackfill } from "./store/embedding-backfill.js";
 import { executeMemorySearch, formatSearchResponse } from "./tools/memory-search.js";
 import { executeConversationSearch, formatConversationSearchResponse } from "./tools/conversation-search.js";
 import {
@@ -278,6 +279,11 @@ export class TdaiCore {
    */
   private schedulerStartPromise?: Promise<void>;
   private storeReady?: Promise<void>;
+  /**
+   * 票④b：L1 判定 runner（由 wirePipelineRunners 的既有装配点提升为字段），
+   * 供捕获语义门复用——不新建 runner。undefined（host runner 路径）时语义门 inert。
+   */
+  private l1LlmRunner?: LLMRunner;
 
   // ── Skill module (v2 redesign 2026-06-17) ──
   // Constructed in ensureSkillModuleWired after vectorStore + storage are ready,
@@ -538,6 +544,7 @@ export class TdaiCore {
       embeddingService: this.embeddingService,
       bgTaskRegistry: this.bgTasks,
       storage: this.storage,
+      semanticGateJudge: this.l1LlmRunner,
     });
   }
 
@@ -723,6 +730,20 @@ export class TdaiCore {
       this.vectorStore = stores.vectorStore;
       this.embeddingService = stores.embeddingService;
       this.logger.debug?.(`${TAG} Stores initialized: backend=${this.cfg.storeBackend}, embedding=${this.cfg.embedding.provider}`);
+
+      // 票④b 前置 A3：needsReindex 此前无人消费（reindexAll 全仓零生产调用方）。
+      // 必须与「首次检测到 needsReindex」同一次启动完成——embedding_meta 在
+      // initSchema 末尾已写入新 provider，本次不回填则下次重启 savedMeta 匹配、
+      // needsReindex=false，缺口永久静默化（memory-store.ts:1160-1170）。
+      // 后台非阻塞：失败只 warn + metric=embedding_reindex status=failed 锚点。
+      void startEmbeddingBackfill({
+        needsReindex: stores.needsReindex,
+        reindexReason: stores.reindexReason,
+        vectorStore: stores.vectorStore,
+        embeddingService: stores.embeddingService,
+        logger: this.logger,
+        bgTaskRegistry: this.bgTasks,
+      });
     } catch (err) {
       this.logger.warn(
         `${TAG} Store init failed; recall/dedup degraded: ${err instanceof Error ? err.message : String(err)}`,
@@ -870,6 +891,8 @@ export class TdaiCore {
     const l1LlmRunner = useStandaloneRunner
       ? trackingFactory.createRunner({ enableTools: false })
       : undefined;
+    // 票④b：提升为字段，捕获语义门直接复用（SPEC §5「不新建 runner」）。
+    this.l1LlmRunner = l1LlmRunner;
     const l2l3LlmRunner = useStandaloneRunner
       ? trackingFactory.createRunner({ enableTools: true })
       : undefined;
