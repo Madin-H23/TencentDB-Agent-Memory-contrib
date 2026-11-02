@@ -7,13 +7,16 @@
  *   ② 只有 score = 1 - distance ≥ threshold 的候选才进 LLM 判定（复用 M1 判定链）。
  *
  * 关键约束（SPEC §2.6 / §6 / §11）：
- * - **不复用 `batchDedup`**：它会二次 embed + 二次 KNN；这里直接
- *   `formatBatchConflictPrompt` + `runLlmJudgment`。
+ * - **不复用 `batchDedup`**：它会二次 embed + 二次 KNN；这里直接复用 M1 判定链
+ *   （`runLlmJudgment` 内部即 `formatBatchConflictPrompt` + LLM 调用）。
  * - `searchL1Vector` 本身无阈值（score=1-distance、按 topK 截断），阈值过滤在本模块内做。
  * - 只消费 `action === "skip"`；store/update/merge 一律放行，且绝不落库。
  * - 任一步异常/超时/维度不符/表未建/空向量 → **整批放行 + failopen=true**。
  * - key 不进日志：所有错误串经 `redactError`。
- * - `mode=shadow`：完整执行并计数，但 `excludedMessageIds` 恒空（真排除只发生在 on）。
+ * - `mode=shadow`：完整执行并计数，但 `excludedMessageIds` 恒空（真排除只发生在 on）；
+ *   接线层对 shadow 走后台 fire-and-forget（纯计量，不阻塞捕获响应）。
+ * - 配置解析在零依赖的 `capture-semantic-gate.config.ts`（config.ts 解析期不拉起
+ *   l1-dedup 依赖链），本模块 re-export 保持既有 import 路径。
  */
 
 import type { MemoryPromptMode } from "../../config.js";
@@ -21,111 +24,24 @@ import { hasClientEmbedding, type EmbeddingService } from "../store/embedding.js
 import type { IMemoryStore, IsolationFilter, L1SearchResult } from "../store/types.js";
 import type { ExtractedMemory, MemoryRecord, DedupDecision, MemoryType } from "../record/l1-writer.js";
 import { runLlmJudgment } from "../record/l1-dedup.js";
-import { formatBatchConflictPrompt, type CandidateMatch } from "../prompts/l1-dedup.js";
+import type { CandidateMatch } from "../prompts/l1-dedup.js";
 import type { LLMRunner, Logger } from "../types.js";
 import { redactError } from "../../utils/redact-secrets.js";
+import {
+  CAPTURE_SEMANTIC_GATE_DEFAULTS,
+  parseSemanticGateConfig,
+  type CaptureSemanticGateConfig,
+  type SemanticGateMode,
+} from "./capture-semantic-gate.config.js";
 
 const TAG = "[memory-tdai][capture-semantic-gate]";
 
 // ============================
-// Config
+// Config（拆到零依赖模块：config.ts 解析期不拉起 l1-dedup 依赖链）
 // ============================
 
-export type SemanticGateMode = "off" | "shadow" | "on";
-
-export interface CaptureSemanticGateConfig {
-  /** off（缺省）=零 I/O；shadow=只计量不排除；on=真排除。 */
-  mode: SemanticGateMode;
-  /** 候选相似度阈值（score = 1 - distance），(0, 1]。 */
-  threshold: number;
-  /** 每条消息的 KNN 候选数。 */
-  topK: number;
-  /** 单条消息字符上限（码点），超限直接放行（不截断后判定）。 */
-  maxMessageChars: number;
-  /** 每批最多判定条数，其余放行（防提示词膨胀）。 */
-  maxMessagesPerBatch: number;
-  /** 判定 LLM 超时（毫秒）。 */
-  judgeTimeoutMs: number;
-  /** 批量 embed 超时（毫秒）。 */
-  embeddingTimeoutMs: number;
-}
-
-/** 默认值（SPEC §4）。threshold 取 BGE-M3 离线标定 0.78。 */
-export const CAPTURE_SEMANTIC_GATE_DEFAULTS: Readonly<CaptureSemanticGateConfig> = Object.freeze({
-  mode: "off",
-  threshold: 0.78,
-  topK: 5,
-  maxMessageChars: 2000,
-  maxMessagesPerBatch: 5,
-  judgeTimeoutMs: 15_000,
-  embeddingTimeoutMs: 5_000,
-});
-
-function isFiniteNumber(v: unknown): v is number {
-  return typeof v === "number" && Number.isFinite(v);
-}
-
-/**
- * 解析 `extraction.captureSemanticGate`。
- *
- * 畸形值 **throw**（对齐 `parseRecallRankingConfig` 与
- * `extraction.dedupRecallRerank` 的拒绝先例）：灰度开关静默回落会造成
- * 「以为开了实际没开」污染 shadow 观测口径。
- */
-export function parseSemanticGateConfig(raw: unknown): CaptureSemanticGateConfig {
-  if (raw === undefined || raw === false) return { ...CAPTURE_SEMANTIC_GATE_DEFAULTS };
-  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new Error(
-      `[config] extraction.captureSemanticGate 非法类型 ${raw === null ? "null" : typeof raw}（合法：缺省/false=off、{mode,threshold,...}）`,
-    );
-  }
-  const o = raw as Record<string, unknown>;
-  const out: CaptureSemanticGateConfig = { ...CAPTURE_SEMANTIC_GATE_DEFAULTS };
-
-  if (o.mode !== undefined) {
-    if (o.mode !== "off" && o.mode !== "shadow" && o.mode !== "on") {
-      throw new Error(`[config] extraction.captureSemanticGate.mode 非法值 ${String(o.mode)}（合法：off|shadow|on）`);
-    }
-    out.mode = o.mode;
-  }
-  if (o.threshold !== undefined) {
-    if (!isFiniteNumber(o.threshold) || o.threshold <= 0 || o.threshold > 1) {
-      throw new Error(`[config] extraction.captureSemanticGate.threshold 非法值 ${String(o.threshold)}（须满足 0 < threshold ≤ 1）`);
-    }
-    out.threshold = o.threshold;
-  }
-  if (o.topK !== undefined) {
-    if (!isFiniteNumber(o.topK) || o.topK <= 0 || !Number.isInteger(o.topK)) {
-      throw new Error(`[config] extraction.captureSemanticGate.topK 非法值 ${String(o.topK)}（须为正整数）`);
-    }
-    out.topK = o.topK;
-  }
-  if (o.maxMessageChars !== undefined) {
-    if (!isFiniteNumber(o.maxMessageChars) || o.maxMessageChars <= 0) {
-      throw new Error(`[config] extraction.captureSemanticGate.maxMessageChars 非法值 ${String(o.maxMessageChars)}（须 > 0）`);
-    }
-    out.maxMessageChars = o.maxMessageChars;
-  }
-  if (o.maxMessagesPerBatch !== undefined) {
-    if (!isFiniteNumber(o.maxMessagesPerBatch) || o.maxMessagesPerBatch <= 0 || !Number.isInteger(o.maxMessagesPerBatch)) {
-      throw new Error(`[config] extraction.captureSemanticGate.maxMessagesPerBatch 非法值 ${String(o.maxMessagesPerBatch)}（须为正整数）`);
-    }
-    out.maxMessagesPerBatch = o.maxMessagesPerBatch;
-  }
-  if (o.judgeTimeoutMs !== undefined) {
-    if (!isFiniteNumber(o.judgeTimeoutMs) || o.judgeTimeoutMs <= 0) {
-      throw new Error(`[config] extraction.captureSemanticGate.judgeTimeoutMs 非法值 ${String(o.judgeTimeoutMs)}（须 > 0）`);
-    }
-    out.judgeTimeoutMs = o.judgeTimeoutMs;
-  }
-  if (o.embeddingTimeoutMs !== undefined) {
-    if (!isFiniteNumber(o.embeddingTimeoutMs) || o.embeddingTimeoutMs <= 0) {
-      throw new Error(`[config] extraction.captureSemanticGate.embeddingTimeoutMs 非法值 ${String(o.embeddingTimeoutMs)}（须 > 0）`);
-    }
-    out.embeddingTimeoutMs = o.embeddingTimeoutMs;
-  }
-  return out;
-}
+export { CAPTURE_SEMANTIC_GATE_DEFAULTS, parseSemanticGateConfig };
+export type { CaptureSemanticGateConfig, SemanticGateMode };
 
 // ============================
 // Inert（能力缺失）锚点去重

@@ -96,11 +96,21 @@ describe("performAutoCapture × ④b 语义门接线", () => {
   let dir: string;
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "tdai-semgate-"));
+    registry = new Set<Promise<void>>();
     resetSemanticGateInertLogForTests();
   });
   afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
   });
+
+  /** shadow 语义门是后台任务：测试用共享 registry 等待其完成（on 为内联，无任务）。 */
+  let registry: Set<Promise<void>>;
+
+  async function drain(): Promise<void> {
+    while (registry.size > 0) {
+      await Promise.allSettled([...registry]);
+    }
+  }
 
   function run(params: {
     cfg: MemoryTdaiConfig;
@@ -119,6 +129,7 @@ describe("performAutoCapture × ④b 语义门接线", () => {
       vectorStore: params.store,
       embeddingService: params.embedding,
       semanticGateJudge: params.judge,
+      bgTaskRegistry: registry,
       logger: params.logger as never,
     });
   }
@@ -175,8 +186,9 @@ describe("performAutoCapture × ④b 语义门接线", () => {
     expect(result.gateExcludedCount).toBeUndefined();
     expect((store.upsertL0 as ReturnType<typeof vi.fn>).mock.calls.length).toBe(2);
     expect(result.l0VectorsWritten).toBe(2);
-    expect(judge.run).toHaveBeenCalledTimes(1);
 
+    await drain(); // shadow 为后台任务
+    expect(judge.run).toHaveBeenCalledTimes(1);
     const anchor = anchorLines(logger)[0]!;
     expect(anchor).toMatch(/metric=capture_semantic_gate mode=shadow value=2 hits=2 skipped=0 oversize=0 capped=0 top=0\.90 failopen=0/);
   });
@@ -188,9 +200,92 @@ describe("performAutoCapture × ④b 语义门接线", () => {
     const logger = makeLogger();
 
     await run({ cfg: makeCfg({ semantic: { mode: "shadow" } }), store, embedding: emb, judge, logger });
+    await drain();
     const anchor = anchorLines(logger)[0]!;
     expect(anchor).toContain("hits=0");
     expect(anchor).toContain("skipped=0");
+  });
+
+  it("shadow 后台化：judge 挂起时 performAutoCapture 已返回、upsertL0 已调用、锚点尚未出现", async () => {
+    let release!: (v: string) => void;
+    const gateResponse = new Promise<string>((res) => { release = res; });
+    const emb = makeEmbedding();
+    const store = makeStore({ searchL1Vector: vi.fn(async () => [hit("r1", 0.9)]) });
+    const judge = { run: vi.fn(() => gateResponse) } as unknown as LLMRunner;
+    const logger = makeLogger();
+
+    const t0 = Date.now();
+    const result = await run({ cfg: makeCfg({ semantic: { mode: "shadow" } }), store, embedding: emb, judge, logger });
+    const elapsed = Date.now() - t0;
+
+    // 内联路径（L0 向量 + notify）已完成，而判定尚未 resolve
+    expect(result.schedulerNotified).toBe(true);
+    expect((store.upsertL0 as ReturnType<typeof vi.fn>).mock.calls.length).toBe(2);
+    expect(anchorLines(logger)).toEqual([]);
+    expect(registry.size).toBe(1); // 后台任务登记在册
+    expect(elapsed).toBeLessThan(1000);
+
+    release(JSON.stringify([{ record_id: "sem_x", action: "skip", target_ids: ["r1"] }]));
+    await drain();
+    const anchor = anchorLines(logger)[0]!;
+    expect(anchor).toContain("mode=shadow");
+    expect(anchor).toContain("skipped=0"); // 后台完成也不排除
+  });
+
+  it("shadow 后台化：bgTaskRegistry 缺省时仍不内联、不产生 unhandled rejection", async () => {
+    let release!: (v: string) => void;
+    const gateResponse = new Promise<string>((res) => { release = res; });
+    const store = makeStore({ searchL1Vector: vi.fn(async () => [hit("r1", 0.9)]) });
+    const judge = { run: vi.fn(() => gateResponse) } as unknown as LLMRunner;
+    const logger = makeLogger();
+
+    const result = await performAutoCapture({
+      messages: makeMessages(1_700_000_300_000),
+      sessionKey: "sess-sem",
+      cfg: makeCfg({ semantic: { mode: "shadow" } }),
+      pluginDataDir: dir,
+      scheduler: { notifyConversation: vi.fn(async () => {}) } as never,
+      vectorStore: store,
+      embeddingService: makeEmbedding(),
+      semanticGateJudge: judge,
+      // 故意不传 bgTaskRegistry
+      logger: logger as never,
+    });
+
+    expect(result.l0VectorsWritten).toBe(2);
+    expect(anchorLines(logger)).toEqual([]);
+    release(JSON.stringify([{ record_id: "sem_x", action: "skip", target_ids: [] }]));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(anchorLines(logger)[0]).toContain("mode=shadow");
+  });
+
+  it("on 保持内联：judge 挂起时 performAutoCapture 不返回，resolve 后 skip 才生效", async () => {
+    let release!: (v: string) => void;
+    const gateResponse = new Promise<string>((res) => { release = res; });
+    let capturedPrompt = "";
+    const store = makeStore({ searchL1Vector: vi.fn(async () => [hit("r1", 0.9)]) });
+    const judge = {
+      run: vi.fn((params: { prompt: string }) => {
+        capturedPrompt = params.prompt;
+        return gateResponse;
+      }),
+    } as unknown as LLMRunner;
+    const logger = makeLogger();
+
+    const pending = run({ cfg: makeCfg({ semantic: { mode: "on" } }), store, embedding: makeEmbedding(), judge, logger });
+    let settled = false;
+    void pending.then(() => { settled = true; });
+
+    await new Promise((r) => setTimeout(r, 50));
+    expect(settled).toBe(false); // 内联等待判定
+    expect((store.upsertL0 as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
+
+    // 回显 prompt 里的真实 sem_ 记录 id
+    const ids = [...capturedPrompt.matchAll(/record_id: (sem_[^\s")\n,]+)/g)].map((m) => m[1]!);
+    expect(ids.length).toBe(2);
+    release(JSON.stringify(ids.map((id) => ({ record_id: id, action: "skip", target_ids: ["r1"] }))));
+    const result = await pending;
+    expect(result.l0VectorsWritten).toBe(0);
   });
 
   // ── on ───────────────────────────────────────────────────
@@ -366,6 +461,7 @@ describe("performAutoCapture × ④b 语义门接线", () => {
       store, embedding: emb, judge, logger,
       messages: [{ role: "user", content: long, timestamp: 1_700_000_000_000 }],
     });
+    await drain();
     expect((emb.embedBatch as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] ?? []).not.toContain(long);
     expect(anchorLines(logger)[0]).toContain("oversize=1");
   });

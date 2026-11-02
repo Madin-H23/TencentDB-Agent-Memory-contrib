@@ -16,7 +16,7 @@ import { parseRecallRankingConfig } from "./core/scene/recall-ranking.js";
 import {
   parseSemanticGateConfig,
   type CaptureSemanticGateConfig,
-} from "./core/hooks/capture-semantic-gate.js";
+} from "./core/hooks/capture-semantic-gate.config.js";
 
 /** Prompt family for L1-L3 memory pipeline. */
 export type MemoryPromptMode = "chat" | "code";

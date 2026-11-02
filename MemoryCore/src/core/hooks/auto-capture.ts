@@ -293,60 +293,81 @@ export async function performAutoCapture(params: {
       }
 
       if (gateInput.length > 0) {
-        try {
-          const tSemStart = performance.now();
-          const semResult = await evaluateSemanticGate(gateInput, {
-            mode: semGateMode,
-            embeddingService: embeddingService!,
-            vectorStore: vectorStore!,
-            judge: semanticGateJudge!,
-            threshold: semGateCfg!.threshold,
-            topK: semGateCfg!.topK,
-            maxMessageChars: semGateCfg!.maxMessageChars,
-            maxMessagesPerBatch: semGateCfg!.maxMessagesPerBatch,
-            judgeTimeoutMs: semGateCfg!.judgeTimeoutMs,
-            embeddingTimeoutMs: semGateCfg!.embeddingTimeoutMs,
-            logger,
-          });
+        const runGateAndAnchor = async (): Promise<void> => {
+          try {
+            const tSemStart = performance.now();
+            const semResult = await evaluateSemanticGate(gateInput, {
+              mode: semGateMode,
+              embeddingService: embeddingService!,
+              vectorStore: vectorStore!,
+              judge: semanticGateJudge!,
+              threshold: semGateCfg!.threshold,
+              topK: semGateCfg!.topK,
+              maxMessageChars: semGateCfg!.maxMessageChars,
+              maxMessagesPerBatch: semGateCfg!.maxMessagesPerBatch,
+              judgeTimeoutMs: semGateCfg!.judgeTimeoutMs,
+              embeddingTimeoutMs: semGateCfg!.embeddingTimeoutMs,
+              logger,
+            });
 
-          let semanticSkipped = 0;
-          if (semGateMode === "on" && semResult.excludedMessageIds.size > 0) {
-            const next = new Set<number>(gateExcludedIdx ?? []);
-            for (const id of semResult.excludedMessageIds) {
-              const idx = indexById.get(id);
-              if (idx !== undefined) {
-                next.add(idx);
-                semanticSkipped++;
+            let semanticSkipped = 0;
+            if (semGateMode === "on" && semResult.excludedMessageIds.size > 0) {
+              const next = new Set<number>(gateExcludedIdx ?? []);
+              for (const id of semResult.excludedMessageIds) {
+                const idx = indexById.get(id);
+                if (idx !== undefined) {
+                  next.add(idx);
+                  semanticSkipped++;
+                }
               }
+              gateExcludedIdx = next;
             }
-            gateExcludedIdx = next;
-          }
-          const skippedAnchor = semGateMode === "shadow" ? 0 : semanticSkipped;
+            const skippedAnchor = semGateMode === "shadow" ? 0 : semanticSkipped;
 
-          logger?.info(
-            `${TAG} metric=capture_semantic_gate mode=${semGateMode} value=${semResult.candidates} ` +
-            `hits=${semResult.hits} skipped=${skippedAnchor} oversize=${semResult.oversize} ` +
-            `capped=${semResult.capped} top=${semResult.topScore.toFixed(2)} ` +
-            `failopen=${semResult.failopen ? 1 : 0} session=${sessionKey} ` +
-            `ms=${(performance.now() - tSemStart).toFixed(0)}`,
-          );
-          report("capture_semantic_gate", {
-            sessionKey,
-            mode: semGateMode,
-            candidates: semResult.candidates,
-            hits: semResult.hits,
-            skipped: skippedAnchor,
-            oversize: semResult.oversize,
-            capped: semResult.capped,
-            topScore: Number(semResult.topScore.toFixed(2)),
-            failopen: semResult.failopen ? 1 : 0,
-            ms: Number((performance.now() - tSemStart).toFixed(0)),
+            logger?.info(
+              `${TAG} metric=capture_semantic_gate mode=${semGateMode} value=${semResult.candidates} ` +
+              `hits=${semResult.hits} skipped=${skippedAnchor} oversize=${semResult.oversize} ` +
+              `capped=${semResult.capped} top=${semResult.topScore.toFixed(2)} ` +
+              `failopen=${semResult.failopen ? 1 : 0} session=${sessionKey} ` +
+              `ms=${(performance.now() - tSemStart).toFixed(0)}`,
+            );
+            report("capture_semantic_gate", {
+              sessionKey,
+              mode: semGateMode,
+              candidates: semResult.candidates,
+              hits: semResult.hits,
+              skipped: skippedAnchor,
+              oversize: semResult.oversize,
+              capped: semResult.capped,
+              topScore: Number(semResult.topScore.toFixed(2)),
+              failopen: semResult.failopen ? 1 : 0,
+              ms: Number((performance.now() - tSemStart).toFixed(0)),
+            });
+          } catch (semErr) {
+            // 模块内已满 fail-open；此处仅兜底「绝不影响捕获主路径」
+            logger?.warn(
+              `${TAG} [semantic-gate] unexpected error (non-fatal, pass-through): ${redactError(semErr)}`,
+            );
+          }
+        };
+
+        if (semGateMode === "shadow") {
+          // shadow 只计量：fire-and-forget，绝不阻塞 /capture 响应路径。
+          // 约定：registry 缺省时也不回退成内联（`void` + catch 兜底即可）。
+          const gatePromise: Promise<void> = runGateAndAnchor().catch((semErr) => {
+            logger?.warn(
+              `${TAG} [semantic-gate] background task failed (non-fatal): ${redactError(semErr)}`,
+            );
           });
-        } catch (semErr) {
-          // 模块内已满 fail-open；此处仅兜底「绝不影响捕获主路径」
-          logger?.warn(
-            `${TAG} [semantic-gate] unexpected error (non-fatal, pass-through): ${redactError(semErr)}`,
-          );
+          if (bgTaskRegistry) {
+            bgTaskRegistry.add(gatePromise);
+            void gatePromise.finally(() => {
+              bgTaskRegistry.delete(gatePromise);
+            });
+          }
+        } else {
+          // on：排除必须发生在 L0 向量写入 / 蒸馏源之前 → 内联等待。
+          await runGateAndAnchor();
         }
       }
     }
