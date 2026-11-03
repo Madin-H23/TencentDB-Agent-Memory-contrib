@@ -53,6 +53,7 @@
  * 全部纯函数；off 路径不进入本模块任何函数（工具层开关短路），off 行为逐字节不变。
  */
 
+import { ANCHOR_RE } from "../../utils/supersede.js";
 import { META_END, META_START, normalizeSceneSummary } from "./scene-format.js";
 
 /** v2 段标题（逐字口径）。 */
@@ -175,4 +176,87 @@ export function syncV2MetaSummary(raw: string): string {
   const newMetaBlock = metaBlock.replace(summaryLineRe, () => `summary: ${summary}`);
   if (newMetaBlock === metaBlock) return raw;
   return raw.slice(0, startIdx + META_START.length) + newMetaBlock + raw.slice(endIdx);
+}
+
+/** META 块内的 summary 行（与 parseSceneBlock/extractMetaField 同口径：首个 summary 键）。 */
+const META_SUMMARY_LINE_RE = /^summary:[ \t]*(.*)$/m;
+
+/** 行级锚点判定：与 ANCHOR_RE 同源（去掉 g 标志，避免 test 的 lastIndex 状态）。 */
+const HAS_ANCHOR_RE = new RegExp(ANCHOR_RE.source);
+
+/** 正文 H2 标题行（`###` 不匹配）——迁移时降级为 H3。 */
+const H2_LINE_RE = /^##([ \t]+.*?)(\r?)$/;
+
+/** v1 正文里已有的 `## 活动` 标题行（防御性并入归档，不重复建段）。 */
+const ARCHIVE_HEADING_LINE_RE = /^##[ \t]+活动[ \t]*\r?$/;
+
+/** 去掉行数组首尾的空行（结构边界），中部空行原样保留。 */
+function trimBlankEdges(lines: string[]): string[] {
+  let a = 0;
+  let b = lines.length;
+  while (a < b && lines[a]!.trim() === "") a++;
+  while (b > a && lines[b - 1]!.trim() === "") b--;
+  return lines.slice(a, b);
+}
+
+/** 归档段标题降级：`## X` → `### X`（保留原有空白与行尾 \r）。 */
+function demoteH2(line: string): string {
+  const m = line.match(H2_LINE_RE);
+  return m ? `###${m[1]}${m[2]}` : line;
+}
+
+/**
+ * 票⑨（exp/p1-9-scene-v2-migration）：v1/批次格式 → v2 三段结构的**惰性迁移**。
+ *
+ * 根因（取证 2026-11-03）：L2 实际写入 105 edit : 1 write，edit 只做字符串替换、
+ * 不重排文件结构 ⇒ 存量 v1/批次格式（META + 逐批 `## ★…` 段）永远没有 v2 的生成
+ * 路径（`syncV2MetaSummary` 对非 v2 原样返回）。本函数在工具层 write/edit 落盘前
+ * 调用，把任意 v1/批次正文一次性重排为三段，使「下一次写/编辑」即完成迁移。
+ *
+ * 段路由（除段标题/降级外不改写任何行内容）：
+ * - `## 要点` ← META.summary（首个 summary 键，normalizeSceneSummary：PII 脱敏 + 300 字预算）
+ * - `## 事实` ← 所有含锚点 `m_<ts>_<hash>` 的行，逐行原样、保序（不跨行拼接/不拆行）
+ * - `## 活动` ← 其余叙事；原 `##` 标题降级为 `###` 子标题；已有 `## 活动` 段并入同一段
+ *
+ * 保守返回（不破坏）：已是 v2（`isV2Format`，含仅带任一 v2 段标题的文件）原样；
+ * META 缺失/END 在 START 前/META 内无 summary 字段原样；空串/纯空白原样。
+ *
+ * 硬不变量：**锚点零丢失**（输入每个 id 的出现次数 ≤ 输出；唯一集合完全一致）。
+ * 计数可能盈余（绝无缺失）：META.summary 自身若含锚点，会被投影进 `## 要点`——这是
+ * 必要的（后续 syncV2MetaSummary 用要点覆盖 summary，若要点剥掉锚点反而会真丢）。
+ * 实测 14 个存量场景：2736 → 2767（盈余 31，全部来自 summary 投影），deficit=0。
+ * 幂等：输出必含 v2 段标题，二次调用走 `isV2Format` 短路逐字节返回。
+ */
+export function toV2Format(raw: string): string {
+  if (!raw || isV2Format(raw)) return raw;
+  const startIdx = raw.indexOf(META_START);
+  const endIdx = raw.indexOf(META_END);
+  if (startIdx === -1 || endIdx === -1 || endIdx < startIdx) return raw;
+  const metaEnd = endIdx + META_END.length;
+  const summaryMatch = raw.slice(startIdx + META_START.length, endIdx).match(META_SUMMARY_LINE_RE);
+  if (!summaryMatch) return raw; // META 畸形（无 summary 字段）→ 不破坏
+  const summary = normalizeSceneSummary(summaryMatch[1]!.trim());
+
+  const factLines: string[] = [];
+  const archiveLines: string[] = [];
+  for (const line of raw.slice(metaEnd).split("\n")) {
+    if (HAS_ANCHOR_RE.test(line)) factLines.push(line);
+    else if (ARCHIVE_HEADING_LINE_RE.test(line)) continue; // 已有 `## 活动`：并入，不再建段
+    else archiveLines.push(line);
+  }
+
+  const out = [
+    raw.slice(0, metaEnd), // 前缀 + META 块逐字节原样
+    "",
+    V2_GIST_HEADING,
+    ...(summary ? [summary] : []),
+    "",
+    V2_FACTS_HEADING,
+    ...trimBlankEdges(factLines),
+    "",
+    V2_ARCHIVE_HEADING,
+    ...trimBlankEdges(archiveLines).map(demoteH2),
+  ].join("\n");
+  // 文件末尾换行与输入同形（无内容损失的结构性保持）
+  return raw.endsWith("\n") ? `${out}\n` : out;
 }
