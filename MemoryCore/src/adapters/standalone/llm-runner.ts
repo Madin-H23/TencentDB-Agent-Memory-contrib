@@ -34,6 +34,7 @@ import {
   buildV2ReadView,
   isV2Format,
   syncV2MetaSummary,
+  toV2Format,
 } from "../../core/scene/scene-format-v2.js";
 import {
   checkAnchorPreservation,
@@ -455,9 +456,11 @@ function createSandboxedTools(workspaceDir: string, logger?: Logger, taskId?: st
           }
         }
         // 票⑤ v2 on：`## 要点` 段 → META.summary 单向覆盖（落盘前同步，幂等）；
-        // v2 写入观测锚点：后像为 v2 格式即打点。
+        // 票⑨：非 v2 先做惰性结构迁移（v1/批次正文 → 三段；已是 v2/无 META 原样），
+        // 再同步要点。v2 写入观测锚点：后像为 v2 格式即打点。
         let toPersist = args.content;
         if (effectiveV2 && toPersist !== "[DELETED]") {
+          toPersist = toV2Format(toPersist);
           toPersist = syncV2MetaSummary(toPersist);
           if (isV2Format(toPersist)) logger?.info?.(`${TAG} metric=l2_format_v2 value=1 path=${args.path}`);
         }
@@ -537,10 +540,12 @@ function createSandboxedTools(workspaceDir: string, logger?: Logger, taskId?: st
           }
           // 方案C：edit 后像（应用全部替换后的完整内容）尺寸帽 —— 超帽拒绝且不落盘。
           // 票⑥ on：帽改失效排除口径（失效段不计入后像帽）。
-          // 票⑤ v2：落盘前要点段→META.summary 同步；帽按同步后的落盘字节。
+          // 票⑤ v2：落盘前要点段→META.summary 同步；票⑨：非 v2 先做惰性结构迁移
+          // （转换在编辑之后——oldText 仍按迁移前文本匹配）；帽按迁移+同步后的落盘字节。
           let toPersist = content;
           if (effectiveV2) {
-            toPersist = syncV2MetaSummary(content);
+            toPersist = toV2Format(content);
+            toPersist = syncV2MetaSummary(toPersist);
             if (isV2Format(toPersist)) logger?.info?.(`${TAG} metric=l2_format_v2 value=1 path=${args.path}`);
           }
           const capRejection = effectiveInval
