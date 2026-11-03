@@ -463,6 +463,9 @@ export class StorePool {
         apiKey: embCfg.apiKey,
         model: embCfg.model,
         dimensions: embCfg.dimensions,
+        // 票④b 前置 A2：与主路径 factory.ts:141 对齐。BGE-M3 拒收 dimensions
+        // （HTTP 400 / code 20015），漏传会让 /v2 + StorePool 路径必然 400。
+        sendDimensions: embCfg.sendDimensions,
         maxInputChars: embCfg.maxInputChars,
       }, this.logger as StoreLogger);
     }
