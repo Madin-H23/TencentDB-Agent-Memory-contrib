@@ -335,4 +335,22 @@ describe("toV2Format：特殊内容", () => {
     expect(factsBlock).toContain("序言里的偏好：喜欢深色模式。");
     expect(out.slice(out.indexOf("## 活动"))).not.toContain("序言里的偏好");
   });
+
+  it("带后缀的 `## 活动（折叠归档…）` 段按归档处理：默认不可见、不重复建段", () => {
+    const raw = [
+      META,
+      "",
+      "## 用户偏好",
+      "- 喜欢深色模式。",
+      "## 活动（折叠归档：每批一行，锚点保留）",
+      "- 11-02 21:31Z 批次摘要（m_1787881381525_2eee472e）",
+      "- 11-01 04:07Z 纯叙事无锚点",
+    ].join("\n");
+    const out = toV2Format(raw);
+    const view = buildV2ReadView(out);
+    expect(view).toContain("喜欢深色模式。"); // 结构化段仍默认可见
+    expect(view).not.toContain("11-01 04:07Z 纯叙事无锚点"); // 归档段默认隐藏
+    expect(view).toContain("m_1787881381525_2eee472e"); // 锚点行属事实，仍可见
+    expect((out.match(/^## 活动/gm) ?? []).length).toBe(1); // 不重复建段
+  });
 });
