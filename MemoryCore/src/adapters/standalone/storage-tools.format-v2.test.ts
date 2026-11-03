@@ -180,12 +180,15 @@ describe("storage-tools v2 write/edit：按层落盘", () => {
     expect(store.get(`${PREFIX}a.md`)).toBe(synced.replace("事实一", "事实一改"));
   });
 
-  it("on：write v1 内容原样落盘（非 v2 不同步、不打 metric）", async () => {
+  it("on：无 META 的 v1 内容原样落盘（不可迁移、不同步、不打 metric）", async () => {
+    // 票⑨：v2 on 的写路径新增惰性迁移——带 META+summary 的 v1 会转三段（见
+    // storage-tools.v2-migration.test.ts）；无 META 的文件无迁移锚点，保持原样。
+    const noMeta = "## 用户核心特征\nv1 正文 m_1787881381525_2eee472e";
     const { mock, store } = makeStorage(PREFIX, {});
     const logger = makeLogger();
     const { write } = createStorageTools(mock, PREFIX, logger, "t", 0, false, true);
-    await (write.execute as unknown as Exec)({ path: "v1.md", content: V1_FILE });
-    expect(store.get(`${PREFIX}v1.md`)).toBe(V1_FILE);
+    await (write.execute as unknown as Exec)({ path: "v1.md", content: noMeta });
+    expect(store.get(`${PREFIX}v1.md`)).toBe(noMeta);
     expect(logger.infos.some((m) => m.includes("metric=l2_format_v2"))).toBe(false);
   });
 
