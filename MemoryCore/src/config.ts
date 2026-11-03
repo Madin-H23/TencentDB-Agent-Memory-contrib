@@ -14,6 +14,10 @@
 import type { LlmLayersOverride } from "./adapters/standalone/llm-runner.js";
 import { parseRecallRankingConfig } from "./core/scene/recall-ranking.js";
 import {
+  parseSceneCompactionConfig,
+  type SceneCompactionConfig,
+} from "./core/scene/scene-compact.js";
+import {
   parseSemanticGateConfig,
   type CaptureSemanticGateConfig,
 } from "./core/hooks/capture-semantic-gate.config.js";
@@ -171,6 +175,14 @@ export interface PersonaConfig {
    * 依据见 recall-ranking.ts 模块头。排序纯模块=src/core/scene/recall-ranking.ts。
    */
   recallRanking?: import("./core/scene/recall-ranking.js").ResolvedRecallRanking;
+  /**
+   * [P1 票⑧ 场景帽压力治理] L2 写路径上的确定性压实（Phase 5 内、syncSceneIndex 前）：
+   * 文件 > sceneCharCap×triggerRatio 时把 `## 活动` 段的旧批次叙事折叠成一行标记
+   * （锚点行/事实段/要点段不动），压实到 ≤ sceneCharCap×targetRatio。
+   * 默认 **undefined=关闭**——Phase 5 该分支零 I/O，行为与基线逐字节一致。
+   * 非法 ratio / target≥trigger → throw（parseSceneCompactionConfig，不静默回落）。
+   */
+  sceneCompaction?: SceneCompactionConfig;
   /** LLM model for persona generation, format: "provider/model" (falls back to OpenClaw default model when omitted) */
   model?: string;
   /** Prompt family for L2/L3 prompts (default: chat; code prompts will be wired as they are added). */
@@ -823,6 +835,8 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       sceneFormatV2: bool(personaGroup, "sceneFormatV2") ?? false,
       // 票⑦（exp/p1-7-recall-ranking）：召回多信号排序，默认 off=排序与基线逐字节一致。
       recallRanking: parseRecallRankingConfig(personaGroup.recallRanking),
+      // 票⑧（exp/p1-8-scene-compaction）：确定性压实，默认 undefined=off（Phase 5 零 I/O）。
+      sceneCompaction: parseSceneCompactionConfig(personaGroup.sceneCompaction),
       model: optStr(personaGroup, "model"),
       promptMode: normalizePromptMode(str(personaGroup, "promptMode"), globalPromptMode),
       triggerMode,

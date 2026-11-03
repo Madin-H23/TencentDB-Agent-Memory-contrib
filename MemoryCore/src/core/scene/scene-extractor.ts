@@ -22,6 +22,8 @@ import { BackupManager } from "../../utils/backup.js";
 import { readSceneIndex, syncSceneIndex } from "../scene/scene-index.js";
 import type { SceneIndexEntry } from "../scene/scene-index.js";
 import { parseSceneBlock } from "../scene/scene-format.js";
+import { compactSceneBlock } from "../scene/scene-compact.js";
+import type { SceneCompactionConfig } from "../scene/scene-compact.js";
 import { generateSceneNavigation, stripSceneNavigation } from "../scene/scene-navigation.js";
 import type { ResolvedRecallRanking } from "../scene/recall-ranking.js";
 import { normalizeSceneFilenames } from "./filename-normalizer.js";
@@ -128,6 +130,13 @@ export interface SceneExtractorOptions {
    * 经 pipeline-factory 传入。
    */
   recallRanking?: ResolvedRecallRanking;
+  /**
+   * [P1 票⑧ 场景帽压力治理] Phase 5 确定性压实（缺省 undefined=off）：
+   * 文件 > sceneCharCap×triggerRatio 时把 `## 活动` 段旧批次叙事折叠为一行标记
+   * （锚点/事实/要点不动），写回于 syncSceneIndex 之前。yaml `persona.sceneCompaction`
+   * 控制，经 pipeline-factory 传入；off 时该分支零 I/O。
+   */
+  sceneCompaction?: SceneCompactionConfig;
   /** langfuse 上报身份四元组（team/user/agent/session）。传下来会填充 trace 顶级字段。 */
   traceContext?: TraceContext;
 }
@@ -171,6 +180,7 @@ export class SceneExtractor {
   private explicitInvalidation: boolean;
   private sceneFormatV2: boolean;
   private recallRanking: ResolvedRecallRanking | undefined;
+  private sceneCompaction: SceneCompactionConfig | undefined;
   private traceContext: TraceContext | undefined;
 
   constructor(opts: SceneExtractorOptions) {
@@ -188,6 +198,7 @@ export class SceneExtractor {
     this.explicitInvalidation = opts.explicitInvalidation ?? false;
     this.sceneFormatV2 = opts.sceneFormatV2 ?? false;
     this.recallRanking = opts.recallRanking;
+    this.sceneCompaction = opts.sceneCompaction;
     this.traceContext = opts.traceContext;
 
     // Use injected LLMRunner if available, otherwise fall back to CleanContextRunner
@@ -444,6 +455,11 @@ export class SceneExtractor {
             }
             cleanedCount++;
             this.logger?.debug?.(`${TAG} extract() removed META-only file (no content): ${file}`);
+          } else if (this.sceneCompaction?.enabled === true) {
+            // [P1 票⑧ 场景帽压力治理] 确定性压实：只在 soft-delete/META-only 判定之后
+            // （不对将删文件做无用功），且在 Phase 6 syncSceneIndex 之前（索引看到压实后
+            // 内容）。off（undefined/enabled=false）时本分支零调用、零 I/O。
+            await this.compactSceneFile(file, raw);
           }
         }
       }
@@ -603,6 +619,43 @@ export class SceneExtractor {
       writable: false,
     });
     return result;
+  }
+
+  /**
+   * [P1 票⑧ 场景帽压力治理] 单文件确定性压实（Phase 5 内、syncSceneIndex 之前）。
+   *
+   * - 阈值：`raw.length > sceneCharCap × triggerRatio`（cap ≤0/非有限值 = 关闭）。
+   * - 压实：`compactSceneBlock`（纯函数）把 `## 活动` 段的旧批次叙事折成一行标记，
+   *   锚点行/事实段/要点段一字不动；折到 cap×targetRatio 即停。
+   * - 写回：storage（COS/服务模式）与本地 fs 两路都要，保证索引同步看到压实后内容。
+   * - 容错：本方法内异常只 warn，不中断 Phase 5 后续文件与 L2 主流程。
+   * - off（sceneCompaction undefined 或不 enabled）时调用方不进本方法 ⇒ 零 I/O。
+   */
+  private async compactSceneFile(file: string, raw: string): Promise<void> {
+    const cfg = this.sceneCompaction;
+    const cap = this.sceneCharCap;
+    if (!cfg || cfg.enabled !== true) return;
+    if (cap === undefined || !Number.isFinite(cap) || cap <= 0) return;
+    const triggerChars = cap * cfg.triggerRatio;
+    if (raw.length <= triggerChars) return;
+    try {
+      const result = compactSceneBlock(raw, { triggerChars, targetChars: cap * cfg.targetRatio });
+      if (!result.compacted || result.content === raw) return;
+      if (this.storage) {
+        await this.storage.writeFile(`${StoragePaths.sceneBlocksDir}${file}`, result.content);
+      } else {
+        const fs = await import("node:fs/promises");
+        const path = await import("node:path");
+        await fs.default.writeFile(path.default.join(this.dataDir, "scene_blocks", file), result.content, "utf-8");
+      }
+      this.logger?.info?.(
+        `${TAG} metric=l2_scene_compact enabled=1 file=${file} before=${result.beforeChars} after=${result.afterChars} folded=${result.foldedLines} anchors=${result.keptAnchorLines} reason=${result.reason ?? "ok"}`,
+      );
+    } catch (err) {
+      this.logger?.warn(
+        `${TAG} extract() scene compaction error (non-fatal, file kept as-is): ${file}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   private async capturePersistedDiff(
