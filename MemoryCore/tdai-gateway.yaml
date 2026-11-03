@@ -117,6 +117,18 @@ memory:
     # 2026-11-02 启用（用户令按建议顺序）：④ 同源重投捕获闸——L0 冗余消息免蒸馏
     # （hash 门：L0 近窗指纹+在案 L1 种子；票④合流 b89e649，两轮复核 PASS，误杀=0）。
     captureDedupGate: true
+    # 2026-11-03 ④b 语义门（shadow 先量）：改写型重投识别，候选向量→LLM 判定二段式。
+    # mode=off 逐字节同基线；shadow 完整计量不排除且后台执行（不堵 /capture）；
+    # on 才按 action=skip 跳过 upsertL0（不落 L0 DB 行 ⇒ 不进 L1 蒸馏源，JSONL 原文仍在）。
+    # threshold=0.78 = BGE-M3 时序隔离标定（候选率 15.76%）；畸形值 throw。
+    captureSemanticGate:
+      mode: shadow
+      threshold: 0.78
+      topK: 5
+      maxMessageChars: 2000
+      maxMessagesPerBatch: 5
+      judgeTimeoutMs: 15000
+      embeddingTimeoutMs: 5000
 
   persona:
     triggerEveryN: 50
@@ -173,7 +185,17 @@ memory:
   storeBackend: "sqlite"
 
   embedding:
-    provider: "none"
+    # 2026-11-03 启用（④b 前置）：SiliconFlow BGE-M3 免费档。
+    # BGE-M3 拒收 dimensions 参数（实测 HTTP 400 code 20015）⇒ sendDimensions: false；
+    # 原生 1024 维；key 不落 yaml，由启动件从 quota-keys.json 现读注入 env。
+    # 首次带此配置重启会 drop/rebuild 向量表（float[4]→float[1024]）并后台回填。
+    provider: "openai"
+    baseUrl: "https://api.siliconflow.cn/v1"
+    model: "BAAI/bge-m3"
+    dimensions: 1024
+    sendDimensions: false
+    apiKeyEnv: "SILICONFLOW_API_KEY"
+    maxInputChars: 5000
 
   bm25:
     enabled: true
