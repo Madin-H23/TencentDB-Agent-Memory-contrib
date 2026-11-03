@@ -327,6 +327,8 @@ export class SceneExtractor {
       sceneIndexSection,
       explicitInvalidation: this.explicitInvalidation,
       sceneFormatV2: this.sceneFormatV2,
+      // 票⑨：v2 模板的字符帽文案引用实际值（off 路径不读取）。
+      sceneCharCap: this.sceneCharCap,
     });
     const systemPrompt = composeMemorySystemPrompt(baseSystemPrompt, this.memoryPrompt);
     this.logger?.debug?.(`${TAG} extract() prompt built: ${userPrompt.length} chars (${Date.now() - promptStartMs}ms)`);

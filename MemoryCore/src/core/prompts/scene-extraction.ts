@@ -55,6 +55,11 @@ export interface SceneExtractionPromptParams {
    * 段内原地标记）。缺省/false=off，提示词与基线逐字节一致（双版本同进程钉测试）。
    */
   sceneFormatV2?: boolean;
+  /**
+   * [P1 票⑨ 惰性迁移] v2 on 时模板中的字符帽文案引用实际值（persona.sceneCharCap），
+   * 不再写死过期的 1500；缺省/≤0 时省略该句。off 路径不读取（逐字节基线）。
+   */
+  sceneCharCap?: number;
 }
 
 export interface SceneExtractionPromptResult {
@@ -104,10 +109,106 @@ function sceneFormatV2RulesBlock(sceneFormatV2: boolean, explicitInvalidation: b
 - **\`## 事实\`**：**唯一事实载体**——每条事实独立一行，行内带锚点 id（\`m_<ts>_<hash>\`）；新事实追加到此段
 - **\`## 活动\`**：批次叙事归档（按批次组织的过程叙述），只追加不重写；该段默认不进入读取视图（read 默认只返回 META+要点+事实，\`includeArchive: true\` 才返回活动归档全文）
 **写路径按层路由**：新事实 → \`## 事实\` 追加；过程叙事 → \`## 活动\` 追加；要点演变 → 重写 \`## 要点\`（≤300 字）。折叠/归档只发生在 \`## 活动\` 段，不得触碰要点与事实两层。
+**格式纪律**：
+- **单点存储**：同一事实/决定/偏好只允许出现在一个段的一处；发现重复当场合并（保留信息最全的一条，删除其余重复行）。
+- **轨迹合并**：过程事件不写进 \`## 事实\`；同一周期内的同类转变合并成一条，禁止逐条堆叠。
+- **系统会自动迁移旧格式**：旧文件（无 \`## 要点\`）无需整写迁移，系统会在下次写/编辑时自动重排；你只需把新事实追加到 \`## 事实\`、过程叙事追加到 \`## 活动\`、要点演变重写 \`## 要点\`。
 ${invalLayerLine}`;
 }
 
-function buildSceneSystemPrompt(maxScenes: number, explicitInvalidation = false, sceneFormatV2 = false): string {
+/** v2 模板的字符帽文案：引用实际 sceneCharCap；缺省/≤0 时省略该句（不再写死 1500）。 */
+function v2CapPhrase(sceneCharCap: number | undefined): string {
+  return sceneCharCap && sceneCharCap > 0 ? `，每个 md 控制在 ${sceneCharCap} 字符内` : "";
+}
+
+/**
+ * 票⑨：v2 on 时的 chat 输出规范整块（替换 v1 模板整节）。段标题逐字固定，
+ * 段内写法按「要点=摘要 / 事实=锚点行 / 活动=过程叙事」路由。
+ */
+function chatV2OutputSpec(sceneCharCap: number | undefined): string {
+  return `## 输出规范 (Output Specification)
+
+### 📄 场景文件内容（必须输出）
+
+请你参考这个模板输出 .md 文件的内容或基于已有md进行更新${v2CapPhrase(sceneCharCap)}。不要把模板本身放在 Markdown 代码块中，只需直接输出要写入文件的原始文本。
+
+> 模板中的三个段标题（\`## 要点\`、\`## 事实\`、\`## 活动\`）必须逐字使用、不得翻译或改写；段内正文使用与记忆相同的语言。
+
+\`\`\`markdown
+-----META-START-----
+created: {{EXISTING_CREATED_TIME_OR_CURRENT_TIME}}
+updated: {{CURRENT_TIME}}
+summary: [30-40 words concise summary for indexing]
+heat: [Integer]
+-----META-END-----
+
+## 要点
+[≤300 字，2-3 句话浓缩本场景"是什么/当前状态/核心方法"；不写流水账、不逐条记事件]
+
+## 事实
+- [每条事实独立一行，行内保留锚点 id（m_<ts>_<hash>）；新事实追加到段尾]
+- [同一事实/决定/偏好只保留一处；发现重复当场合并，禁止重复行]
+
+## 活动
+### [批次/时间段]
+[该批次的过程叙事（Trigger -> Action -> Result）；只追加不重写；禁止把过程事件写进 \`## 事实\`]
+\`\`\`
+
+
+
+`;
+}
+
+/**
+ * 票⑨：v2 on 时的 code（团队工作方法）输出规范整块。段语义按工作模式调整：
+ * 要点=可复用方法摘要、事实=支撑方法的关键事实/决策、活动=过程叙事与判断逻辑。
+ */
+function workV2OutputSpec(sceneCharCap: number | undefined): string {
+  return `## 输出规范 (Output Specification)
+
+### 📄 场景文件内容（必须输出）
+
+请参考这个模板输出 .md 文件内容，或基于已有 md 进行更新${v2CapPhrase(sceneCharCap)}。不要把模板本身放在 Markdown 代码块中，只需直接输出要写入文件的原始文本。
+
+> 模板中的三个段标题（\`## 要点\`、\`## 事实\`、\`## 活动\`）必须逐字使用、不得翻译或改写；段内正文使用与记忆相同的语言。
+
+\`\`\`markdown
+-----META-START-----
+created: {{EXISTING_CREATED_TIME_OR_CURRENT_TIME}}
+updated: {{CURRENT_TIME}}
+summary: [30-40 words concise summary for indexing, focusing on reusable method or working logic]
+heat: [Integer]
+-----META-END-----
+
+## 要点
+[≤300 字，2-3 句话浓缩本场景沉淀的可复用方法/SOP/判断逻辑/禁忌；不写项目流水账]
+
+## 事实
+- [支撑方法的关键事实、决策或实验结果，每条独立一行，行内保留锚点 id（m_<ts>_<hash>）；新事实追加到段尾]
+- [同一事实只保留一处；被替代的旧行原地标记，禁止堆叠重复行]
+
+## 活动
+### [批次/时间段]
+[该批次的过程叙事与上下文（任务 -> 判断 -> 产出）；SOP 步骤、判断逻辑、禁忌与原则写在叙事里并说明原因；只追加不重写；禁止把过程事件写进 \`## 事实\`]
+\`\`\`
+
+---
+
+`;
+}
+
+/**
+ * 票⑨：把 v1 输出规范整块（startMarker 起、endMarker 止之前）替换为 v2 模板。
+ * off 路径不调用——prompt 逐字节保持基线（scene-extraction.v2-pin.test.ts 钉住）。
+ */
+function replaceOutputSpec(prompt: string, startMarker: string, endMarker: string, spec: string): string {
+  const start = prompt.indexOf(startMarker);
+  const end = start === -1 ? -1 : prompt.indexOf(endMarker, start);
+  if (start === -1 || end <= start) return prompt; // 结构不识别的防御：不动
+  return prompt.slice(0, start) + spec + prompt.slice(end);
+}
+
+function buildSceneSystemPrompt(maxScenes: number, explicitInvalidation = false, sceneFormatV2 = false, sceneCharCap = 0): string {
   // 票⑥：off 分支 = 基线原文逐字节；on 分支 = recency-wins 变体（双分支字面量，钉测试护栏）。
   const mergeOldFilesDirective = explicitInvalidation
     ? `**并先把被合并旧文件中的事实锚点行（\`m_<ts>_<hash>\`）移入合并后的新文件**（被新事实替代的行加 \`[SUPERSEDED <ISO时间>]\` 前缀留存）`
@@ -128,9 +229,28 @@ function buildSceneSystemPrompt(maxScenes: number, explicitInvalidation = false,
 **关键**：步骤 5-6 是必须的！不执行删除 = 文件总数不减少 = 合并无效。`;
   const invalRules = supersedeRulesBlock(explicitInvalidation);
   const v2Rules = sceneFormatV2RulesBlock(sceneFormatV2, explicitInvalidation);
-  return `# Memory Consolidation Architect
+  // 票⑨：v2 on 时去掉 v1 结构指令（输出语言/撰写准则/阶段3 中引用 v1 章节的句子），
+  // 改为 v2 三段口径；off 时逐字节回到基线原文。
+  const outputLanguageHint = sceneFormatV2
+    ? `模板中的三个段标题（\`## 要点\`、\`## 事实\`、\`## 活动\`）必须逐字使用、不得翻译或改写。`
+    : `模板中给出的中文章节标题（\`## 用户核心特征\` 等）作为结构骨架——非中文输出时请用目标语言的等价表达替换。`;
+  const stage3Hint = sceneFormatV2
+    ? `隐性推断: 寻找用户 没说出口 的信息。若值得长期保留，写进 \`## 要点\` 或 \`## 活动\` 的叙事（不要新造 v1 章节）。
+冲突检测: 如果新记忆与旧记忆相矛盾，新事实进 \`## 事实\`，旧事实保留在 \`## 事实\` 并把演变过程写进 \`## 活动\`。`
+    : `隐性推断: 寻找用户 没说出口 的信息。更新"隐性信号"部分。
+冲突检测: 如果新记忆与旧记忆相矛盾，将其记录在"演变轨迹"或"待确认/矛盾点"中。`;
+  const writingRules = sceneFormatV2
+    ? `\`## 要点\` 禁止列表：必须是 2-3 句话的连贯摘要；\`## 事实\` 每条事实独立一行；\`## 活动\` 的叙事段落要连贯，可以分段。
+叙事弧线: \`## 活动\` 的过程叙事遵循故事结构（情境 -> 行动 -> 结果）。`
+    : `核心部分禁止列表: "用户核心特征"和"核心叙事"必须是连贯的段落，信息要连贯，可以分段。
+叙事弧线: "核心叙事"必须遵循故事结构（情境 -> 行动 -> 结果）。`;
+  // 票⑨ C：v2 on 保留「更新一律 edit」护栏，追加 v2 段路由与自动迁移提示。
+  const v2EditRouteHint = sceneFormatV2
+    ? `若文件已是 v2 格式（含 \`## 要点\`），允许按 v2 段路由直接 edit；系统会自动处理旧格式迁移。`
+    : "";
+  const prompt = `# Memory Consolidation Architect
 
-**输出语言**：\`.md\` 场景文件的所有自然语言内容（文件名、章节标题、正文）使用与"New Memories List"中记忆相同的语言；META 字段名（created/updated/summary/heat）和 \`[DELETED]\` 等标记保持英文。模板中给出的中文章节标题（\`## 用户核心特征\` 等）作为结构骨架——非中文输出时请用目标语言的等价表达替换。
+**输出语言**：\`.md\` 场景文件的所有自然语言内容（文件名、章节标题、正文）使用与"New Memories List"中记忆相同的语言；META 字段名（created/updated/summary/heat）和 \`[DELETED]\` 等标记保持英文。${outputLanguageHint}
 
 ## 角色定义 (Role Definition)
 你是记忆整合架构师。你的目标是为用户构建一个"数字第二大脑"。你不仅仅是在记录数据，你更像是一位人类学家和心理学家，负责分析原始记忆，从中提取核心特征、捕捉隐性信号，并构建不断演变的叙事。
@@ -166,7 +286,7 @@ function buildSceneSystemPrompt(maxScenes: number, explicitInvalidation = false,
 5. **场景索引和系统配置由工程系统自动维护**，你只需专注于操作 \`.md\` 场景文件
 6. **删除文件的唯一方式**：使用 **write** 工具将文件内容写为 \`[DELETED]\` 标记（\`path\`=文件名, \`content\`=\`[DELETED]\`）。系统会自动清理带有此标记的文件。**禁止**写入空字符串（会被系统拒绝）。**禁止**用 \`[ARCHIVE]\`、\`[CONSOLIDATED]\` 等其他标记替代删除——只有 \`[DELETED]\` 标记会触发系统清理。
 7. **禁止创建报告/整合/汇总类文件**。你的输出必须是有意义的场景叙事文件（如"技术架构与工程实践.md"、"日常生活与工作节奏.md"）。禁止创建以 BATCH、REPORT、CONSOLIDATION、INTEGRATION、ARCHIVE、SUMMARY 等为前缀的文件。
-8. **大文件分段读**：**read** 支持可选 \`offset\`/\`limit\`（字符窗口，缺省读全文）。文件较长（如超过 3000 字符）时先用 \`offset\`/\`limit\` 分段预览（例如先 \`{path, offset:0, limit:15000}\`，单段 limit 建议 12000~16000，按文件规模选 limit（总长/limit≈步数预算，≤15 步），优先读文件尾最新批次，再按需续读），返回值末尾的 \`[... omitted N chars ...]\` 标注表示还有未读内容；**edit 的 \`oldText\` 必须逐字来自已读片段**，禁止凭摘要或记忆猜测构造 oldText。已存在且未完整读过的文件**禁止**用 write 整体重写（write 仅限新建文件与 \`[DELETED]\` 标记）；更新一律 edit，newText 只含新增/替换部分；分段读覆盖不了时，宁可只对已读片段做 edit 追加并如实说明，不得凭残缺视图重构未读部分。
+8. **大文件分段读**：**read** 支持可选 \`offset\`/\`limit\`（字符窗口，缺省读全文）。文件较长（如超过 3000 字符）时先用 \`offset\`/\`limit\` 分段预览（例如先 \`{path, offset:0, limit:15000}\`，单段 limit 建议 12000~16000，按文件规模选 limit（总长/limit≈步数预算，≤15 步），优先读文件尾最新批次，再按需续读），返回值末尾的 \`[... omitted N chars ...]\` 标注表示还有未读内容；**edit 的 \`oldText\` 必须逐字来自已读片段**，禁止凭摘要或记忆猜测构造 oldText。已存在且未完整读过的文件**禁止**用 write 整体重写（write 仅限新建文件与 \`[DELETED]\` 标记）；更新一律 edit，newText 只含新增/替换部分；分段读覆盖不了时，宁可只对已读片段做 edit 追加并如实说明，不得凭残缺视图重构未读部分。${v2EditRouteHint}
 
 ## 📛 文件命名规范（强制）
 
@@ -250,12 +370,10 @@ ${mergeExampleSteps}
 
 ### 阶段 3：撰写与合成（核心任务）
 深度整合: 严禁简单的文本追加。你必须结合上下文（基于摘要或提供的原始内容）重写叙事，将新信息自然地融入其中。
-隐性推断: 寻找用户 没说出口 的信息。更新"隐性信号"部分。
-冲突检测: 如果新记忆与旧记忆相矛盾，将其记录在"演变轨迹"或"待确认/矛盾点"中。
+${stage3Hint}
 
 ### 撰写准则 (严格遵守)
-核心部分禁止列表: "用户核心特征"和"核心叙事"必须是连贯的段落，信息要连贯，可以分段。
-叙事弧线: "核心叙事"必须遵循故事结构（情境 -> 行动 -> 结果）。
+${writingRules}
 
 ### 热度管理 (Heat Management):
 新建 Block: heat: 1
@@ -331,9 +449,13 @@ reason: 具体原因描述
    - 使用 **write** 创建新文件或**整体重写**已有场景文件
    - 使用 **edit** 对场景文件进行**局部更新**（如只更新某个章节）
    - **删除文件**：使用 **write**(\`path\`=文件名, \`content\`='[DELETED]') 写入删除标记。系统会自动清理这些文件。**重要**：只有 \`[DELETED]\` 标记会触发系统清理。写入空字符串会被系统拒绝，写入 \`[ARCHIVE]\`、\`[CONSOLIDATED]\` 等标记**不会删除文件**，文件会继续占用场景配额。`;
+  // 票⑨：v2 on 时把 v1 输出规范整块替换为三段模板；off 路径 prompt 逐字节基线。
+  return sceneFormatV2
+    ? replaceOutputSpec(prompt, "## 输出规范 (Output Specification)", "#### 主动触发 Persona 更新（可选）", chatV2OutputSpec(sceneCharCap))
+    : prompt;
 }
 
-function buildWorkSceneSystemPrompt(maxScenes: number, explicitInvalidation = false, sceneFormatV2 = false): string {
+function buildWorkSceneSystemPrompt(maxScenes: number, explicitInvalidation = false, sceneFormatV2 = false, sceneCharCap = 0): string {
   // 票⑥：off 分支 = 基线原文逐字节；on 分支 = recency-wins 变体（同 chat family 口径）。
   const mergeOldFilesDirective = explicitInvalidation
     ? `**并先把被合并旧文件中的事实锚点行（\`m_<ts>_<hash>\`）移入合并后的新文件**（被新事实替代的行加 \`[SUPERSEDED <ISO时间>]\` 前缀留存）`
@@ -343,9 +465,22 @@ function buildWorkSceneSystemPrompt(maxScenes: number, explicitInvalidation = fa
     : `   - **⚠️ 合并后必须删除旧文件**：被合并的旧场景文件必须通过 **write** 写入 \`[DELETED]\` 标记。`;
   const invalRules = supersedeRulesBlock(explicitInvalidation);
   const v2Rules = sceneFormatV2RulesBlock(sceneFormatV2, explicitInvalidation);
-  return `# Team Work Method Memory Consolidation Architect
+  // 票⑨：v2 on 时去掉 v1 结构指令与过期字符帽文案；off 时逐字节回到基线原文。
+  const outputLanguageHint = sceneFormatV2
+    ? `模板中的三个段标题（\`## 要点\`、\`## 事实\`、\`## 活动\`）必须逐字使用、不得翻译或改写。`
+    : `模板中的中文章节标题仅作为结构骨架，非中文输出时请用目标语言的等价表达替换。`;
+  const stage3Hint = sceneFormatV2
+    ? `冲突检测：如果新记忆与旧记忆相矛盾，新事实进 \`## 事实\`，旧事实保留在 \`## 事实\` 并把演变过程写进 \`## 活动\`，不要直接覆盖。`
+    : `冲突检测：如果新记忆与旧记忆相矛盾，将其记录在"演化记录"或"待确认问题"中，不要直接覆盖。`;
+  const workCharBudgetRule = sceneFormatV2
+    ? (sceneCharCap > 0 ? `每个 md 控制在 ${sceneCharCap} 字符内，` : "")
+    : `每个 md 控制在 1500 字符内，`;
+  const v2EditRouteHint = sceneFormatV2
+    ? `若文件已是 v2 格式（含 \`## 要点\`），允许按 v2 段路由直接 edit；系统会自动处理旧格式迁移。`
+    : "";
+  const prompt = `# Team Work Method Memory Consolidation Architect
 
-**输出语言**：\`.md\` 场景文件的所有自然语言内容（文件名、章节标题、正文）使用与 "New Memories List" 中记忆相同的语言；META 字段名（created/updated/summary/heat）和 \`[DELETED]\` 等标记保持英文。模板中的中文章节标题仅作为结构骨架，非中文输出时请用目标语言的等价表达替换。
+**输出语言**：\`.md\` 场景文件的所有自然语言内容（文件名、章节标题、正文）使用与 "New Memories List" 中记忆相同的语言；META 字段名（created/updated/summary/heat）和 \`[DELETED]\` 等标记保持英文。${outputLanguageHint}
 
 ## 角色定义 (Role Definition)
 
@@ -402,7 +537,7 @@ function buildWorkSceneSystemPrompt(maxScenes: number, explicitInvalidation = fa
 5. **场景索引和系统配置由工程系统自动维护**，你只需专注于操作 \`.md\` 场景文件。
 6. **删除文件的唯一方式**：使用 **write** 工具将文件内容写为 \`[DELETED]\` 标记（\`path\`=文件名, \`content\`=\`[DELETED]\`）。系统会自动清理带有此标记的文件。**禁止**写入空字符串。**禁止**用 \`[ARCHIVE]\`、\`[CONSOLIDATED]\` 等其他标记替代删除。
 7. **禁止创建报告/整合/汇总类文件**。你的输出必须是有意义的工作场景文件，如 \`Agent-Memory-群聊抽取.md\`、\`后端接口-查询能力.md\`、\`团队记忆-SOP与禁忌.md\`。禁止创建以 BATCH、REPORT、CONSOLIDATION、INTEGRATION、ARCHIVE、SUMMARY 等为前缀的文件。
-8. **大文件分段读**：**read** 支持可选 \`offset\`/\`limit\`（字符窗口，缺省读全文）。文件较长（如超过 3000 字符）时先用 \`offset\`/\`limit\` 分段预览（例如先 \`{path, offset:0, limit:15000}\`，单段 limit 建议 12000~16000，按文件规模选 limit（总长/limit≈步数预算，≤15 步），优先读文件尾最新批次，再按需续读），返回值末尾的 \`[... omitted N chars ...]\` 标注表示还有未读内容；**edit 的 \`oldText\` 必须逐字来自已读片段**，禁止凭摘要或记忆猜测构造 oldText。已存在且未完整读过的文件**禁止**用 write 整体重写（write 仅限新建文件与 \`[DELETED]\` 标记）；更新一律 edit，newText 只含新增/替换部分；分段读覆盖不了时，宁可只对已读片段做 edit 追加并如实说明，不得凭残缺视图重构未读部分。
+8. **大文件分段读**：**read** 支持可选 \`offset\`/\`limit\`（字符窗口，缺省读全文）。文件较长（如超过 3000 字符）时先用 \`offset\`/\`limit\` 分段预览（例如先 \`{path, offset:0, limit:15000}\`，单段 limit 建议 12000~16000，按文件规模选 limit（总长/limit≈步数预算，≤15 步），优先读文件尾最新批次，再按需续读），返回值末尾的 \`[... omitted N chars ...]\` 标注表示还有未读内容；**edit 的 \`oldText\` 必须逐字来自已读片段**，禁止凭摘要或记忆猜测构造 oldText。已存在且未完整读过的文件**禁止**用 write 整体重写（write 仅限新建文件与 \`[DELETED]\` 标记）；更新一律 edit，newText 只含新增/替换部分；分段读覆盖不了时，宁可只对已读片段做 edit 追加并如实说明，不得凭残缺视图重构未读部分。${v2EditRouteHint}
 
 ---
 
@@ -515,7 +650,7 @@ ${mergeOldFilesBullet}
 
 事实和状态只用于说明方法的来源和适用条件，不要堆砌历史细节。
 
-冲突检测：如果新记忆与旧记忆相矛盾，将其记录在"演化记录"或"待确认问题"中，不要直接覆盖。
+${stage3Hint}
 
 ---
 
@@ -526,7 +661,7 @@ ${mergeOldFilesBullet}
 3. 每个场景文件应围绕一个清晰的工作方法体系，例如某个 SOP、判断逻辑、禁忌集合或可复用经验。
 4. 不写个人画像，不推断个人性格、偏好或私人状态。
 5. 允许记录工作角色、owner、reviewer、decision maker，但只能服务于说明方法的适用条件。
-6. 每个 md 控制在 1500 字符内，优先保留可复用、可执行的方法论信息。
+6. ${workCharBudgetRule}优先保留可复用、可执行的方法论信息。
 
 ---
 
@@ -611,6 +746,10 @@ reason: 具体原因描述
 - 使用 **write** 创建新文件或整体重写已有场景文件。
 - 使用 **edit** 对场景文件进行局部更新。
 - **删除文件**：使用 **write**(\`path\`=文件名, \`content\`='[DELETED]') 写入删除标记。系统会自动清理这些文件。**重要**：只有 \`[DELETED]\` 标记会触发系统清理。写入空字符串会被系统拒绝，写入 \`[ARCHIVE]\`、\`[CONSOLIDATED]\` 等标记不会删除文件。`;
+  // 票⑨：v2 on 时把 v1 输出规范整块替换为三段模板；off 路径 prompt 逐字节基线。
+  return sceneFormatV2
+    ? replaceOutputSpec(prompt, "## 输出规范 (Output Specification)", "## 主动触发 L3 Team Memory 更新（可选）", workV2OutputSpec(sceneCharCap))
+    : prompt;
 }
 
 function getSceneSystemPrompt(
@@ -618,10 +757,11 @@ function getSceneSystemPrompt(
   promptMode: MemoryPromptMode = "chat",
   explicitInvalidation = false,
   sceneFormatV2 = false,
+  sceneCharCap = 0,
 ): string {
   return promptMode === "code"
-    ? buildWorkSceneSystemPrompt(maxScenes, explicitInvalidation, sceneFormatV2)
-    : buildSceneSystemPrompt(maxScenes, explicitInvalidation, sceneFormatV2);
+    ? buildWorkSceneSystemPrompt(maxScenes, explicitInvalidation, sceneFormatV2, sceneCharCap)
+    : buildSceneSystemPrompt(maxScenes, explicitInvalidation, sceneFormatV2, sceneCharCap);
 }
 
 // ============================
@@ -663,6 +803,7 @@ export function buildSceneExtractionPrompt(params: SceneExtractionPromptParams):
     sceneIndexSection,
     explicitInvalidation = false,
     sceneFormatV2 = false,
+    sceneCharCap = 0,
   } = params;
 
   const warningSection = sceneCountWarning
@@ -691,7 +832,7 @@ ${sceneIndexBlock}
 ${fileListSection}`;
 
   return {
-    systemPrompt: getSceneSystemPrompt(maxScenes, promptMode, explicitInvalidation, sceneFormatV2),
+    systemPrompt: getSceneSystemPrompt(maxScenes, promptMode, explicitInvalidation, sceneFormatV2, sceneCharCap),
     userPrompt,
   };
 }
