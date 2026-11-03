@@ -3,7 +3,7 @@
 // META 缺失/畸形原样返回、已有 `## 活动` 不重复建段、v2 输入原样、
 // 中文/emoji、空文件/仅 META、标题降级、CRLF、PII/300 字预算。
 import { describe, expect, it } from "vitest";
-import { isV2Format, toV2Format } from "./scene-format-v2.js";
+import { buildV2ReadView, isV2Format, toV2Format } from "./scene-format-v2.js";
 import { ANCHOR_RE, checkAnchorPreservation, extractAnchorIds } from "../../utils/supersede.js";
 
 const META = [
@@ -134,16 +134,16 @@ describe("toV2Format：v1/批次格式 → 三层结构", () => {
     expect(toV2Format(out)).toBe(out);
   });
 
-  it("标题降级只作用于 `##`：`###`/`#`/行中 `##` 不动", () => {
-    const raw = [META, "", "## 二级", "### 三级", "# 一级", "正文里 ## 不是标题"].join("\n");
+  it("结构化段的标题降为 ### 留在事实段；`###`/`#`/行中 `##` 不动", () => {
+    const raw = [META, "", "## 用户偏好", "### 子级", "# 一级", "正文里 ## 不是标题"].join("\n");
     const out = toV2Format(raw);
-    const archiveBlock = out.slice(out.indexOf("## 活动"));
-    expect(archiveBlock).toContain("### 二级");
-    expect(archiveBlock).toContain("### 三级");
-    expect(archiveBlock).toContain("# 一级");
-    expect(archiveBlock).toContain("正文里 ## 不是标题");
-    // `### 三级` 不会被再降级成 `####`
-    expect(archiveBlock).not.toContain("####");
+    const factsBlock = out.slice(out.indexOf("## 事实"), out.indexOf("## 活动"));
+    expect(factsBlock).toContain("### 用户偏好");
+    expect(factsBlock).toContain("### 子级");
+    expect(factsBlock).toContain("# 一级");
+    expect(factsBlock).toContain("正文里 ## 不是标题");
+    // `### 子级` 不会被再降级成 `####`
+    expect(out).not.toContain("####");
   });
 
   it("CRLF 标题降级保留 \\r；正文行逐字节保留", () => {
@@ -152,6 +152,78 @@ describe("toV2Format：v1/批次格式 → 三层结构", () => {
     expect(out).toContain("### 批次 A\r");
     expect(out).toContain("- 事实 m_1787881381525_2eee472e  \r");
     expect(anchorMultiset(out)).toEqual(anchorMultiset(raw));
+  });
+});
+
+describe("段路由（按段分类：画像类内容不得落入默认不可见的活动段）", () => {
+  const MIXED = [
+    META,
+    "",
+    "## 用户基础信息",
+    "- 姓名：小明",
+    "- 职业：后端工程师",
+    "",
+    "## 用户偏好",
+    "- 喜欢深色模式",
+    "- 偏好异步框架",
+    "",
+    "## ★10-29 09:18Z 本批 —— 运行更新",
+    "- 本批过程：先检查再执行。",
+    "- **实跑闭环（记忆ID: m_1793265391167_4a35e058）**：完成日报生成。",
+    "- 同源重投复验，零新增。",
+    "",
+    "## 核心叙事",
+    "用户本周集中处理迁移问题，情绪平稳。",
+  ].join("\n");
+
+  it("结构化段（用户偏好/基础信息/核心叙事）的无锚点行进事实且默认读可见", () => {
+    const out = toV2Format(MIXED);
+    const factsBlock = out.slice(out.indexOf("## 事实"), out.indexOf("## 活动"));
+    for (const line of ["### 用户基础信息", "- 姓名：小明", "### 用户偏好", "- 喜欢深色模式", "### 核心叙事", "用户本周集中处理迁移问题，情绪平稳。"]) {
+      expect(factsBlock).toContain(line);
+    }
+    const view = buildV2ReadView(out);
+    for (const line of ["- 姓名：小明", "- 喜欢深色模式", "用户本周集中处理迁移问题，情绪平稳。"]) {
+      expect(view).toContain(line); // 默认 read 可见（不再因活动段折叠而消失）
+    }
+    expect(view).not.toContain("## 活动");
+  });
+
+  it("批次段（## ★…）的无锚点叙事进活动：默认不可见、includeArchive 可见", () => {
+    const out = toV2Format(MIXED);
+    const archiveBlock = out.slice(out.indexOf("## 活动"));
+    expect(archiveBlock).toContain("### ★10-29 09:18Z 本批 —— 运行更新");
+    expect(archiveBlock).toContain("- 本批过程：先检查再执行。");
+    expect(archiveBlock).toContain("- 同源重投复验，零新增。");
+    const view = buildV2ReadView(out);
+    expect(view).not.toContain("本批过程：先检查再执行。");
+    expect(view).not.toContain("同源重投复验，零新增。");
+    expect(buildV2ReadView(out, { includeArchive: true })).toBe(out);
+  });
+
+  it("混杂段 + 锚点：锚点全部进事实、唯一集合不变；批次锚点行也不留在活动", () => {
+    const out = toV2Format(MIXED);
+    expect(anchorMultiset(out)).toEqual(anchorMultiset(MIXED));
+    expect(new Set(anchorMultiset(out))).toEqual(new Set(anchorMultiset(MIXED)));
+    const factsBlock = out.slice(out.indexOf("## 事实"), out.indexOf("## 活动"));
+    expect(factsBlock).toContain("- **实跑闭环（记忆ID: m_1793265391167_4a35e058）**：完成日报生成。");
+    expect(out.slice(out.indexOf("## 活动"))).not.toContain("m_1793265391167_4a35e058");
+    expect(checkAnchorPreservation(MIXED, out)).toBeNull();
+  });
+
+  it("多个结构化段在事实段内保序；批次段在活动段内保序", () => {
+    const out = toV2Format(MIXED);
+    const factsBlock = out.slice(out.indexOf("## 事实"), out.indexOf("## 活动"));
+    expect(factsBlock.indexOf("### 用户基础信息")).toBeLessThan(factsBlock.indexOf("### 用户偏好"));
+    expect(factsBlock.indexOf("### 用户偏好")).toBeLessThan(factsBlock.indexOf("### 核心叙事"));
+    const archiveBlock = out.slice(out.indexOf("## 活动"));
+    expect(archiveBlock.indexOf("### ★10-29")).toBeGreaterThan(-1);
+  });
+
+  it("幂等：段路由后二次迁移逐字节不变", () => {
+    const once = toV2Format(MIXED);
+    expect(toV2Format(once)).toBe(once);
+    expect(isV2Format(once)).toBe(true);
   });
 });
 
@@ -239,19 +311,28 @@ describe("toV2Format：特殊内容", () => {
     expect(anchorMultiset(out)).toEqual(anchorMultiset(raw));
   });
 
-  it("活动段内空行在中部保留、首尾空行去除（结构边界）", () => {
-    const raw = [META, "", "## 批次", "", "- 叙事一", "", "- 叙事二", "", "",].join("\n");
+  it("批次段内空行在中部保留、首尾空行去除（结构边界）", () => {
+    const raw = [META, "", "## ★批次", "", "- 叙事一", "", "- 叙事二", "", "",].join("\n");
     const out = toV2Format(raw);
     const archiveBlock = out.slice(out.indexOf("## 活动") + "## 活动".length);
-    expect(archiveBlock.startsWith("\n### 批次")).toBe(true);
+    expect(archiveBlock.startsWith("\n### ★批次")).toBe(true);
     expect(archiveBlock).toContain("- 叙事一\n\n- 叙事二");
     expect(archiveBlock.endsWith("- 叙事二\n")).toBe(true); // 原文件以换行结尾
   });
 
-  it("事实段为空（无锚点）时仍建段，活动段承接全部叙事", () => {
-    const raw = [META, "", "## 批次", "- 纯叙事无锚点"].join("\n");
+  it("事实段为空（无锚点、无结构化段）时仍建段，批次叙事归活动", () => {
+    const raw = [META, "", "## ★批次", "- 纯叙事无锚点"].join("\n");
     const out = toV2Format(raw);
     expect(out).toContain("## 事实\n\n## 活动");
     expect(out).toContain("- 纯叙事无锚点");
+    expect(out.slice(out.indexOf("## 活动"))).toContain("- 纯叙事无锚点");
+  });
+
+  it("序言（首个 ## 之前）按结构化段进事实，默认读可见", () => {
+    const raw = [META, "", "序言里的偏好：喜欢深色模式。", "## ★批次", "- 批次叙事"].join("\n");
+    const out = toV2Format(raw);
+    const factsBlock = out.slice(out.indexOf("## 事实"), out.indexOf("## 活动"));
+    expect(factsBlock).toContain("序言里的偏好：喜欢深色模式。");
+    expect(out.slice(out.indexOf("## 活动"))).not.toContain("序言里的偏好");
   });
 });

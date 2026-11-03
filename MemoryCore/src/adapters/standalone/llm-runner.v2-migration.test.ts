@@ -152,6 +152,30 @@ describe("沙箱 v2 惰性迁移：write/edit", () => {
     await fs.rm(dir, { recursive: true, force: true });
   });
 
+  it("on：画像类结构化段默认可见，批次叙事默认折叠（与 storage 同构）", async () => {
+    const { dir, tools } = await makeRunnerTools({ sceneFormatV2: true });
+    const mixed = [
+      "-----META-START-----",
+      "summary: 画像与批次混合。",
+      "-----META-END-----",
+      "",
+      "## 用户偏好",
+      "- 喜欢深色模式",
+      "",
+      "## ★10-29 本批",
+      "- 本批过程叙事。",
+      "- 事实 m_1793265391167_4a35e058",
+    ].join("\n");
+    await (tools.write.execute as unknown as Exec)({ path: "m.md", content: mixed });
+    const def = await (tools.read.execute as unknown as Exec)({ path: "m.md" });
+    expect(def).toContain("- 喜欢深色模式");
+    expect(def).not.toContain("本批过程叙事。");
+    const full = await (tools.read.execute as unknown as Exec)({ path: "m.md", includeArchive: true });
+    expect(full).toContain("本批过程叙事。");
+    expect(anchors(full as string)).toEqual(anchors(mixed));
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
   it("on：迁移后默认 read 折叠活动段，includeArchive 返回全量", async () => {
     const { dir, tools } = await makeRunnerTools({ sceneFormatV2: true });
     await (tools.write.execute as unknown as Exec)({ path: "a.md", content: V1_BATCH });

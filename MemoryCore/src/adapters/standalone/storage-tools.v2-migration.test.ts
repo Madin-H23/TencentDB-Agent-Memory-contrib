@@ -224,6 +224,37 @@ describe("storage-tools v2 惰性迁移：edit", () => {
 });
 
 describe("storage-tools v2 惰性迁移：read 联动", () => {
+  it("画像类结构化段迁移后默认 read 可见；批次叙事仍折叠、includeArchive 可见", async () => {
+    const mixed = [
+      "-----META-START-----",
+      "summary: 用户画像与批次叙事混合。",
+      "-----META-END-----",
+      "",
+      "## 用户偏好",
+      "- 喜欢深色模式",
+      "- 偏好异步框架",
+      "",
+      "## ★10-29 本批",
+      "- 本批过程叙事：先检查再执行。",
+      "- 事实 m_1793265391167_4a35e058",
+    ].join("\n");
+    const { mock } = makeStorage(PREFIX, {});
+    const { write, read } = createStorageTools(mock, PREFIX, undefined, "t", 0, false, true);
+    await (write.execute as unknown as Exec)({ path: "mixed.md", content: mixed });
+    const def = await (read.execute as unknown as (a: { path: string }) => Promise<string>)({ path: "mixed.md" });
+    expect(def).toContain("### 用户偏好");
+    expect(def).toContain("- 喜欢深色模式");
+    expect(def).not.toContain("## 活动");
+    expect(def).not.toContain("本批过程叙事");
+    const full = await (read.execute as unknown as (a: { path: string; includeArchive?: boolean }) => Promise<string>)({
+      path: "mixed.md",
+      includeArchive: true,
+    });
+    expect(full).toContain("### ★10-29 本批");
+    expect(full).toContain("- 本批过程叙事：先检查再执行。");
+    expect(anchors(full)).toEqual(anchors(mixed));
+  });
+
   it("迁移落盘后：默认 read 不含活动段，includeArchive 含全部原始叙事与锚点", async () => {
     const { mock } = makeStorage(PREFIX, {});
     const { write, read } = createStorageTools(mock, PREFIX, undefined, "t", 0, false, true);

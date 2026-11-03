@@ -190,6 +190,9 @@ const H2_LINE_RE = /^##([ \t]+.*?)(\r?)$/;
 /** v1 正文里已有的 `## 活动` 标题行（防御性并入归档，不重复建段）。 */
 const ARCHIVE_HEADING_LINE_RE = /^##[ \t]+活动[ \t]*\r?$/;
 
+/** 批次段标题：`## ★…`（L2 逐批追加的过程叙事段）。 */
+const BATCH_HEADING_LINE_RE = /^##[ \t]+★/;
+
 /** 去掉行数组首尾的空行（结构边界），中部空行原样保留。 */
 function trimBlankEdges(lines: string[]): string[] {
   let a = 0;
@@ -205,6 +208,31 @@ function demoteH2(line: string): string {
   return m ? `###${m[1]}${m[2]}` : line;
 }
 
+/** 正文段：标题行（null = 首个 `## ` 之前的序言）+ 段内全部行（含标题行）。 */
+interface BodySection {
+  heading: string | null;
+  lines: string[];
+}
+
+/**
+ * 按 `## ` 段标题切分正文（`###` 不是段界）。首个 `## ` 之前的序言作为一段
+ * （heading=null），随后的每个 `## ` 行开启新段。
+ */
+function splitBodySections(lines: string[]): BodySection[] {
+  const sections: BodySection[] = [];
+  let current: BodySection = { heading: null, lines: [] };
+  for (const line of lines) {
+    if (H2_LINE_RE.test(line)) {
+      sections.push(current);
+      current = { heading: line, lines: [line] };
+    } else {
+      current.lines.push(line);
+    }
+  }
+  sections.push(current);
+  return sections;
+}
+
 /**
  * 票⑨（exp/p1-9-scene-v2-migration）：v1/批次格式 → v2 三段结构的**惰性迁移**。
  *
@@ -213,10 +241,15 @@ function demoteH2(line: string): string {
  * 路径（`syncV2MetaSummary` 对非 v2 原样返回）。本函数在工具层 write/edit 落盘前
  * 调用，把任意 v1/批次正文一次性重排为三段，使「下一次写/编辑」即完成迁移。
  *
- * 段路由（除段标题/降级外不改写任何行内容）：
+ * 段路由（**按段分类**，除段标题/降级外不改写任何行内容）：
  * - `## 要点` ← META.summary（首个 summary 键，normalizeSceneSummary：PII 脱敏 + 300 字预算）
- * - `## 事实` ← 所有含锚点 `m_<ts>_<hash>` 的行，逐行原样、保序（不跨行拼接/不拆行）
- * - `## 活动` ← 其余叙事；原 `##` 标题降级为 `###` 子标题；已有 `## 活动` 段并入同一段
+ * - `## 事实` ← ①所有含锚点 `m_<ts>_<hash>` 的行（无论在哪段，逐行原样、保序）；
+ *   ②**结构化段**（非 `## ★…` 批次、非 `## 活动` 的任意段，含序言）内的无锚点行——
+ *   段标题降为 `###` 留在事实段内。动机：用户偏好/基础信息/隐性信号/核心叙事等
+ *   画像类内容多数不带锚点，若按纯行级路由会落进默认读不可见的 `## 活动`，造成
+ *   存量功能回归（票⑨ 复核 2026-11-03）。
+ * - `## 活动` ← 批次段（`## ★…`，标题降为 `###` 保留每批一行/段）与已有 `## 活动`
+ *   段的无锚点行；已有 `## 活动` 段并入同一段，不重复建段。
  *
  * 保守返回（不破坏）：已是 v2（`isV2Format`，含仅带任一 v2 段标题的文件）原样；
  * META 缺失/END 在 START 前/META 内无 summary 字段原样；空串/纯空白原样。
@@ -239,10 +272,24 @@ export function toV2Format(raw: string): string {
 
   const factLines: string[] = [];
   const archiveLines: string[] = [];
-  for (const line of raw.slice(metaEnd).split("\n")) {
-    if (HAS_ANCHOR_RE.test(line)) factLines.push(line);
-    else if (ARCHIVE_HEADING_LINE_RE.test(line)) continue; // 已有 `## 活动`：并入，不再建段
-    else archiveLines.push(line);
+  for (const section of splitBodySections(raw.slice(metaEnd).split("\n"))) {
+    const toArchive =
+      section.heading !== null &&
+      (BATCH_HEADING_LINE_RE.test(section.heading) || ARCHIVE_HEADING_LINE_RE.test(section.heading));
+    for (let i = 0; i < section.lines.length; i++) {
+      const line = section.lines[i]!;
+      const isHeading = section.heading !== null && i === 0;
+      // 标题行一律降级（避免事实段内再出现 H2；锚点行不受降级影响）
+      const routed = isHeading ? demoteH2(line) : line;
+      if (HAS_ANCHOR_RE.test(line)) {
+        factLines.push(routed); // 锚点行无论在哪段都是事实载体
+      } else if (toArchive) {
+        if (isHeading && ARCHIVE_HEADING_LINE_RE.test(line)) continue; // 已有 `## 活动`：并入，不重复建段
+        archiveLines.push(routed);
+      } else {
+        factLines.push(routed); // 结构化段：无锚点内容进事实，默认 read 可见
+      }
+    }
   }
 
   const out = [
@@ -255,7 +302,7 @@ export function toV2Format(raw: string): string {
     ...trimBlankEdges(factLines),
     "",
     V2_ARCHIVE_HEADING,
-    ...trimBlankEdges(archiveLines).map(demoteH2),
+    ...trimBlankEdges(archiveLines),
   ].join("\n");
   // 文件末尾换行与输入同形（无内容损失的结构性保持）
   return raw.endsWith("\n") ? `${out}\n` : out;
