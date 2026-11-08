@@ -935,6 +935,10 @@ export function createL2Runner(opts: {
         // 票⑧（exp/p1-8-scene-compaction）：Phase 5 确定性压实（persona.sceneCompaction，
         // 默认 undefined=off=该分支零 I/O）。只在 L2 传入。
         sceneCompaction: cfg.persona?.sceneCompaction,
+        // 票 P1-6b（exp/p1-6b-supersede-schemes）：Phase 5 确定性同锚替代折叠
+        // （persona.factSupersede，默认 undefined=off；true=shadow+0.55 只计量）。
+        // 只在 L2 传入。
+        factSupersede: cfg.persona?.factSupersede,
         // L2 场景抽取超时（2026-10-21）：此前工厂**不传** timeoutMs → 抽取器内部
         // 回落硬编码 300s（scene-extractor.ts `opts.timeoutMs ?? 300_000`）并以该
         // 值覆盖层配置 ⇒ yaml 的 llm.layers.l2.timeoutMs（600000）对场景抽取

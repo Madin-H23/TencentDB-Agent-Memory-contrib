@@ -142,3 +142,42 @@ export function deterministicSupersede(
 
   return { content: out.join("\n"), markedLines, pairs, sparedLowSim };
 }
+
+// ---- 配置解析（票 P1-6b 接线；同款先例：parseSceneCompactionConfig 拒绝式） ----
+
+export type FactSupersedeMode = "off" | "shadow" | "on";
+
+export interface FactSupersedeConfig {
+  /** off=关闭；shadow=只计量不落盘；on=落盘写标记。 */
+  mode: FactSupersedeMode;
+  /** 同锚旧行与最新行的最低脱敏相似度（0,1）。 */
+  minSimilarity: number;
+}
+
+export const FACT_SUPERSEDE_DEFAULT_MIN_SIMILARITY = 0.55;
+
+/**
+ * 解析 `persona.factSupersede`：
+ * - undefined/null/false → undefined（off，Phase 5 零 I/O）
+ * - true → { mode:"shadow", minSimilarity:0.55 }（安全默认=影子先量）
+ * - 对象 → mode 缺省 "shadow"、minSimilarity 缺省 0.55；mode=off → undefined
+ * - 非法 mode / 阈值越出 (0,1) / 非布尔非对象 → throw（不静默回落）
+ */
+export function parseFactSupersedeConfig(raw: unknown): FactSupersedeConfig | undefined {
+  if (raw === undefined || raw === null || raw === false) return undefined;
+  if (raw === true) return { mode: "shadow", minSimilarity: FACT_SUPERSEDE_DEFAULT_MIN_SIMILARITY };
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("persona.factSupersede 必须为布尔或对象（{mode, minSimilarity}）");
+  }
+  const o = raw as Record<string, unknown>;
+  const modeRaw = o.mode ?? "shadow";
+  if (modeRaw !== "off" && modeRaw !== "shadow" && modeRaw !== "on") {
+    throw new Error(`persona.factSupersede.mode 非法: ${String(modeRaw)}（只允许 off|shadow|on）`);
+  }
+  const simRaw = o.minSimilarity ?? FACT_SUPERSEDE_DEFAULT_MIN_SIMILARITY;
+  if (typeof simRaw !== "number" || !Number.isFinite(simRaw) || simRaw <= 0 || simRaw >= 1) {
+    throw new Error(`persona.factSupersede.minSimilarity 须为 (0,1) 开区间数值: ${String(simRaw)}`);
+  }
+  if (modeRaw === "off") return undefined;
+  return { mode: modeRaw, minSimilarity: simRaw };
+}
