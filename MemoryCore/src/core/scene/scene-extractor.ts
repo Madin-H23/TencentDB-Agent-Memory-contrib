@@ -705,7 +705,7 @@ export class SceneExtractor {
       if (result.markedLines.length === 0) return;
       const chars = countSupersededChars(result.content) - countSupersededChars(current);
       this.logger?.info?.(
-        `${TAG} metric=l2_fact_supersede mode=${cfg.mode} file=${file} marked=${result.markedLines.length} chars=${chars} spared=${result.sparedLowSim}`,
+        `${TAG} metric=l2_fact_supersede mode=${cfg.mode} file=${file} marked=${result.markedLines.length} chars=${chars} spared=${result.sparedLowSim} nodate=${result.sparedNoDate}`,
       );
       if (cfg.mode !== "on") return;
       const loss = checkAnchorPreservation(current, result.content);

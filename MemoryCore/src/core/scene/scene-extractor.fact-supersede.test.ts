@@ -28,7 +28,7 @@ function makeLogger() {
   };
 }
 
-/** 文件：两条同锚重投行（旧行在前）+ 一条独立锚点行。 */
+/** 文件：两条同锚重投行（时间序，旧行在前）+ 一条独立锚点行。 */
 function dupFile(): string {
   return [
     "-----META-START-----",
@@ -40,8 +40,8 @@ function dupFile(): string {
     "",
     "## 事实",
     "",
-    `【11-01 批】写侧帽 sceneCharCap 从 32K 提升到 300K，全量落 yaml（${A}）`,
-    `【11-08 批】写侧帽 sceneCharCap 从 32K 提升到 300K，全量落 yaml 复核在案（${A}）`,
+    `【2026-11-01T02:00:00Z 批】写侧帽 sceneCharCap 从 32K 提升到 300K，全量落 yaml（${A}）`,
+    `【2026-11-08T03:00:00Z 批】写侧帽 sceneCharCap 从 32K 提升到 300K，全量落 yaml 复核在案（${A}）`,
     "",
   ].join("\n");
 }
@@ -117,8 +117,8 @@ describe("Phase 5 factSupersede 接线：开关与模式", () => {
       const after = await fs.readFile(path.join(dataDir, "scene_blocks", "重投.md"), "utf-8");
       expect(after).not.toBe(before);
       const lines = after.split("\n");
-      const oldIdx = lines.findIndex((l) => l.includes("【11-01 批】写侧帽"));
-      const newIdx = lines.findIndex((l) => l.includes("【11-08 批】写侧帽"));
+      const oldIdx = lines.findIndex((l) => l.includes("【2026-11-01T02:00:00Z 批】写侧帽"));
+      const newIdx = lines.findIndex((l) => l.includes("【2026-11-08T03:00:00Z 批】写侧帽"));
       expect(lines[oldIdx]!.startsWith("[SUPERSEDED ")).toBe(true);
       expect(lines[newIdx]!.startsWith("[SUPERSEDED")).toBe(false);
       expect(anchorsOf(after)).toEqual(anchorsOf(before));
