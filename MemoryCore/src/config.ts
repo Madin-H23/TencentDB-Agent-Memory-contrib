@@ -18,6 +18,10 @@ import {
   type FactSupersedeConfig,
 } from "./core/scene/scene-supersede.js";
 import {
+  parseL1ArchiveConfig,
+  type L1ArchiveConfig,
+} from "./core/store/l1-lifecycle.js";
+import {
   parseSceneCompactionConfig,
   type SceneCompactionConfig,
 } from "./core/scene/scene-compact.js";
@@ -196,6 +200,13 @@ export interface PersonaConfig {
    * 非法 mode / 阈值越出 (0,1) → throw（parseFactSupersedeConfig，不静默回落）。
    */
   factSupersede?: FactSupersedeConfig;
+  /**
+   * [P2-A1 分支 B1·裁判择优] L1 归档层（存储侧生命周期）：updated_time 距今
+   * > ageDays 的记忆置 archived=1（检索默认排除·显式召回保留）。
+   * 默认 undefined=off；true=shadow+90 天（影子先量）；非法 throw（不静默回落）。
+   * 裁判条件：60d 影子实测 23.9% 应归档；90d=0（系统太年轻）——阈值以影子数据定。
+   */
+  l1Archive?: L1ArchiveConfig;
   /** LLM model for persona generation, format: "provider/model" (falls back to OpenClaw default model when omitted) */
   model?: string;
   /** Prompt family for L2/L3 prompts (default: chat; code prompts will be wired as they are added). */
@@ -853,6 +864,8 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       // 票 P1-6b（exp/p1-6b-supersede-schemes）：确定性同锚替代折叠，默认 undefined=off；
       // true=shadow+0.55（影子先量，on 才落盘）。
       factSupersede: parseFactSupersedeConfig(personaGroup.factSupersede),
+      // P2-A1 分支 B1：L1 归档层，默认 undefined=off；true=shadow+90 天。
+      l1Archive: parseL1ArchiveConfig(personaGroup.l1Archive),
       model: optStr(personaGroup, "model"),
       promptMode: normalizePromptMode(str(personaGroup, "promptMode"), globalPromptMode),
       triggerMode,

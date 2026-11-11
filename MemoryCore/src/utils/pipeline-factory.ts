@@ -986,6 +986,18 @@ export function createL2Runner(opts: {
         });
         continue;
       }
+      // P2-A1 分支 B1（裁判条件1 执行回路）：L1 归档政策遍历——shadow=计量 on=置位。
+      const l1ArchiveCfg = cfg.persona?.l1Archive;
+      if (l1ArchiveCfg?.enabled) {
+        try {
+          vectorStore?.setL1ArchiveFilterActive?.(l1ArchiveCfg.mode === "on");
+          vectorStore?.applyArchivePolicy?.(l1ArchiveCfg, Date.now());
+        } catch (archiveErr) {
+          logger?.warn(
+            `[L2] archive policy error (non-fatal): ${archiveErr instanceof Error ? archiveErr.message : String(archiveErr)}`,
+          );
+        }
+      }
       if (extractResult.memoriesProcessed <= 0) continue;
       if (extractResult.emptyExtraction) {
         anyEmptyExtraction = true;
