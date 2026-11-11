@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildFactOpsPrompt,
   buildJudgePrompt,
+  judgePairKey,
   parseFactOpsResponse,
   parseJudgeResponse,
   pairCandidatesBySimilarity,
@@ -74,18 +75,53 @@ describe("pairCandidatesBySimilarity（方案二候选生成）", () => {
   });
 });
 
-describe("buildJudgePrompt / parseJudgeResponse（方案二轻判定）", () => {
-  it("judge prompt 含新旧两行与判别语义（同一事实更新 vs 同实体不同事实）", () => {
-    const p = buildJudgePrompt("旧行", "新行");
-    expect(p).toContain("旧行");
-    expect(p).toContain("新行");
-    expect(p).toContain("同一事实");
-    expect(p).toContain("不同事实");
+describe("buildJudgePrompt / parseJudgeResponse（方案二轻判定·P1-1/P1-2 修订）", () => {
+  it("judge prompt 含簿记族 DISTINCT 指引、累积汇总 SUPERSEDE 指引与双行日期", () => {
+    const p = buildJudgePrompt("【2026-11-01 批】旧行", "【2026-11-08 批】新行", {
+      oldDate: "2026-11-01",
+      newDate: "2026-11-08",
+    });
+    expect(p).toContain("【2026-11-01 批】旧行");
+    expect(p).toContain("【2026-11-08 批】新行");
+    expect(p).toContain("轮次簿记"); // P1-1：簿记族显式 DISTINCT
+    expect(p).toContain("投递登记"); // P1-1：第 N 次投递登记行
+    expect(p).toContain("累积"); // P1-1：累积性汇总扩展 SUPERSEDE
+    expect(p).toContain("2026-11-01"); // 双行日期入 prompt
+    expect(p).toContain("2026-11-08");
   });
 
-  it("解析判定词三种出口；大小写与围栏容忍", () => {
+  it("judge prompt 含方向反转保护（新行日期不晚于旧行 → UNKNOWN）", () => {
+    const p = buildJudgePrompt("旧", "新", { oldDate: "2026-11-08", newDate: "2026-11-01" });
+    expect(p).toMatch(/UNKNOWN/);
+    expect(p).toContain("不晚于");
+  });
+
+  it("解析：精确匹配优先；围栏容忍保留（既有用例按补丁① C3 更新）", () => {
     expect(parseJudgeResponse("SUPERSEDE")).toBe("supersede");
     expect(parseJudgeResponse("```distinct```")).toBe("distinct");
+    expect(parseJudgeResponse("  unknown  ")).toBe("unknown");
     expect(parseJudgeResponse("说不清楚")).toBe("unknown");
+  });
+
+  it("解析：否定句 → unknown（P1-2 防误标方向）", () => {
+    expect(parseJudgeResponse("not a supersede; they are distinct")).toBe("unknown");
+    expect(parseJudgeResponse("This is NOT a supersede")).toBe("unknown");
+    expect(parseJudgeResponse("并非同一事实")).toBe("unknown");
+    expect(parseJudgeResponse("而非更新关系")).toBe("unknown");
+  });
+});
+
+describe("judgePairKey：delta 判定键（内容哈希、抗行号漂移）", () => {
+  it("同文件同锚同内容 → 同键（内容哈希、行号无关）", () => {
+    const k1 = judgePairKey("a.md", "m_1_a", "旧行内容", "新行内容");
+    const k2 = judgePairKey("a.md", "m_1_a", "旧行内容", "新行内容");
+    expect(k1).toBe(k2);
+  });
+
+  it("内容变化/换锚点/换文件 → 不同键", () => {
+    const base = judgePairKey("a.md", "m_1_a", "旧", "新");
+    expect(judgePairKey("a.md", "m_1_a", "旧改", "新")).not.toBe(base);
+    expect(judgePairKey("a.md", "m_1_b", "旧", "新")).not.toBe(base);
+    expect(judgePairKey("b.md", "m_1_a", "旧", "新")).not.toBe(base);
   });
 });
