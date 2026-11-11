@@ -136,26 +136,73 @@ export function pairCandidatesBySimilarity(
 }
 
 const JUDGE_PROMPT = `判定下面两行记忆事实的关系，只输出一个词：
-- SUPERSEDE：新行是对旧行**同一事实**的更新/复述（陈述同一件事，新旧结论互斥或演进）。
-- DISTINCT：**同一实体的不同事实**或无关（不是同一件事）。
-- UNKNOWN：信息不足。
-拿不准输出 UNKNOWN（宁漏勿错）。
+- SUPERSEDE：新行是对旧行**同一事实的更新**，或**累积性汇总的扩展**（汇总范围 212~310→212~311、整册复验范围扩大、旧行结论已被新行覆盖）；
+- DISTINCT：**轮次簿记/进展日志/同ID第 N 次投递登记行**（如「第 333 轮」「第三十八轮收口」各自记录独立事件，新行不覆盖旧行）、同一实体的不同事实、或无关内容；
+- UNKNOWN：信息不足、拿不准、或**新行日期不晚于旧行**（时间倒流＝判定输入有误，宁漏勿错）。
+拿不准一律 UNKNOWN。
 
-## 旧行
+## 旧行（日期 {OLD_DATE}）
 {OLD}
 
-## 新行
+## 新行（日期 {NEW_DATE}）
 {NEW}`;
 
-export function buildJudgePrompt(oldLine: string, newLine: string): string {
-  return JUDGE_PROMPT.replace("{OLD}", oldLine).replace("{NEW}", newLine);
+export function buildJudgePrompt(
+  oldLine: string,
+  newLine: string,
+  dates?: { oldDate?: string | null; newDate?: string | null },
+): string {
+  let prompt = JUDGE_PROMPT.replace("{OLD}", oldLine)
+    .replace("{NEW}", newLine)
+    .replace("{OLD_DATE}", dates?.oldDate ?? "未知")
+    .replace("{NEW_DATE}", dates?.newDate ?? "未知");
+  // 方向反转显式警告：两行日期均已知且新行不晚于旧行 → 提示应判 UNKNOWN。
+  if (dates?.oldDate && dates?.newDate && dates.newDate <= dates.oldDate) {
+    prompt += `\n\n注意：新行日期（${dates.newDate}）不晚于旧行（${dates.oldDate}），时间倒流，应判 UNKNOWN。`;
+  }
+  return prompt;
 }
 
 export type JudgeVerdict = "supersede" | "distinct" | "unknown";
 
 export function parseJudgeResponse(text: string): JudgeVerdict {
-  const t = text.toLowerCase();
+  const t = text.trim().toLowerCase();
+  const stripped = t
+    .replace(/```(?:json|text)?/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  // 精确匹配优先（prompt 要求一词输出；围栏/空白容忍）。
+  for (const v of ["supersede", "superseded", "distinct", "unknown"] as const) {
+    if (t === v || stripped === v) return v === "superseded" ? "supersede" : v;
+  }
+  // 否定句保护（P1-2）：含否定词 → unknown，防 "not a supersede; they are distinct" 误标。
+  if (/(^|[^a-z])(not|no|never|cannot|can't|don't|doesn't|isn't|aren't)([^a-z]|$)|并非|而非|不是|没有/.test(t)) {
+    return "unknown";
+  }
+  // 兜底 includes（保留大小写/围栏容忍）。
   if (t.includes("supersede")) return "supersede";
   if (t.includes("distinct")) return "distinct";
   return "unknown";
+}
+
+/** FNV-1a 32bit 短哈希（稳定、非加密——仅作 delta 判定键）。 */
+function fnv1a(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, "0");
+}
+
+/**
+ * delta 判定键（内容哈希）：file+锚点+脱敏新旧文本。
+ * 行号漂移不影响（同一文件插入新行后旧对仍可识别）；内容变化才重判。
+ */
+export function judgePairKey(file: string, anchor: string, oldText: string, newText: string): string {
+  const strip = (s: string) =>
+    s
+      .replace(/m_\d{13}_[0-9a-f]{8}/g, " ")
+      .replace(/\s+/g, "");
+  return `${file}|${anchor}|${fnv1a(strip(oldText))}|${fnv1a(strip(newText))}`;
 }
