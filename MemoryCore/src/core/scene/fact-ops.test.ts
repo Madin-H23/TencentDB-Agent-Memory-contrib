@@ -86,6 +86,7 @@ describe("buildJudgePrompt / parseJudgeResponse（方案二轻判定·P1-1/P1-2 
     expect(p).toContain("轮次簿记"); // P1-1：簿记族显式 DISTINCT
     expect(p).toContain("投递登记"); // P1-1：第 N 次投递登记行
     expect(p).toContain("累积"); // P1-1：累积性汇总扩展 SUPERSEDE
+    expect(p).toContain("判定要领"); // 首批审计补：主体错配矫正（不同事件即使同场景也 DISTINCT）
     expect(p).toContain("2026-11-01"); // 双行日期入 prompt
     expect(p).toContain("2026-11-08");
   });
