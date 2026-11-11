@@ -223,6 +223,8 @@ export interface L0FtsSearchResult {
 // VectorStore class
 // ============================
 
+import { selectArchiveCandidates, type L1ArchiveConfig } from "../l1-lifecycle.js";
+
 export class VectorStore implements IMemoryStore {
   private db: DatabaseSync;
   private readonly dimensions: number;
@@ -598,6 +600,7 @@ export class VectorStore implements IMemoryStore {
     try { this.db.exec("ALTER TABLE l1_records ADD COLUMN agent_id TEXT NOT NULL DEFAULT 'default'"); } catch { /* exists */ }
     try { this.db.exec("ALTER TABLE l1_records ADD COLUMN task_id TEXT DEFAULT ''"); } catch { /* exists */ }
     try { this.db.exec("ALTER TABLE l1_records ADD COLUMN version INTEGER NOT NULL DEFAULT 0"); } catch { /* exists */ }
+    try { this.db.exec("ALTER TABLE l1_records ADD COLUMN archived INTEGER NOT NULL DEFAULT 0"); } catch { /* exists */ }
     // 写入前指纹兜底列（2026-10-23）：可空、无默认值。v2 回滚仓对同一库写入走
     // 显式列清单，加 NOT NULL/DEFAULT 会让 v2 写入失败；缺省 NULL 由下方回填补齐。
     try { this.db.exec("ALTER TABLE l1_records ADD COLUMN content_fingerprint TEXT"); } catch { /* exists */ }
@@ -1218,9 +1221,97 @@ export class VectorStore implements IMemoryStore {
       LIMIT ?
     `);
 
+
+
+    this.prepareL1LifecycleStatements();
+
     this.logger?.debug?.(`${TAG} Initialized (dimensions=${this.dimensions})`);
 
     return { needsReindex, reason: reindexReason };
+  }
+
+  // ── L1 lifecycle（P2-A1 B1 归档层） ──────────────────────
+  private stmtGetArchivedL1Ids!: StatementSync;
+  private stmtSetArchivedL1!: StatementSync;
+
+  private prepareL1LifecycleStatements(): void {
+    this.stmtGetArchivedL1Ids = this.db.prepare(
+      "SELECT record_id FROM l1_records WHERE archived = 1",
+    );
+    this.stmtSetArchivedL1 = this.db.prepare(
+      "UPDATE l1_records SET archived = ? WHERE record_id = ?",
+    );
+  }
+
+  /** 归档召回过滤门控（pipeline-factory 按 persona.l1Archive.mode=on 置位；重启生效）。 */
+  private l1ArchiveFilterActive = false;
+  /** 已归档 id 缓存（flag=true 时由行级过滤消费；置位后刷新）。 */
+  private archivedL1Cache: Set<string> = new Set();
+
+  /** 归档召回过滤门控（on=过滤已归档；off=零过滤·基线行为——裁判条件3 双门控）。 */
+  setL1ArchiveFilterActive(active: boolean): void {
+    this.l1ArchiveFilterActive = active;
+    this.refreshArchivedL1Cache();
+  }
+
+  private refreshArchivedL1Cache(): void {
+    if (!this.l1ArchiveFilterActive) {
+      this.archivedL1Cache = new Set();
+      return;
+    }
+    this.archivedL1Cache = new Set(
+      (this.stmtGetArchivedL1Ids.all() as Array<{ record_id: string }>).map((r) => r.record_id),
+    );
+  }
+
+  /** 已归档 id 集合（地面真值·与过滤 flag 解耦——flag 只门控行级过滤）。 */
+  getArchivedL1Ids(): Set<string> {
+    if (!this.l1ArchiveFilterActive) {
+      // flag 未激活时缓存不可信（refresh 清空）——直查语句报真值。
+      return new Set(
+        (this.stmtGetArchivedL1Ids.all() as Array<{ record_id: string }>).map((r) => r.record_id),
+      );
+    }
+    return new Set(this.archivedL1Cache);
+  }
+
+  /** 批量置位（事务包裹·裁判条件4）；置位后刷新过滤缓存。 */
+  setArchivedL1(recordIds: string[], archived: boolean): void {
+    if (recordIds.length === 0) return;
+    this.db.exec("BEGIN");
+    try {
+      for (const id of recordIds) {
+        this.stmtSetArchivedL1.run(archived ? 1 : 0, id);
+      }
+      this.db.exec("COMMIT");
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
+    this.refreshArchivedL1Cache();
+  }
+
+  /**
+   * [P2-A1 B1·裁判条件1 执行回路] 归档政策遍历：shadow=只计量打 metric；on=批量置位。
+   * 调用点=pipeline-factory L2 提取成功收尾。
+   */
+  applyArchivePolicy(cfg: L1ArchiveConfig, nowMs: number): { candidates: number; archived: number } {
+    const rows = this.stmtQueryAll.all() as Array<{
+      record_id: string;
+      scene_name: string | null;
+      updated_time: string;
+    }>;
+    const ids = selectArchiveCandidates(rows, cfg, nowMs);
+    if (ids.length === 0) return { candidates: 0, archived: 0 };
+    if (cfg.mode === "shadow") {
+      this.logger?.info(
+        `${TAG} metric=l1_archive_shadow mode=shadow candidates=${ids.length} total=${rows.length}`,
+      );
+      return { candidates: ids.length, archived: 0 };
+    }
+    this.setArchivedL1(ids, true);
+    this.logger?.info(`${TAG} metric=l1_archive mode=on archived=${ids.length} total=${rows.length}`);
+    return { candidates: ids.length, archived: ids.length };
   }
 
   // ── Embedding meta helpers ──────────────────────────────
@@ -1489,6 +1580,9 @@ export class VectorStore implements IMemoryStore {
           );
           continue;
         }
+
+        // P2-A1 B1：已归档不进召回（flag 门控）。
+        if (this.l1ArchiveFilterActive && this.archivedL1Cache.has(record_id)) continue;
 
         const meta = this.stmtGetMeta.get(record_id) as
           | {
@@ -3273,7 +3367,12 @@ export class VectorStore implements IMemoryStore {
         rank: number;
       }>;
 
-      return rows
+      // P2-A1 B1：已归档行不进召回（flag 门控·off 时缓存空集零行为）。
+      const ftsRows = this.l1ArchiveFilterActive
+        ? rows.filter((r) => !this.archivedL1Cache.has(r.record_id))
+        : rows;
+
+      return ftsRows
         .filter((r) => rowMatchesIsolation(r, filter))
         .slice(0, limit)
         .map((r) => ({
