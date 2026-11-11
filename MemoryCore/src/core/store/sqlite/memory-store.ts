@@ -598,6 +598,7 @@ export class VectorStore implements IMemoryStore {
     try { this.db.exec("ALTER TABLE l1_records ADD COLUMN agent_id TEXT NOT NULL DEFAULT 'default'"); } catch { /* exists */ }
     try { this.db.exec("ALTER TABLE l1_records ADD COLUMN task_id TEXT DEFAULT ''"); } catch { /* exists */ }
     try { this.db.exec("ALTER TABLE l1_records ADD COLUMN version INTEGER NOT NULL DEFAULT 0"); } catch { /* exists */ }
+    try { this.db.exec("ALTER TABLE l1_records ADD COLUMN archived INTEGER NOT NULL DEFAULT 0"); } catch { /* exists */ }
     // 写入前指纹兜底列（2026-10-23）：可空、无默认值。v2 回滚仓对同一库写入走
     // 显式列清单，加 NOT NULL/DEFAULT 会让 v2 写入失败；缺省 NULL 由下方回填补齐。
     try { this.db.exec("ALTER TABLE l1_records ADD COLUMN content_fingerprint TEXT"); } catch { /* exists */ }
@@ -1218,9 +1219,38 @@ export class VectorStore implements IMemoryStore {
       LIMIT ?
     `);
 
+
+
+    this.prepareL1LifecycleStatements();
+
     this.logger?.debug?.(`${TAG} Initialized (dimensions=${this.dimensions})`);
 
     return { needsReindex, reason: reindexReason };
+  }
+
+  // ── L1 lifecycle（P2-A1 B1 归档层） ──────────────────────
+  private stmtGetArchivedL1Ids!: StatementSync;
+  private stmtSetArchivedL1!: StatementSync;
+
+  private prepareL1LifecycleStatements(): void {
+    this.stmtGetArchivedL1Ids = this.db.prepare(
+      "SELECT record_id FROM l1_records WHERE archived = 1",
+    );
+    this.stmtSetArchivedL1 = this.db.prepare(
+      "UPDATE l1_records SET archived = ? WHERE record_id = ?",
+    );
+  }
+
+  getArchivedL1Ids(): Set<string> {
+    return new Set(
+      (this.stmtGetArchivedL1Ids.all() as Array<{ record_id: string }>).map((r) => r.record_id),
+    );
+  }
+
+  setArchivedL1(recordIds: string[], archived: boolean): void {
+    for (const id of recordIds) {
+      this.stmtSetArchivedL1.run(archived ? 1 : 0, id);
+    }
   }
 
   // ── Embedding meta helpers ──────────────────────────────

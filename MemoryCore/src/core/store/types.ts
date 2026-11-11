@@ -602,6 +602,12 @@ export interface IMemoryStore extends MemoryPromptStore, MemoryGenerationRefStor
    */
   readonly supportsDeferredEmbedding?: boolean;
 
+  // ── L1 lifecycle (P2-A1 B1 归档层·可选能力) ──────────────
+  /** 返回已归档的 L1 record_id 集合（未启用归档层时返回空集）。 */
+  getArchivedL1Ids?(): Set<string>;
+  /** 置位/清除 L1 归档标志。 */
+  setArchivedL1?(recordIds: string[], archived: boolean): void;
+
   // ── Lifecycle (always sync) ──────────────────────────────
 
   init(providerInfo?: EmbeddingProviderInfo): MaybePromise<StoreInitResult>;
