@@ -26,6 +26,10 @@ import {
   type SceneCompactionConfig,
 } from "./core/scene/scene-compact.js";
 import {
+  parseSceneArchiveConfig,
+  type SceneArchiveConfig,
+} from "./core/scene/scene-archive.js";
+import {
   parseSemanticGateConfig,
   type CaptureSemanticGateConfig,
 } from "./core/hooks/capture-semantic-gate.config.js";
@@ -207,6 +211,12 @@ export interface PersonaConfig {
    * 裁判条件：60d 影子实测 23.9% 应归档；90d=0（系统太年轻）——阈值以影子数据定。
    */
   l1Archive?: L1ArchiveConfig;
+  /**
+   * [P2-A3 C 案] 场景文件归档层：活动段内旧批次段 spill 到 `<scene>-archive.md`
+   * （rolling ageDays·锚点全局守恒·默认读视图逐字节不变）。
+   * 默认 undefined=off；true=shadow+10 天（影子先量）；非法 throw（不静默回落）。
+   */
+  sceneArchive?: SceneArchiveConfig;
   /** LLM model for persona generation, format: "provider/model" (falls back to OpenClaw default model when omitted) */
   model?: string;
   /** Prompt family for L2/L3 prompts (default: chat; code prompts will be wired as they are added). */
@@ -866,6 +876,8 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       factSupersede: parseFactSupersedeConfig(personaGroup.factSupersede),
       // P2-A1 分支 B1：L1 归档层，默认 undefined=off；true=shadow+90 天。
       l1Archive: parseL1ArchiveConfig(personaGroup.l1Archive),
+      // P2-A3 C 案：场景文件归档层，默认 undefined=off；true=shadow+10 天。
+      sceneArchive: parseSceneArchiveConfig(personaGroup.sceneArchive),
       model: optStr(personaGroup, "model"),
       promptMode: normalizePromptMode(str(personaGroup, "promptMode"), globalPromptMode),
       triggerMode,
