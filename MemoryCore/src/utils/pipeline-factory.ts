@@ -939,6 +939,10 @@ export function createL2Runner(opts: {
         // （persona.factSupersede，默认 undefined=off；true=shadow+0.55 只计量）。
         // 只在 L2 传入。
         factSupersede: cfg.persona?.factSupersede,
+        // 票 P2-A3 C 案（exp/p2-a3-scene-archive）：Phase 5 场景文件归档 spill
+        // （persona.sceneArchive，默认 undefined=off；true=shadow+ageDays10 只计量）。
+        // 只在 L2 传入。
+        sceneArchive: cfg.persona?.sceneArchive,
         // L2 场景抽取超时（2026-10-21）：此前工厂**不传** timeoutMs → 抽取器内部
         // 回落硬编码 300s（scene-extractor.ts `opts.timeoutMs ?? 300_000`）并以该
         // 值覆盖层配置 ⇒ yaml 的 llm.layers.l2.timeoutMs（600000）对场景抽取
