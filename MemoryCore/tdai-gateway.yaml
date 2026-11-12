@@ -155,6 +155,31 @@ memory:
     # 票⑤合流 6890d9e：默认读视图 −35.1%、混合语料兼容、read 默认=要点+事实。
     sceneFormatV2: true
     recallRanking: true
+    # 2026-11-09 启用（OPS-20261109 动作A，handoff 待办②）：⑧ 场景确定性压实。
+    # 触发 0.7×cap=210K、目标 0.5×cap=150K；只折叠 ## 活动 无锚点旧叙事，锚点/事实/
+    # 要点零改动、fail-closed（exp/p1-8 合流 475c8db，3 轮子代理审核 PASS）。
+    # 动机=it-ops 298K(99.5%帽)+anchor_loss 拒绝 25 次；回滚=删本行+重启。
+    sceneCompaction: true
+    # 2026-11-09 启用（用户令「由你进行自进化」，P1-6b 三方案对比结论=方案三胜出 96.3%）：
+    # ⑥b 确定性同锚替代折叠，true=shadow+0.55（只打 metric=l2_fact_supersede 不落盘）。
+    # 动机=同源重投刷屏（锚点重复率 34~73%）；回滚=删本行+重启。
+    factSupersede: true
+    # 2026-11-12 启用（用户令「子代理审核通过则放行」·P2-A3 C 案）：场景文件归档层，
+    # true=shadow+ageDays10（只打 metric=l2_scene_archive 不落盘·观察 24-48h 后议 on）。
+    # 动机=场景文件只增不减（it-ops 100% 帽死锁已一次性解锁；机制化滚动窗口防复发·
+    # 抢在 ⑧ 折叠前把旧批次段搬进可召回 <scene>-archive.md·锚点全局守恒·读视图零变化）。
+    # 审核闭环=spill 先于 ⑧（P0-2）/archive 先行 main 后行+段 date 去重（P0-3）/
+    # isArchiveFile 守卫（P1-3）；回滚=删本行+重启。
+    sceneArchive: true
+    # 2026-11-12 拨 shadow（用户令「子代理审查通过则放行」·票P2-A1 分支B1·合流 eb1ae8b）：
+    # L1 归档层影子计量——只打 metric=l1_archive_shadow（应归档计数）不写库、零召回过滤
+    # （setL1ArchiveFilterActive(mode==on) 对 shadow 恒 false）；ageDays=60=实测
+    # 629/2554（24.6%）候选（90d=0：系统本身仅 ~88 天史·且 0 候选时静默无计量）；
+    # on 阈值以影子分布+召回观测定；回滚=删本行+重启。
+    l1Archive:
+      enabled: true
+      mode: shadow
+      ageDays: 60
     triggerMode: current
     # L2 单批记忆上限（2026-10-22，用户令「先做 N=50（yaml 可配、随时调）」）。
     # 此前 L2 把"游标之后的全部 L1 记录"塞进一次提示词 ⇒ 积压时单轮 4,041 条
