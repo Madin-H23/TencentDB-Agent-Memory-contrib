@@ -180,6 +180,11 @@ memory:
       enabled: true
       mode: shadow
       ageDays: 60
+    # 2026-11-12 拨 shadow（用户令「子代理审查通过则放行」·票P2-A2·合流 4217e2f）：
+    # L1 小批空转攒批影子计量——同输入照常提取，只打 metric=l1_smallbatch_shadow
+    # （sids/qualified/chars/ageMs/would_defer·双信号事后回算 S1/S2/S3 三变体择优）；
+    # on=真 defer（游标不动·消息自然攒批·消费侧三处配套）；回滚=删本行+重启。
+    l1SmallBatchDefer: true
     triggerMode: current
     # L2 单批记忆上限（2026-10-22，用户令「先做 N=50（yaml 可配、随时调）」）。
     # 此前 L2 把"游标之后的全部 L1 记录"塞进一次提示词 ⇒ 积压时单轮 4,041 条
