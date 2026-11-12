@@ -3034,6 +3034,11 @@ export class TdaiGateway {
         );
 
         (task as any)._l2ProfileScopes = result.profileScopes;
+        // P2-A2 小批延后攒批：deferred 轮在任务对象打标记，cascadeSchedule 据此
+        // 跳过 conversation_count=0 重置 + l2_pending + onL1Complete——否则
+        // deferred 轮在网关模式仍推 L2 timer 并重置计数（timer_scanner 的
+        // count=0 去重会跳过后续攒批次）。
+        if (result.deferred) (task as any)._l1Deferred = true;
 
         // Report usage after L1: memory added + credit consumed
         // provider=proxy 模式下 credit 由 context_proxy 上报，此处仅报 memory delta。
@@ -3052,8 +3057,17 @@ export class TdaiGateway {
         // L1 task right away. If only `hasMore`, defer to the standard
         // L1_idle timer so a later notifyConversation can co-trigger.
         // See pipeline-factory.ts createL1Runner for the full state machine.
+        //
+        // P2-A2: `deferred` (small-batch accumulate) — cursor untouched, no LLM
+        // call; re-arm the same L1_idle timer so the next round's DB query
+        // naturally includes old + new messages. Never takes the
+        // hasFullBacklog fast-enqueue path (would hot-loop with zero cost).
         if (gateway.statefulPipelineManager) {
-          if (result.hasFullBacklog) {
+          if (result.deferred) {
+            gateway.statefulPipelineManager.armL1IdleAfterDrain(task.sessionId, instanceId, teamId, agentId).catch((err) => {
+              gateway.logger.warn(`[executor] L1 deferred idle arm failed: ${err instanceof Error ? err.message : String(err)}`);
+            });
+          } else if (result.hasFullBacklog) {
             gateway.statefulPipelineManager.enqueueL1Drain(task.sessionId, instanceId, teamId, agentId).catch((err) => {
               gateway.logger.warn(`[executor] L1 drain enqueue failed: ${err instanceof Error ? err.message : String(err)}`);
             });

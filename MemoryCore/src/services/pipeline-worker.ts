@@ -1011,6 +1011,17 @@ export class PipelineWorker {
     const aid = task.agentId ?? (task.data as any)?.agentId;
 
     if (task.type === "L1" || task.type === "flush") {
+      // P2-A2 小批延后攒批：deferred 轮（任务打 `_l1Deferred` 标记，见
+      // gateway/server.ts executeL1）= 游标不动的「无产出轮」——不得重置
+      // conversation_count=0（timer_scanner 去重会跳过后续攒批次）、不得置
+      // l2_pending、不得推 L2 timer/onL1Complete。L1_idle 已由 executeL1
+      // 重挂，下轮自然继续攒批。
+      if ((task as any)._l1Deferred) {
+        this.logger?.debug?.(
+          `${TAG} [${task.instanceId}/${task.sessionId}] L1 deferred (small-batch accumulate) — skip cascade`,
+        );
+        return;
+      }
       // L1 完成 → reset session-level L1 state, then advance agent/profile-level L2 timers.
       await this.backend.updateSessionState(task.instanceId, task.sessionId, {
         conversation_count: 0,

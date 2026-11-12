@@ -33,6 +33,10 @@ import {
   parseSemanticGateConfig,
   type CaptureSemanticGateConfig,
 } from "./core/hooks/capture-semantic-gate.config.js";
+import {
+  parseL1SmallBatchDeferConfig,
+  type L1SmallBatchDeferConfig,
+} from "./utils/l1-smallbatch-defer.js";
 
 /** Prompt family for L1-L3 memory pipeline. */
 export type MemoryPromptMode = "chat" | "code";
@@ -217,6 +221,16 @@ export interface PersonaConfig {
    * 默认 undefined=off；true=shadow+10 天（影子先量）；非法 throw（不静默回落）。
    */
   sceneArchive?: SceneArchiveConfig;
+  /**
+   * [P2-A2 L1 小批空转攒批] L1 runner 组并行池前的门槛前置判据：本片全组
+   * qualified 均 < minMessages 且 qualified 总 chars < minChars 且 age(切片最旧行)
+   * ≤ maxDeferAgeMs 且无残余行 → defer（游标不动，消息自然累积，下轮越过门槛才
+   * 提取；零内容丢失由游标语义保证）。默认 undefined=off（yaml 不写=行为逐字节
+   * 不变）；true=shadow+K5+chars200+30min（影子先量）；mode=on 才真 defer。
+   * 非法 mode/minMessages(正整数且≤切片上限10)/minChars/maxDeferAgeMs → throw
+   * （parseL1SmallBatchDeferConfig，不静默回落）。
+   */
+  l1SmallBatchDefer?: L1SmallBatchDeferConfig;
   /** LLM model for persona generation, format: "provider/model" (falls back to OpenClaw default model when omitted) */
   model?: string;
   /** Prompt family for L2/L3 prompts (default: chat; code prompts will be wired as they are added). */
@@ -878,6 +892,8 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       l1Archive: parseL1ArchiveConfig(personaGroup.l1Archive),
       // P2-A3 C 案：场景文件归档层，默认 undefined=off；true=shadow+10 天。
       sceneArchive: parseSceneArchiveConfig(personaGroup.sceneArchive),
+      // P2-A2：L1 小批空转攒批，默认 undefined=off；true=shadow+K5+chars200+30min。
+      l1SmallBatchDefer: parseL1SmallBatchDeferConfig(personaGroup.l1SmallBatchDefer),
       model: optStr(personaGroup, "model"),
       promptMode: normalizePromptMode(str(personaGroup, "promptMode"), globalPromptMode),
       triggerMode,

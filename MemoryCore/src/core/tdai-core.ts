@@ -1217,6 +1217,11 @@ export class TdaiCore {
    * service-mode worker executor) can mirror standalone-mode pipeline-manager
    * behavior: full backlog → enqueue next L1 immediately; small tail → defer
    * via L1_idle timer. See pipeline-factory.ts createL1Runner for semantics.
+   *
+   * `deferred` (P2-A2 small-batch accumulate): the runner skipped extraction
+   * because the slice was below the configured thresholds — cursor untouched,
+   * zero LLM cost. The caller must re-arm the L1 idle timer and skip the
+   * L1→L2 cascade (see server.executeL1 / pipeline-worker.cascadeSchedule).
    */
   async runL1WithStore(
     sessionKey: string,
@@ -1232,7 +1237,7 @@ export class TdaiCore {
      * standalone 单进程不需要传（进程内 withFileLock 已足够）。
      */
     checkpointLock?: import("../utils/checkpoint.js").CheckpointLockOptions,
-  ): Promise<{ storedCount: number; creditUsed: number; hasMore: boolean; hasFullBacklog: boolean; profileScopes: string[] }> {
+  ): Promise<{ storedCount: number; creditUsed: number; hasMore: boolean; hasFullBacklog: boolean; deferred: boolean; profileScopes: string[] }> {
     const useStandaloneRunner = this.cfg.llm.enabled || this.hostAdapter.hostType !== "openclaw";
     const openclawConfig = (!useStandaloneRunner && this.hostAdapter.hostType === "openclaw")
       ? (this.hostAdapter as { getOpenClawConfig?(): unknown }).getOpenClawConfig?.()
@@ -1275,8 +1280,10 @@ export class TdaiCore {
     const storedCount = result?.storedCount ?? 0;
     const hasMore = result?.hasMore ?? false;
     const hasFullBacklog = result?.hasFullBacklog ?? false;
+    // P2-A2：小批延后攒批标记透传（deferred 轮游标不动，消费侧重挂 idle + 跳过级联）
+    const deferred = result?.deferred ?? false;
     const profileScopes = result?.profileScopes ?? [];
-    return { storedCount, creditUsed, hasMore, hasFullBacklog, profileScopes };
+    return { storedCount, creditUsed, hasMore, hasFullBacklog, deferred, profileScopes };
   }
 
   /**
