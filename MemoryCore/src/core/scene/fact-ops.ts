@@ -161,10 +161,12 @@ export function buildJudgePrompt(
   newLine: string,
   dates?: { oldDate?: string | null; newDate?: string | null },
 ): string {
-  let prompt = JUDGE_PROMPT.replace("{OLD}", oldLine)
-    .replace("{NEW}", newLine)
-    .replace("{OLD_DATE}", dates?.oldDate ?? "未知")
-    .replace("{NEW_DATE}", dates?.newDate ?? "未知");
+  // 函数替换器：oldLine/newLine 来自场景文件，可能含 $&/$'/$` 等替换模式——
+  // 字符串替换会展开它们损 prompt 保真度（审查 R1 P2-1 实证），函数替换器原样插入。
+  let prompt = JUDGE_PROMPT.replace("{OLD}", () => oldLine)
+    .replace("{NEW}", () => newLine)
+    .replace("{OLD_DATE}", () => dates?.oldDate ?? "未知")
+    .replace("{NEW_DATE}", () => dates?.newDate ?? "未知");
   // 方向反转显式警告：两行日期均已知且新行不晚于旧行 → 提示应判 UNKNOWN。
   if (dates?.oldDate && dates?.newDate && dates.newDate <= dates.oldDate) {
     prompt += `\n\n注意：新行日期（${dates.newDate}）不晚于旧行（${dates.oldDate}），时间倒流，应判 UNKNOWN。`;
