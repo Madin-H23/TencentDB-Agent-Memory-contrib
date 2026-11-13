@@ -852,7 +852,8 @@ export class SceneExtractor {
       // 口径说明（P2-8）：marked=/chars= 均为**过滤前**读数（确定性候选规模），
       // on+judgeStatePath 模式下会高于实际落盘量；实际落盘量看 approved=/reverted=。
       // [P1-6b 批准桶] on 模式且配置了 judgeStatePath → 只标记 judge 批准的对。
-      // shadow 模式不过滤（保持分布观测口径）；读不到/畸形 state → fail-open 不过滤。
+      // shadow 模式不过滤（保持分布观测口径）；
+      // 读不到 state / 畸形解析得空批准集 → fail-closed 一个都不标（不放大标记范围）。
       let outContent = result.content;
       let approved = 0;
       let reverted = 0;
