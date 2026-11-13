@@ -765,19 +765,44 @@ export class SceneExtractor {
           .readFile(path.default.join(this.dataDir, "scene_blocks", archName), "utf-8")
           .catch(() => "");
       }
-      const already = new Set(
-        (archExisting.match(/^###[ \t]+(?:★[ \t]*)?(\d{4}-\d{1,2}-\d{1,2}|\d{1,2}-\d{1,2})/gm) ?? []).map((h) =>
-          h.replace(/^###[ \t]+(?:★[ \t]*)?/, ""),
-        ),
-      );
-      const segText = (d: string) =>
-        plan.segments.filter((s) => s.date === d && !already.has(s.date)).map(() => plan.archiveAppend).join("\n\n");
-      const freshDates = plan.segments.filter((s) => !already.has(s.date)).map((s) => s.date);
-      if (freshDates.length > 0) {
+      // 审查 R2 P1-1 修复：去重粒度从 date 升级为 **date+hash 签名**。
+      // 原 date 集合去重会把「同日期不同内容」的段（LLM 旧日期写新段/头跨年复用）
+      // 整段跳过 archive 写但 mainAfter 照移 ⇒ 内容丢失。签名=fnv1a(段文本)：
+      // 已存在签名的段 archive 已有同内容（main 移走不丢）；fresh 段才追加。
+      const fnv = (t: string): string => {
+        let hh = 0x811c9dc5;
+        for (let i = 0; i < t.length; i++) {
+          hh ^= t.charCodeAt(i);
+          hh = Math.imul(hh, 0x01000193);
+        }
+        return (hh >>> 0).toString(16).padStart(8, "0");
+      };
+      const existingSigs = new Set<string>();
+      {
+        const exLines = archExisting.split("\n");
+        const exHeads: number[] = [];
+        for (let i = 0; i < exLines.length; i++) {
+          if (/^###[ \t]/.test(exLines[i])) exHeads.push(i);
+        }
+        for (let k = 0; k < exHeads.length; k++) {
+          const st = exHeads[k];
+          const en = k + 1 < exHeads.length ? exHeads[k + 1] : exLines.length;
+          const seg = exLines.slice(st, en).join("\n");
+          const dm = /^###[ \t]+(?:★[ \t]*)?(\d{4}-\d{1,2}-\d{1,2}|\d{1,2}-\d{1,2})/.exec(exLines[st]);
+          existingSigs.add(`${dm ? dm[1] : ""}|${fnv(seg.trimEnd())}`);
+        }
+      }
+      const freshSegs = plan.segments.filter((s) => !existingSigs.has(`${s.date}|${s.hash}`));
+      if (freshSegs.length > 0) {
+        // 按 fresh 段原行拼追加文本（plan.segments 无原文·用行界回查 raw）
+        const rawLines = raw.split("\n");
+        const appendText = freshSegs
+          .map((sgm) => rawLines.slice(sgm.startLine, sgm.endLine).join("\n"))
+          .join("\n\n");
         const merged =
           archExisting.length === 0
-            ? buildArchiveFile(plan.archiveAppend)
-            : mergeArchiveFile(archExisting, plan.archiveAppend);
+            ? buildArchiveFile(appendText)
+            : mergeArchiveFile(archExisting, appendText);
         if (this.storage) {
           await this.storage.writeFile(`${StoragePaths.sceneBlocksDir}${archName}`, merged);
         } else {
@@ -795,7 +820,7 @@ export class SceneExtractor {
         );
       }
       this.logger?.info?.(
-        `${TAG} metric=l2_scene_archive_spill file=${file} archived=${freshDates.length} freed=${plan.freedChars}`,
+        `${TAG} metric=l2_scene_archive_spill file=${file} archived=${freshSegs.length} freed=${plan.freedChars}`,
       );
     } catch (err) {
       this.logger?.warn(
