@@ -25,6 +25,7 @@ import { parseSceneBlock } from "../scene/scene-format.js";
 import { compactSceneBlock } from "../scene/scene-compact.js";
 import type { SceneCompactionConfig } from "../scene/scene-compact.js";
 import { deterministicSupersede, type FactSupersedeConfig } from "./scene-supersede.js";
+import { filterSupersededByApproval, parseJudgeApprovalState } from "./fact-ops.js";
 import { planSceneSpill, type SceneArchiveConfig } from "./scene-archive.js";
 import { checkAnchorPreservation, countSupersededChars } from "../../utils/supersede.js";
 import { generateSceneNavigation, stripSceneNavigation } from "../scene/scene-navigation.js";
@@ -734,6 +735,9 @@ export class SceneExtractor {
    *   `[SUPERSEDED <ISO>]` 前缀（只标不删，锚点多重集零变化）。
    * - mode=shadow：只打 `metric=l2_fact_supersede` 不落盘；mode=on：经
    *   checkAnchorPreservation 防御性守卫后写回（storage/本地 fs 两路）。
+   * - [P1-6b 批准桶] on 且配置 judgeStatePath：只标记 judge 批准的对；state 读不到
+   *   或批准集为空 ⇒ **fail-closed 一个都不标**（不是 fail-open 全量标记——
+   *   全量标记正是本机制要堵的「静默绕过闸门」缺口）。
    * - 读取当前文件态（可能已被 compactSceneFile 写回）；marked=0 时零日志零写。
    * - 容错：异常只 warn 不中断 Phase 5 后续文件与 L2 主流程。
    */
@@ -820,21 +824,53 @@ export class SceneExtractor {
       const result = deterministicSupersede(current, { minSimilarity: cfg.minSimilarity });
       if (result.markedLines.length === 0) return;
       const chars = countSupersededChars(result.content) - countSupersededChars(current);
+      // 口径说明（P2-8）：marked=/chars= 均为**过滤前**读数（确定性候选规模），
+      // on+judgeStatePath 模式下会高于实际落盘量；实际落盘量看 approved=/reverted=。
+      // [P1-6b 批准桶] on 模式且配置了 judgeStatePath → 只标记 judge 批准的对。
+      // shadow 模式不过滤（保持分布观测口径）；读不到/畸形 state → fail-open 不过滤。
+      let outContent = result.content;
+      let approved = 0;
+      let reverted = 0;
+      if (cfg.mode === "on" && cfg.judgeStatePath) {
+        const fsP = await import("node:fs/promises");
+        let raw: string | null = null;
+        try {
+          raw = await fsP.default.readFile(cfg.judgeStatePath, "utf-8");
+        } catch {
+          raw = null;
+        }
+        if (raw === null) {
+          // fail-closed：配了闸门却拿不到批准集 ⇒ 一个都不标。
+          // 选它而非 fail-open 全量标记，是因为全量标记正是本票要堵的结构性缺口
+          // （静默绕过 judge）；零标记=零信息损失（事实保持可见），与 shadow 等效。
+          this.logger?.warn(
+            `${TAG} judge state unavailable, factSupersede marks nothing (fail-closed, non-fatal): ${cfg.judgeStatePath}`,
+          );
+          return;
+        }
+        const idx = parseJudgeApprovalState(raw);
+        const f = filterSupersededByApproval(outContent, current, result.pairs, idx.approved, file);
+        outContent = f.content;
+        approved = f.kept;
+        reverted = f.reverted;
+      }
       this.logger?.info?.(
-        `${TAG} metric=l2_fact_supersede mode=${cfg.mode} file=${file} marked=${result.markedLines.length} chars=${chars} spared=${result.sparedLowSim} nodate=${result.sparedNoDate}`,
+        `${TAG} metric=l2_fact_supersede mode=${cfg.mode} file=${file} marked=${result.markedLines.length} chars=${chars} spared=${result.sparedLowSim} nodate=${result.sparedNoDate}` +
+          (cfg.mode === "on" && cfg.judgeStatePath ? ` approved=${approved} reverted=${reverted}` : ""),
       );
       if (cfg.mode !== "on") return;
-      const loss = checkAnchorPreservation(current, result.content);
+      if (cfg.judgeStatePath && approved === 0) return; // 无批准对 ⇒ 零写盘（metric 已留痕）
+      const loss = checkAnchorPreservation(current, outContent);
       if (loss) {
         this.logger?.warn(`${TAG} factSupersede anchor guard rejected (non-fatal): ${file} lost=${loss.lostCount}`);
         return;
       }
       if (this.storage) {
-        await this.storage.writeFile(`${StoragePaths.sceneBlocksDir}${file}`, result.content);
+        await this.storage.writeFile(`${StoragePaths.sceneBlocksDir}${file}`, outContent);
       } else {
         const fs = await import("node:fs/promises");
         const path = await import("node:path");
-        await fs.default.writeFile(path.default.join(this.dataDir, "scene_blocks", file), result.content, "utf-8");
+        await fs.default.writeFile(path.default.join(this.dataDir, "scene_blocks", file), outContent, "utf-8");
       }
     } catch (err) {
       this.logger?.warn(
