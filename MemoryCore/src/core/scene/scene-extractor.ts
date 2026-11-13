@@ -24,6 +24,8 @@ import type { SceneIndexEntry } from "../scene/scene-index.js";
 import { parseSceneBlock } from "../scene/scene-format.js";
 import { compactSceneBlock } from "../scene/scene-compact.js";
 import type { SceneCompactionConfig } from "../scene/scene-compact.js";
+import { deterministicSupersede, type FactSupersedeConfig } from "./scene-supersede.js";
+import { checkAnchorPreservation, countSupersededChars } from "../../utils/supersede.js";
 import { generateSceneNavigation, stripSceneNavigation } from "../scene/scene-navigation.js";
 import type { ResolvedRecallRanking } from "../scene/recall-ranking.js";
 import { normalizeSceneFilenames } from "./filename-normalizer.js";
@@ -137,6 +139,14 @@ export interface SceneExtractorOptions {
    * 控制，经 pipeline-factory 传入；off 时该分支零 I/O。
    */
   sceneCompaction?: SceneCompactionConfig;
+  /**
+   * [P1-6b 同源替代生成] Phase 5 确定性同锚替代折叠（缺省 undefined=off）：
+   * 同锚多重集 >1 且旧行与最新行脱敏相似度 ≥ minSimilarity 时，旧行加
+   * `[SUPERSEDED <ISO>]` 前缀（只标不删）。mode=shadow 只打
+   * `metric=l2_fact_supersede` 不落盘；mode=on 写回且锚点多重集零变化
+   * （checkAnchorPreservation 防御性兜底）。yaml `persona.factSupersede` 控制。
+   */
+  factSupersede?: FactSupersedeConfig;
   /** langfuse 上报身份四元组（team/user/agent/session）。传下来会填充 trace 顶级字段。 */
   traceContext?: TraceContext;
 }
@@ -181,6 +191,7 @@ export class SceneExtractor {
   private sceneFormatV2: boolean;
   private recallRanking: ResolvedRecallRanking | undefined;
   private sceneCompaction: SceneCompactionConfig | undefined;
+  private factSupersede: FactSupersedeConfig | undefined;
   private traceContext: TraceContext | undefined;
 
   constructor(opts: SceneExtractorOptions) {
@@ -199,6 +210,7 @@ export class SceneExtractor {
     this.sceneFormatV2 = opts.sceneFormatV2 ?? false;
     this.recallRanking = opts.recallRanking;
     this.sceneCompaction = opts.sceneCompaction;
+    this.factSupersede = opts.factSupersede;
     this.traceContext = opts.traceContext;
 
     // Use injected LLMRunner if available, otherwise fall back to CleanContextRunner
@@ -455,11 +467,18 @@ export class SceneExtractor {
             }
             cleanedCount++;
             this.logger?.debug?.(`${TAG} extract() removed META-only file (no content): ${file}`);
-          } else if (this.sceneCompaction?.enabled === true) {
+          } else {
             // [P1 票⑧ 场景帽压力治理] 确定性压实：只在 soft-delete/META-only 判定之后
             // （不对将删文件做无用功），且在 Phase 6 syncSceneIndex 之前（索引看到压实后
             // 内容）。off（undefined/enabled=false）时本分支零调用、零 I/O。
-            await this.compactSceneFile(file, raw);
+            if (this.sceneCompaction?.enabled === true) {
+              await this.compactSceneFile(file, raw);
+            }
+            // [P1-6b 同源替代生成] 确定性同锚替代折叠（压实之后跑，读到当前文件态；
+            // shadow=只打 metric 不落盘，on=写回）。off 时零调用、零 I/O。
+            if (this.factSupersede) {
+              await this.supersedeFactFile(file);
+            }
           }
         }
       }
@@ -654,6 +673,56 @@ export class SceneExtractor {
     } catch (err) {
       this.logger?.warn(
         `${TAG} extract() scene compaction error (non-fatal, file kept as-is): ${file}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * [P1-6b 同源替代生成] 单文件确定性同锚替代折叠（Phase 5 内、压实之后、syncSceneIndex 前）。
+   *
+   * - 判据：同锚多重集 >1 且旧行与同锚最新行脱敏相似度 ≥ minSimilarity → 旧行加
+   *   `[SUPERSEDED <ISO>]` 前缀（只标不删，锚点多重集零变化）。
+   * - mode=shadow：只打 `metric=l2_fact_supersede` 不落盘；mode=on：经
+   *   checkAnchorPreservation 防御性守卫后写回（storage/本地 fs 两路）。
+   * - 读取当前文件态（可能已被 compactSceneFile 写回）；marked=0 时零日志零写。
+   * - 容错：异常只 warn 不中断 Phase 5 后续文件与 L2 主流程。
+   */
+  private async supersedeFactFile(file: string): Promise<void> {
+    const cfg = this.factSupersede;
+    if (!cfg || cfg.mode === "off") return;
+    try {
+      let current: string;
+      if (this.storage) {
+        const r = await this.storage.readFile(`${StoragePaths.sceneBlocksDir}${file}`);
+        if (!r) return;
+        current = r;
+      } else {
+        const fs = await import("node:fs/promises");
+        const path = await import("node:path");
+        current = await fs.default.readFile(path.default.join(this.dataDir, "scene_blocks", file), "utf-8");
+      }
+      const result = deterministicSupersede(current, { minSimilarity: cfg.minSimilarity });
+      if (result.markedLines.length === 0) return;
+      const chars = countSupersededChars(result.content) - countSupersededChars(current);
+      this.logger?.info?.(
+        `${TAG} metric=l2_fact_supersede mode=${cfg.mode} file=${file} marked=${result.markedLines.length} chars=${chars} spared=${result.sparedLowSim} nodate=${result.sparedNoDate}`,
+      );
+      if (cfg.mode !== "on") return;
+      const loss = checkAnchorPreservation(current, result.content);
+      if (loss) {
+        this.logger?.warn(`${TAG} factSupersede anchor guard rejected (non-fatal): ${file} lost=${loss.lostCount}`);
+        return;
+      }
+      if (this.storage) {
+        await this.storage.writeFile(`${StoragePaths.sceneBlocksDir}${file}`, result.content);
+      } else {
+        const fs = await import("node:fs/promises");
+        const path = await import("node:path");
+        await fs.default.writeFile(path.default.join(this.dataDir, "scene_blocks", file), result.content, "utf-8");
+      }
+    } catch (err) {
+      this.logger?.warn(
+        `${TAG} extract() factSupersede error (non-fatal, file kept as-is): ${file}: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }

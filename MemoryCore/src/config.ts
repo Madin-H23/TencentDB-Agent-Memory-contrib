@@ -14,6 +14,10 @@
 import type { LlmLayersOverride } from "./adapters/standalone/llm-runner.js";
 import { parseRecallRankingConfig } from "./core/scene/recall-ranking.js";
 import {
+  parseFactSupersedeConfig,
+  type FactSupersedeConfig,
+} from "./core/scene/scene-supersede.js";
+import {
   parseSceneCompactionConfig,
   type SceneCompactionConfig,
 } from "./core/scene/scene-compact.js";
@@ -183,6 +187,15 @@ export interface PersonaConfig {
    * 非法 ratio / target≥trigger → throw（parseSceneCompactionConfig，不静默回落）。
    */
   sceneCompaction?: SceneCompactionConfig;
+  /**
+   * [P1-6b 同源替代生成] L2 写路径上的确定性同锚替代折叠（Phase 5 内、压实之后）：
+   * 同锚多重集 >1 且旧行与最新行脱敏相似度 ≥ minSimilarity 时，旧行加
+   * `[SUPERSEDED <ISO>]` 前缀（只标不删，锚点多重集零变化）。
+   * 默认 **undefined=关闭**；`true` = shadow + 0.55（安全默认=影子先量）；
+   * mode=shadow 只打 `metric=l2_fact_supersede` 不落盘，mode=on 才写回。
+   * 非法 mode / 阈值越出 (0,1) → throw（parseFactSupersedeConfig，不静默回落）。
+   */
+  factSupersede?: FactSupersedeConfig;
   /** LLM model for persona generation, format: "provider/model" (falls back to OpenClaw default model when omitted) */
   model?: string;
   /** Prompt family for L2/L3 prompts (default: chat; code prompts will be wired as they are added). */
@@ -837,6 +850,9 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       recallRanking: parseRecallRankingConfig(personaGroup.recallRanking),
       // 票⑧（exp/p1-8-scene-compaction）：确定性压实，默认 undefined=off（Phase 5 零 I/O）。
       sceneCompaction: parseSceneCompactionConfig(personaGroup.sceneCompaction),
+      // 票 P1-6b（exp/p1-6b-supersede-schemes）：确定性同锚替代折叠，默认 undefined=off；
+      // true=shadow+0.55（影子先量，on 才落盘）。
+      factSupersede: parseFactSupersedeConfig(personaGroup.factSupersede),
       model: optStr(personaGroup, "model"),
       promptMode: normalizePromptMode(str(personaGroup, "promptMode"), globalPromptMode),
       triggerMode,
