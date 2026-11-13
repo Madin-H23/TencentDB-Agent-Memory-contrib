@@ -129,6 +129,11 @@ export interface SceneExtractorOptions {
    */
   sceneFormatV2?: boolean;
   /**
+   * [候选-C·TICKETS-C-read-dedup-20261113] run 内 read 结果去重（persona.l2ReadDedup，
+   * 经 LLMRunParams.l2ReadDedup 透传到 storage-tools）。缺省 off=行为逐字节不变。
+   */
+  l2ReadDedup?: import("../../utils/read-dedup.js").L2ReadDedupConfig;
+  /**
    * [P1 票⑦ 召回多信号排序]：updateSceneNavigation 的导航排序口径（已解析配置，
    * undefined=off=基线热度降序逐字节不变）。yaml `persona.recallRanking` 控制，
    * 经 pipeline-factory 传入。
@@ -230,6 +235,7 @@ export class SceneExtractor {
   private sceneCharCap: number | undefined;
   private explicitInvalidation: boolean;
   private sceneFormatV2: boolean;
+  private l2ReadDedup: import("../../utils/read-dedup.js").L2ReadDedupConfig | undefined;
   private recallRanking: ResolvedRecallRanking | undefined;
   private sceneCompaction: SceneCompactionConfig | undefined;
   private factSupersede: FactSupersedeConfig | undefined;
@@ -250,6 +256,7 @@ export class SceneExtractor {
     this.sceneCharCap = opts.sceneCharCap;
     this.explicitInvalidation = opts.explicitInvalidation ?? false;
     this.sceneFormatV2 = opts.sceneFormatV2 ?? false;
+    this.l2ReadDedup = opts.l2ReadDedup;
     this.recallRanking = opts.recallRanking;
     this.sceneCompaction = opts.sceneCompaction;
     this.factSupersede = opts.factSupersede;
@@ -424,6 +431,8 @@ export class SceneExtractor {
         explicitInvalidation: this.explicitInvalidation,
         // 票⑤：场景格式 v2 双层化（persona.sceneFormatV2，默认 off）—— 只在 L2 传入。
         sceneFormatV2: this.sceneFormatV2,
+        // [候选-C] run 内 read 去重（persona.l2ReadDedup，默认 off）—— 只在 L2 传入。
+        l2ReadDedup: this.l2ReadDedup,
         ...traceParams,
       }) ?? "";
       llmDurationMs = Date.now() - runnerStartMs;

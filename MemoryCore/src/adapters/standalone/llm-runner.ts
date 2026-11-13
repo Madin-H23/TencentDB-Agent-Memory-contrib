@@ -300,7 +300,7 @@ function resolveSandboxedPath(workspaceDir: string, relativePath: string): strin
 // Tool definitions (Vercel AI SDK `tool()` format)
 // ============================
 
-function createSandboxedTools(workspaceDir: string, logger?: Logger, taskId?: string, sceneCharCap?: number, explicitInvalidation?: boolean, sceneFormatV2?: boolean) {
+function createSandboxedTools(workspaceDir: string, logger?: Logger, taskId?: string, sceneCharCap?: number, explicitInvalidation?: boolean, sceneFormatV2?: boolean, l2ReadDedup?: import("../../utils/read-dedup.js").L2ReadDedupConfig) {
   // S0 影子计量：一次 toolset = 一次 run，累计量随工具集生命周期归零。
   const readBudget = new ReadBudgetTracker();
   // 方案C（exp/l2-plan-c-write-cap）：写入后像尺寸帽（字符数，≤0/undefined=off）。
@@ -772,10 +772,10 @@ export class StandaloneLLMRunner implements LLMRunner {
       // 方案C：sceneCharCap 经 LLMRunParams 透传；storage 工厂内按 prefix 定作用域。
       // 票⑥：explicitInvalidation 同路透传（read 过滤/write-edit 锚点守卫，off=基线）。
       // 票⑤：sceneFormatV2 同路透传（读两层/写同步，off=基线）。
-      tools = createStorageTools(params.storage, params.storagePrefix ?? "", this.logger, params.taskId, params.sceneCharCap, params.explicitInvalidation, params.sceneFormatV2);
+      tools = createStorageTools(params.storage, params.storagePrefix ?? "", this.logger, params.taskId, params.sceneCharCap, params.explicitInvalidation, params.sceneFormatV2, params.l2ReadDedup);
       this.logger?.debug?.(`${TAG} Using storage-backed tools (prefix="${params.storagePrefix ?? ""}")`);
     } else if (effectiveEnableTools) {
-      tools = createSandboxedTools(workspaceDir, this.logger, params.taskId, params.sceneCharCap, params.explicitInvalidation, params.sceneFormatV2);
+      tools = createSandboxedTools(workspaceDir, this.logger, params.taskId, params.sceneCharCap, params.explicitInvalidation, params.sceneFormatV2, params.l2ReadDedup);
     } else {
       tools = undefined; // pure-text task — never expose any tool to the model
     }
