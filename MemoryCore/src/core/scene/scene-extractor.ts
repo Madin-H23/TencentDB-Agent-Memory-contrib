@@ -25,6 +25,7 @@ import { parseSceneBlock } from "../scene/scene-format.js";
 import { compactSceneBlock } from "../scene/scene-compact.js";
 import type { SceneCompactionConfig } from "../scene/scene-compact.js";
 import { deterministicSupersede, type FactSupersedeConfig } from "./scene-supersede.js";
+import { planSceneSpill, type SceneArchiveConfig } from "./scene-archive.js";
 import { checkAnchorPreservation, countSupersededChars } from "../../utils/supersede.js";
 import { generateSceneNavigation, stripSceneNavigation } from "../scene/scene-navigation.js";
 import type { ResolvedRecallRanking } from "../scene/recall-ranking.js";
@@ -147,6 +148,12 @@ export interface SceneExtractorOptions {
    * （checkAnchorPreservation 防御性兜底）。yaml `persona.factSupersede` 控制。
    */
   factSupersede?: FactSupersedeConfig;
+  /**
+   * [P2-A3 C 案] 场景文件归档层（缺省 undefined=off）：活动段内旧批次段 spill 到
+   * `<scene>-archive.md`（rolling ageDays·锚点全局守恒·默认读视图逐字节不变）。
+   * yaml `persona.sceneArchive` 控制；off 时 Phase 5 该分支零调用零 I/O。
+   */
+  sceneArchive?: SceneArchiveConfig;
   /** langfuse 上报身份四元组（team/user/agent/session）。传下来会填充 trace 顶级字段。 */
   traceContext?: TraceContext;
 }
@@ -174,6 +181,39 @@ export function parsePersonaUpdateSignal(text: string): { reason: string } | nul
   return null;
 }
 
+/** [P2-A3] 归档文件 META 构造（archive:true 标记·只读语义）。 */
+function buildArchiveFile(content: string): string {
+  const now = new Date().toISOString();
+  return [
+    "-----META-START-----",
+    `created: ${now}`,
+    `updated: ${now}`,
+    "summary: 【归档文件·只读】旧批次段归档（scene-archive 机制·锚点全局守恒·LLM 请勿向本文件写入新内容）",
+    "heat: 0",
+    "archive: true",
+    "-----META-END-----",
+    "",
+    "## 活动（归档批次段）",
+    "",
+    content,
+  ].join("\n");
+}
+
+/** [P2-A3] 归档文件追加（updated 推进·summary 保只读标记·尾部空行归一）。 */
+function mergeArchiveFile(existing: string, appendText: string): string {
+  const now = new Date().toISOString();
+  const withUpdated = existing.replace(/^(updated: ).*$/m, `$1${now}`);
+  const body = withUpdated.replace(/\n{3,}$/, "\n");
+  return `${body}\n${appendText.replace(/\n{3,}/g, "\n\n")}`;
+}
+
+/** [P2-A3 审核 P1-3] 归档文件识别（META archive:true·防 ⑧/⑥b 误处理）。 */
+function isArchiveFile(raw: string): boolean {
+  const m = raw.match(/-----META-START-----([\s\S]*?)-----META-END-----/);
+  if (!m) return false;
+  return /^archive:[ \t]*true[ \t]*$/m.test(m[1] ?? "");
+}
+
 export class SceneExtractor {
   private dataDir: string;
   private runner: LLMRunner;
@@ -192,6 +232,7 @@ export class SceneExtractor {
   private recallRanking: ResolvedRecallRanking | undefined;
   private sceneCompaction: SceneCompactionConfig | undefined;
   private factSupersede: FactSupersedeConfig | undefined;
+  private sceneArchive: SceneArchiveConfig | undefined;
   private traceContext: TraceContext | undefined;
 
   constructor(opts: SceneExtractorOptions) {
@@ -211,6 +252,7 @@ export class SceneExtractor {
     this.recallRanking = opts.recallRanking;
     this.sceneCompaction = opts.sceneCompaction;
     this.factSupersede = opts.factSupersede;
+    this.sceneArchive = opts.sceneArchive;
     this.traceContext = opts.traceContext;
 
     // Use injected LLMRunner if available, otherwise fall back to CleanContextRunner
@@ -467,19 +509,27 @@ export class SceneExtractor {
             }
             cleanedCount++;
             this.logger?.debug?.(`${TAG} extract() removed META-only file (no content): ${file}`);
-          } else {
-            // [P1 票⑧ 场景帽压力治理] 确定性压实：只在 soft-delete/META-only 判定之后
-            // （不对将删文件做无用功），且在 Phase 6 syncSceneIndex 之前（索引看到压实后
-            // 内容）。off（undefined/enabled=false）时本分支零调用、零 I/O。
-            if (this.sceneCompaction?.enabled === true) {
-              await this.compactSceneFile(file, raw);
-            }
-            // [P1-6b 同源替代生成] 确定性同锚替代折叠（压实之后跑，读到当前文件态；
-            // shadow=只打 metric 不落盘，on=写回）。off 时零调用、零 I/O。
-            if (this.factSupersede) {
-              await this.supersedeFactFile(file);
-            }
+        } else if (isArchiveFile(raw)) {
+          // [P2-A3 审核 P1-3] 归档文件（META archive:true）不参与 spill/⑧/⑥b——
+          // 防 archive 被 toV2Format 迁移退化与 factSupersede 污染只读语义。
+        } else {
+          // [P2-A3 C 案·审核 P0-2] spill 先于 ⑧：先把活动段旧批次段抢救进可召回
+          // archive（⑧ 折叠只进轮换 .backup·keep=10 会丢）；off 时零调用零 I/O。
+          if (this.sceneArchive?.enabled === true) {
+            await this.spillSceneFile(file, raw);
           }
+          // [P1 票⑧ 场景帽压力治理] 确定性压实：只在 soft-delete/META-only 判定之后
+          // （不对将删文件做无用功），且在 Phase 6 syncSceneIndex 之前（索引看到压实后
+          // 内容）。off（undefined/enabled=false）时本分支零调用、零 I/O。
+          if (this.sceneCompaction?.enabled === true) {
+            await this.compactSceneFile(file, raw);
+          }
+          // [P1-6b 同源替代生成] 确定性同锚替代折叠（压实之后跑，读到当前文件态；
+          // shadow=只打 metric 不落盘，on=写回）。off 时零调用、零 I/O。
+          if (this.factSupersede) {
+            await this.supersedeFactFile(file);
+          }
+        }
         }
       }
     } catch (cleanupErr) {
@@ -687,6 +737,97 @@ export class SceneExtractor {
    * - 读取当前文件态（可能已被 compactSceneFile 写回）；marked=0 时零日志零写。
    * - 容错：异常只 warn 不中断 Phase 5 后续文件与 L2 主流程。
    */
+  /**
+   * [P2-A3 C 案] 单文件归档 spill（Phase 5 内、compactSceneFile **之前**·审核 P0-2）。
+   * shadow=只打 metric=l2_scene_archive 不写盘；on=archive 先行、main 后行（审核 P0-3），
+   * append 前按段 date 去重（防崩溃恢复重复追加）；锚点守恒内建于 planSceneSpill。
+   */
+  private async spillSceneFile(file: string, raw: string): Promise<void> {
+    const cfg = this.sceneArchive;
+    if (!cfg) return; // off（parse 已把 mode=off 映射为 undefined·此处不可达）
+    try {
+      const sceneName = file.replace(/\.md$/, "");
+      const plan = planSceneSpill(sceneName, raw, cfg, Date.now());
+      if (plan.segments.length === 0) return;
+      this.logger?.info?.(
+        `${TAG} metric=l2_scene_archive mode=${cfg.mode} file=${file} segments=${plan.segments.length} freed=${plan.freedChars} dates=${plan.segments.map((s) => s.date).join("/")} conserved=${plan.anchorsConserved}`,
+      );
+      if (cfg.mode !== "on" || !plan.anchorsConserved) return;
+      const fs = await import("node:fs/promises");
+      const path = await import("node:path");
+      const archName = `${sceneName}-archive.md`;
+      // archive 先行：不存在则建（META archive:true）；存在则按段 date 去重后追加
+      let archExisting = "";
+      if (this.storage) {
+        archExisting = (await this.storage.readFile(`${StoragePaths.sceneBlocksDir}${archName}`)) ?? "";
+      } else {
+        archExisting = await fs.default
+          .readFile(path.default.join(this.dataDir, "scene_blocks", archName), "utf-8")
+          .catch(() => "");
+      }
+      // 审查 R2 P1-1 修复：去重粒度从 date 升级为 **date+hash 签名**。
+      // 原 date 集合去重会把「同日期不同内容」的段（LLM 旧日期写新段/头跨年复用）
+      // 整段跳过 archive 写但 mainAfter 照移 ⇒ 内容丢失。签名=fnv1a(段文本)：
+      // 已存在签名的段 archive 已有同内容（main 移走不丢）；fresh 段才追加。
+      const fnv = (t: string): string => {
+        let hh = 0x811c9dc5;
+        for (let i = 0; i < t.length; i++) {
+          hh ^= t.charCodeAt(i);
+          hh = Math.imul(hh, 0x01000193);
+        }
+        return (hh >>> 0).toString(16).padStart(8, "0");
+      };
+      const existingSigs = new Set<string>();
+      {
+        const exLines = archExisting.split("\n");
+        const exHeads: number[] = [];
+        for (let i = 0; i < exLines.length; i++) {
+          if (/^###[ \t]/.test(exLines[i])) exHeads.push(i);
+        }
+        for (let k = 0; k < exHeads.length; k++) {
+          const st = exHeads[k];
+          const en = k + 1 < exHeads.length ? exHeads[k + 1] : exLines.length;
+          const seg = exLines.slice(st, en).join("\n");
+          const dm = /^###[ \t]+(?:★[ \t]*)?(\d{4}-\d{1,2}-\d{1,2}|\d{1,2}-\d{1,2})/.exec(exLines[st]);
+          existingSigs.add(`${dm ? dm[1] : ""}|${fnv(seg.trimEnd())}`);
+        }
+      }
+      const freshSegs = plan.segments.filter((s) => !existingSigs.has(`${s.date}|${s.hash}`));
+      if (freshSegs.length > 0) {
+        // 按 fresh 段原行拼追加文本（plan.segments 无原文·用行界回查 raw）
+        const rawLines = raw.split("\n");
+        const appendText = freshSegs
+          .map((sgm) => rawLines.slice(sgm.startLine, sgm.endLine).join("\n"))
+          .join("\n\n");
+        const merged =
+          archExisting.length === 0
+            ? buildArchiveFile(appendText)
+            : mergeArchiveFile(archExisting, appendText);
+        if (this.storage) {
+          await this.storage.writeFile(`${StoragePaths.sceneBlocksDir}${archName}`, merged);
+        } else {
+          await fs.default.writeFile(path.default.join(this.dataDir, "scene_blocks", archName), merged, "utf-8");
+        }
+      }
+      // main 后行
+      if (this.storage) {
+        await this.storage.writeFile(`${StoragePaths.sceneBlocksDir}${file}`, plan.mainAfter);
+      } else {
+        await fs.default.writeFile(
+          path.default.join(this.dataDir, "scene_blocks", file),
+          plan.mainAfter,
+          "utf-8",
+        );
+      }
+      this.logger?.info?.(
+        `${TAG} metric=l2_scene_archive_spill file=${file} archived=${freshSegs.length} freed=${plan.freedChars}`,
+      );
+    } catch (err) {
+      this.logger?.warn(
+        `${TAG} extract() scene archive spill error (non-fatal, file kept as-is): ${file}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
   private async supersedeFactFile(file: string): Promise<void> {
     const cfg = this.factSupersede;
     if (!cfg || cfg.mode === "off") return;

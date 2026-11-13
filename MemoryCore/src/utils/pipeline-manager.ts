@@ -161,6 +161,16 @@ export interface L1RunnerResult {
   hasMore?: boolean;
   /** True iff the over-fetch returned exactly 2N rows — drain via direct enqueue. */
   hasFullBacklog?: boolean;
+  /**
+   * [P2-A2] True iff the runner deferred this round via the small-batch
+   * accumulate gate (persona.l1SmallBatchDefer mode=on). The runner returns
+   * this as a *success* with a dedicated shape (no throw): the cursor was NOT
+   * advanced and no LLM call was made, so messages naturally accumulate for
+   * the next round. Consumers must re-arm the L1 idle timer and must NOT run
+   * the L1→L2 cascade (no conversation_count reset / warmup / l2_pending /
+   * L2 timer) and must NOT touch the retry counter.
+   */
+  deferred?: boolean;
 }
 
 /** L1 runner — batch-processes buffered messages for a session. */
@@ -759,6 +769,27 @@ export class MemoryPipelineManager {
       }
 
       return; // don't advance state or trigger L2
+    }
+
+    // ── P2-A2: 小批延后攒批（deferred 专用形状）──────────────────
+    //
+    // runner 内门槛前置 early-return（禁 throw：throw 会走下方 catch 烧
+    // l1RetryCount 配额——与 llm_error 277 次/窗共享 max-5，小批 defer 数轮即
+    // 烧穿 ⇒ 攒批停摆）。deferred 轮 = 游标不动的「成功」：
+    //   - 重挂 l1Idle（等用户继续说话/下一轮 DB 查询含旧+新消息=攒批成立）；
+    //   - 跳过 conversation_count 重置 / warmup / l2_pending / L2 timer
+    //     （无新 L1 记录 ⇒ 无 L2 可做；且不重置计数才能让后续轮继续攒）；
+    //   - retry 计数不动（非失败）；
+    //   - 不落盘（会话态零变更；checkpoint 里 >0 的 conversation_count 恰好
+    //     表达「还有未处理消息」，崩溃恢复重入队只会再跑一轮同游标查询）。
+    if (runnerResult && typeof runnerResult === "object" && runnerResult.deferred) {
+      const timers = this.getOrCreateTimers(sessionKey);
+      timers.l1Idle.schedule(this.l1IdleTimeoutMs, () => this.onL1IdleTimeout(sessionKey));
+      this.logger?.debug?.(
+        `${TAG} [${sessionKey}] L1 deferred (small-batch accumulate) — cursor stays, ` +
+        `re-arming L1 idle timer (${this.l1IdleTimeoutMs / 1000}s); conversation_count kept at ${state.conversation_count}`,
+      );
+      return;
     }
 
     // Success: reset retry count and advance state

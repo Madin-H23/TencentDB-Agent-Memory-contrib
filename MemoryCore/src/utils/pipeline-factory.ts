@@ -23,6 +23,8 @@ import { readConversationMessagesGroupedBySessionId } from "../core/conversation
 import type { ConversationMessage } from "../core/conversation/l0-recorder.js";
 import { CheckpointManager } from "./checkpoint.js";
 import type { PipelineSessionState } from "./checkpoint.js";
+import { shouldExtractL1 } from "./sanitize.js";
+import { deferDecision, type L1SmallBatchDeferConfig } from "./l1-smallbatch-defer.js";
 import { createStoreBundle } from "../core/store/factory.js";
 import { resolveDisableThinking, resolveThinkingLevel} from "../adapters/standalone/llm-runner.js";
 import { getInvalidThinkingLevels } from "../gateway/config.js";
@@ -426,6 +428,16 @@ export function createL1Runner(opts: {
   hasMore: boolean;
   /** True iff the over-fetch returned exactly L1_BATCH_QUERY rows (i.e. likely large backlog). */
   hasFullBacklog: boolean;
+  /**
+   * [P2-A2] True iff this round was deferred by the small-batch accumulate gate
+   * (persona.l1SmallBatchDefer mode=on). Deferred rounds do NOT advance the
+   * cursor (markL1ExtractionComplete is not called) and do NOT run the LLM —
+   * messages naturally accumulate and are extracted on a later round once a
+   * threshold is crossed. Consumers must re-arm the L1 idle timer and must NOT
+   * run the L1→L2 cascade (see pipeline-manager.runL1 / server.executeL1 /
+   * pipeline-worker.cascadeSchedule).
+   */
+  deferred?: boolean;
   profileScopes: string[];
 }> {
   const { pluginDataDir, cfg, openclawConfig, vectorStore, embeddingService, logger, getInstanceId, llmRunner, storage, checkpointLock } = opts;
@@ -621,6 +633,77 @@ export function createL1Runner(opts: {
       const hasUnprocessedInBatch = queriedCount > sliceEnd;
       const hasFullBacklog = queriedCount === L1_BATCH_QUERY && hasUnprocessedInBatch;
       const hasMore = hasUnprocessedInBatch && !hasFullBacklog;
+
+      // ── Step 4.5: L1 小批空转攒批门（票 P2-A2·persona.l1SmallBatchDefer）──
+      //
+      // 动机（实测 2026-11-12）：178 轮 l1-empty 中 171 轮 inputMsgs ≤3——小会话
+      // 每轮一次 LLM 调用判「无可记」，纯判空消耗数百 K tokens/窗。
+      // 机制：小批不立即提取 → defer（游标不动，沿用 P0-Fix2 defer 语义）→ 消息
+      // 自然累积 → 下轮越过门槛才提取。零内容丢失由游标语义保证（cursor 按
+      // recorded_at_ms 推进，defer 不调 markL1ExtractionComplete ⇒ 下轮查询
+      // >cursor 必含旧+新消息）。
+      //
+      // 判据对**整片**求（P0-1 all-or-nothing）：per-sessionKey 单游标整片推进
+      // （游标取全片 maxRecordedAtMs）——按组 defer 会把被 defer 组的消息永久
+      // 跳过。任一组达门槛 → 整片全提取；全组低于 → 整片 defer。
+      // 缺省 off（cfg.persona?.l1SmallBatchDefer 未配置）⇒ 本块整体跳过，行为
+      // 与基线逐字节一致（yaml 不写=零变更）。
+      const l1SmallBatchDeferCfg: L1SmallBatchDeferConfig | undefined = cfg.persona?.l1SmallBatchDefer;
+      if (l1SmallBatchDeferCfg) {
+        // qualified = quality-gate（shouldExtractL1）后的条数（P1-1：全噪声批
+        // 保持现行免 LLM 早返回语义，qualified==0 不进攒批）；chars 同步计量
+        // （shadow 双信号 ⇒ 一次影子跑事后回算 S1/S2/S3 择优，P1-2）。
+        const groupStats = groups.map((group) => {
+          let qualified = 0;
+          let chars = 0;
+          for (const m of group.messages) {
+            if (!shouldExtractL1(m.content)) continue;
+            qualified += 1;
+            chars += m.content.length;
+          }
+          return { sessionId: group.sessionId, qualified, chars };
+        });
+        const deferRes = deferDecision({
+          groups: groupStats,
+          oldestRecordedAtMs: flat[0].recordedAtMs, // 切片最旧行（P1-3 age 起算点·零新状态）
+          nowMs: Date.now(),
+          hasResidual: hasUnprocessedInBatch, // 有残余行 ⇒ 不 defer（补齐 2·保 backlog drain）
+          cfg: l1SmallBatchDeferCfg,
+        });
+        if (l1SmallBatchDeferCfg.mode === "shadow") {
+          // 影子：同输入照常提取，只打一行 greppable 计量（同 metric=l2_fact_supersede
+          // 先例）。P1-4 多 sid 互扰观测另出 debug 分列行。
+          logger.info(
+            `${TAG} metric=l1_smallbatch_shadow sids=${groupStats.length} qualified=${deferRes.qualified} ` +
+            `chars=${deferRes.chars} ageMs=${deferRes.ageMs} would_defer=${deferRes.defer ? 1 : 0}`,
+          );
+          logger.debug?.(
+            `${TAG} [l1] smallbatch shadow per-sid: ` +
+            groupStats.map((s) => `${s.sessionId || "(empty)"}:q=${s.qualified},c=${s.chars}`).join(" | ") +
+            (deferRes.reason ? ` | no-defer reason=${deferRes.reason}` : ""),
+          );
+        } else if (deferRes.defer) {
+          // on 且达 defer 判据：门槛前置 early-return 专用形状（P0-2 禁 throw——
+          // throw 进 runL1 catch 会 l1RetryCount++〔与 llm_error 277 次/窗共享
+          // max-5 配额，小批 defer 数轮即烧穿⇒攒批停摆〕+ buffer 回填空转）。
+          // 不调 extractL1Memories、不调 markL1ExtractionComplete（游标不动 ⇒
+          // 下轮 DB 查询自然含旧+新消息 = 攒批成立）；两 flag 恒 false 避开
+          // hasFullBacklog 立即重入队热循环（P0-3），由消费侧重挂 l1Idle。
+          logger.info(
+            `${TAG} [l1] small-batch deferred (accumulate): qualified=${deferRes.qualified}/${l1SmallBatchDeferCfg.minMessages}, ` +
+            `chars=${deferRes.chars}/${l1SmallBatchDeferCfg.minChars}, ageMs=${deferRes.ageMs}/${l1SmallBatchDeferCfg.maxDeferAgeMs}, ` +
+            `groups=${groups.length} — cursor stays put, messages accumulate for next round`,
+          );
+          return {
+            processedCount: 0,
+            storedCount: 0,
+            hasMore: false,
+            hasFullBacklog: false,
+            deferred: true,
+            profileScopes: [],
+          };
+        }
+      }
 
       const totalMessages = processed.length;
       logger.info(
@@ -939,6 +1022,10 @@ export function createL2Runner(opts: {
         // （persona.factSupersede，默认 undefined=off；true=shadow+0.55 只计量）。
         // 只在 L2 传入。
         factSupersede: cfg.persona?.factSupersede,
+        // 票 P2-A3 C 案（exp/p2-a3-scene-archive）：Phase 5 场景文件归档 spill
+        // （persona.sceneArchive，默认 undefined=off；true=shadow+ageDays10 只计量）。
+        // 只在 L2 传入。
+        sceneArchive: cfg.persona?.sceneArchive,
         // L2 场景抽取超时（2026-10-21）：此前工厂**不传** timeoutMs → 抽取器内部
         // 回落硬编码 300s（scene-extractor.ts `opts.timeoutMs ?? 300_000`）并以该
         // 值覆盖层配置 ⇒ yaml 的 llm.layers.l2.timeoutMs（600000）对场景抽取
@@ -985,6 +1072,18 @@ export function createL2Runner(opts: {
           error: extractResult.error ?? "unknown error",
         });
         continue;
+      }
+      // P2-A1 分支 B1（裁判条件1 执行回路）：L1 归档政策遍历——shadow=计量 on=置位。
+      const l1ArchiveCfg = cfg.persona?.l1Archive;
+      if (l1ArchiveCfg?.enabled) {
+        try {
+          vectorStore?.setL1ArchiveFilterActive?.(l1ArchiveCfg.mode === "on");
+          vectorStore?.applyArchivePolicy?.(l1ArchiveCfg, Date.now());
+        } catch (archiveErr) {
+          logger?.warn(
+            `[L2] archive policy error (non-fatal): ${archiveErr instanceof Error ? archiveErr.message : String(archiveErr)}`,
+          );
+        }
       }
       if (extractResult.memoriesProcessed <= 0) continue;
       if (extractResult.emptyExtraction) {

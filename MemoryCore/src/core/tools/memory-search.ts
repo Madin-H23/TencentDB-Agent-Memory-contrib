@@ -144,6 +144,18 @@ export async function executeMemorySearch(params: {
 
   let results = recalled.hits.map(toSearchItem);
 
+  // P2-A1 B1 归档层：已归档记忆不进召回（store 未暴露可选方法则跳过——向后兼容）。
+  if (typeof vectorStore.getArchivedL1Ids === "function") {
+    const archivedIds = vectorStore.getArchivedL1Ids();
+    if (archivedIds.size > 0) {
+      const beforeArchived = results.length;
+      results = results.filter((r) => !archivedIds.has(r.id));
+      logger?.debug?.(
+        `${TAG} Archived filter: ${results.length}/${beforeArchived} (archived=${archivedIds.size})`,
+      );
+    }
+  }
+
   const preFilterCount = results.length;
   if (typeFilter) {
     results = results.filter((r) => r.type === typeFilter);

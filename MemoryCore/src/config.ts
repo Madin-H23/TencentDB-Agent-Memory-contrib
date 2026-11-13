@@ -18,13 +18,25 @@ import {
   type FactSupersedeConfig,
 } from "./core/scene/scene-supersede.js";
 import {
+  parseL1ArchiveConfig,
+  type L1ArchiveConfig,
+} from "./core/store/l1-lifecycle.js";
+import {
   parseSceneCompactionConfig,
   type SceneCompactionConfig,
 } from "./core/scene/scene-compact.js";
 import {
+  parseSceneArchiveConfig,
+  type SceneArchiveConfig,
+} from "./core/scene/scene-archive.js";
+import {
   parseSemanticGateConfig,
   type CaptureSemanticGateConfig,
 } from "./core/hooks/capture-semantic-gate.config.js";
+import {
+  parseL1SmallBatchDeferConfig,
+  type L1SmallBatchDeferConfig,
+} from "./utils/l1-smallbatch-defer.js";
 
 /** Prompt family for L1-L3 memory pipeline. */
 export type MemoryPromptMode = "chat" | "code";
@@ -196,6 +208,29 @@ export interface PersonaConfig {
    * 非法 mode / 阈值越出 (0,1) → throw（parseFactSupersedeConfig，不静默回落）。
    */
   factSupersede?: FactSupersedeConfig;
+  /**
+   * [P2-A1 分支 B1·裁判择优] L1 归档层（存储侧生命周期）：updated_time 距今
+   * > ageDays 的记忆置 archived=1（检索默认排除·显式召回保留）。
+   * 默认 undefined=off；true=shadow+90 天（影子先量）；非法 throw（不静默回落）。
+   * 裁判条件：60d 影子实测 23.9% 应归档；90d=0（系统太年轻）——阈值以影子数据定。
+   */
+  l1Archive?: L1ArchiveConfig;
+  /**
+   * [P2-A3 C 案] 场景文件归档层：活动段内旧批次段 spill 到 `<scene>-archive.md`
+   * （rolling ageDays·锚点全局守恒·默认读视图逐字节不变）。
+   * 默认 undefined=off；true=shadow+10 天（影子先量）；非法 throw（不静默回落）。
+   */
+  sceneArchive?: SceneArchiveConfig;
+  /**
+   * [P2-A2 L1 小批空转攒批] L1 runner 组并行池前的门槛前置判据：本片全组
+   * qualified 均 < minMessages 且 qualified 总 chars < minChars 且 age(切片最旧行)
+   * ≤ maxDeferAgeMs 且无残余行 → defer（游标不动，消息自然累积，下轮越过门槛才
+   * 提取；零内容丢失由游标语义保证）。默认 undefined=off（yaml 不写=行为逐字节
+   * 不变）；true=shadow+K5+chars200+30min（影子先量）；mode=on 才真 defer。
+   * 非法 mode/minMessages(正整数且≤切片上限10)/minChars/maxDeferAgeMs → throw
+   * （parseL1SmallBatchDeferConfig，不静默回落）。
+   */
+  l1SmallBatchDefer?: L1SmallBatchDeferConfig;
   /** LLM model for persona generation, format: "provider/model" (falls back to OpenClaw default model when omitted) */
   model?: string;
   /** Prompt family for L2/L3 prompts (default: chat; code prompts will be wired as they are added). */
@@ -853,6 +888,12 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       // 票 P1-6b（exp/p1-6b-supersede-schemes）：确定性同锚替代折叠，默认 undefined=off；
       // true=shadow+0.55（影子先量，on 才落盘）。
       factSupersede: parseFactSupersedeConfig(personaGroup.factSupersede),
+      // P2-A1 分支 B1：L1 归档层，默认 undefined=off；true=shadow+90 天。
+      l1Archive: parseL1ArchiveConfig(personaGroup.l1Archive),
+      // P2-A3 C 案：场景文件归档层，默认 undefined=off；true=shadow+10 天。
+      sceneArchive: parseSceneArchiveConfig(personaGroup.sceneArchive),
+      // P2-A2：L1 小批空转攒批，默认 undefined=off；true=shadow+K5+chars200+30min。
+      l1SmallBatchDefer: parseL1SmallBatchDeferConfig(personaGroup.l1SmallBatchDefer),
       model: optStr(personaGroup, "model"),
       promptMode: normalizePromptMode(str(personaGroup, "promptMode"), globalPromptMode),
       triggerMode,
