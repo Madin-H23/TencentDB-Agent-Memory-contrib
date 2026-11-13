@@ -128,3 +128,15 @@ describe("judgePairKey：delta 判定键（内容哈希、抗行号漂移）", (
     expect(judgePairKey("b.md", "m_1_a", "旧", "新")).not.toBe(base);
   });
 });
+
+describe("buildJudgePrompt：替换模式注入防护（审查 R1 P2-1）", () => {
+  it("OLD/NEW 槽位对 $&/$'/$`/$$ 形态免疫（原样插入不展开不截断）", () => {
+    // buildJudgePrompt 走 same template engine；用 judge prompt 的同款修法路径验证
+    const oldLine = "旧 $& $' $` 模板";
+    const newLine = "新 $$ 模板";
+    const p = buildJudgePrompt([oldLine], [newLine]);
+    expect(p).toContain(oldLine);
+    expect(p).toContain(newLine);
+    expect(p).not.toContain("undefined");
+  });
+});
