@@ -4,14 +4,11 @@ import { describe, expect, it } from "vitest";
 import {
   buildFactOpsPrompt,
   buildJudgePrompt,
-  filterSupersededByApproval,
   judgePairKey,
   parseFactOpsResponse,
   parseJudgeResponse,
   pairCandidatesBySimilarity,
-  parseJudgeApprovalState,
 } from "./fact-ops.js";
-import type { SupersedePair } from "./scene-supersede.js";
 
 describe("buildFactOpsPrompt（方案一）", () => {
   it("包含既有事实、新批事实与四元操作指令与 JSON 输出约定", () => {
@@ -132,145 +129,14 @@ describe("judgePairKey：delta 判定键（内容哈希、抗行号漂移）", (
   });
 });
 
-// ── P1-6b 批准桶接线（T1·票 TICKETS-P1-6b-approval-gate-20261113.md）──
-
-describe("parseJudgeApprovalState：judge state.json 解析", () => {
-  const realState = JSON.stringify({
-    version: 1,
-    pairs: {
-      "a.md|m_1_a|x|y": { verdict: "supersede", at: "2026-11-11T01:22:00Z", attempts: 0 },
-      "a.md|m_2_b|x|y": { verdict: "distinct", at: "2026-11-11T01:22:00Z", attempts: 0 },
-      "a.md|m_3_c|x|y": { verdict: "unknown", at: "2026-11-11T01:22:00Z", attempts: 0 },
-      "a.md|m_4_d|x|y": { verdict: "supersede", at: "2026-11-11T01:22:00Z", attempts: 0 },
-    },
-  });
-
-  it("只收 verdict=supersede 的键（distinct/unknown 不入批准集）", () => {
-    const idx = parseJudgeApprovalState(realState);
-    expect(idx.approved.size).toBe(2);
-    expect(idx.approved.has("a.md|m_1_a|x|y")).toBe(true);
-    expect(idx.approved.has("a.md|m_4_d|x|y")).toBe(true);
-    expect(idx.approved.has("a.md|m_2_b|x|y")).toBe(false);
-    expect(idx.approved.has("a.md|m_3_c|x|y")).toBe(false);
-  });
-
-  it("带 attempts 的记录同样按 verdict 收", () => {
-    const idx = parseJudgeApprovalState(
-      JSON.stringify({ version: 1, pairs: { k1: { verdict: "supersede", attempts: 2 } } }),
-    );
-    expect(idx.approved.size).toBe(1);
-  });
-
-  it("畸形输入 → 空集不 throw（fail-closed 到不过滤）", () => {
-    expect(parseJudgeApprovalState("").approved.size).toBe(0);
-    expect(parseJudgeApprovalState("not json").approved.size).toBe(0);
-    expect(parseJudgeApprovalState("[]").approved.size).toBe(0);
-    expect(parseJudgeApprovalState("{}").approved.size).toBe(0);
-    expect(parseJudgeApprovalState('{"pairs":null}').approved.size).toBe(0);
-    expect(parseJudgeApprovalState('{"pairs":{"k":{"attempts":1}}}').approved.size).toBe(0);
-    expect(parseJudgeApprovalState('{"pairs":{"k":"string"}}').approved.size).toBe(0);
-  });
-
-  it("大小写/空白容忍：' SUPERSEDE ' 仍计入", () => {
-    const idx = parseJudgeApprovalState(
-      JSON.stringify({ pairs: { k1: { verdict: " SUPERSEDE " } } }),
-    );
-    expect(idx.approved.has("k1")).toBe(true);
-  });
-
-  it("空 pairs 对象 → 空集", () => {
-    const idx = parseJudgeApprovalState(JSON.stringify({ version: 1, pairs: {} }));
-    expect(idx.approved.size).toBe(0);
-  });
-});
-
-describe("filterSupersededByApproval：on 模式只保留批准对", () => {
-  const file = "测试.md";
-  // 三行同锚旧事实 + 一行新事实；第 0/1 行被判、第 2 行未判
-  const original = [
-    "- 旧事实A（m_1794000000000_aaaa0001）",
-    "- 旧事实B（m_1794000000001_bbbb0002）",
-    "- 旧事实C（m_1794000000002_cccc0003）",
-    "- 新事实（m_1794000000003_dddd0004）",
-  ].join("\n");
-
-  // anchor 必须与 marked() 推入 pairs 的 anchor 字面一致（过滤按 p.anchor 重算键）
-  const PAIR_ANCHOR = "m_x";
-  function keyFor(oldIdx: number, newIdx: number): string {
-    return judgePairKey(file, PAIR_ANCHOR, original.split("\n")[oldIdx], original.split("\n")[newIdx]);
-  }
-
-  /** 手工构造 supersede 后的 content（前缀 = 0.55 直标形态）。 */
-  function marked(idxs: number[]): { content: string; pairs: SupersedePair[] } {
-    const lines = original.split("\n");
-    const pairs: SupersedePair[] = [];
-    for (const i of idxs) {
-      lines[i] = `[SUPERSEDED 2026-11-13T00:00:00.000Z] ${lines[i]}`;
-      pairs.push({ oldIndex: i, newIndex: 3, anchor: "m_x", similarity: 0.6 });
-    }
-    return { content: lines.join("\n"), pairs };
-  }
-
-  it("批准保留、未判撤销：kept=1 reverted=2", () => {
-    const { content, pairs } = marked([0, 1, 2]);
-    const approved = new Set([keyFor(0, 3)]);
-    const r = filterSupersededByApproval(content, original, pairs, approved, file);
-    expect(r.kept).toBe(1);
-    expect(r.reverted).toBe(2);
-    expect(r.content.split("\n")[0]).toContain("[SUPERSEDED");
-    expect(r.content.split("\n")[1]).not.toContain("[SUPERSEDED");
-    expect(r.content.split("\n")[2]).not.toContain("[SUPERSEDED");
-  });
-
-  it("全批准 → 零撤销（content 不变）", () => {
-    const { content, pairs } = marked([0, 1]);
-    const approved = new Set([keyFor(0, 3), keyFor(1, 3)]);
-    const r = filterSupersededByApproval(content, original, pairs, approved, file);
-    expect(r.kept).toBe(2);
-    expect(r.reverted).toBe(0);
-    expect(r.content).toBe(content);
-  });
-
-  it("零批准 → 全撤销（content 逐字节回到原状）", () => {
-    const { content, pairs } = marked([0, 1, 2]);
-    const r = filterSupersededByApproval(content, original, pairs, new Set(), file);
-    expect(r.kept).toBe(0);
-    expect(r.reverted).toBe(3);
-    expect(r.content).toBe(original);
-  });
-
-  it("撤销只动前缀：锚点多重集过滤前后完全一致", () => {
-    const { content, pairs } = marked([0, 1, 2]);
-    const approved = new Set([keyFor(0, 3)]);
-    const r = filterSupersededByApproval(content, original, pairs, approved, file);
-    const ids = (t: string) => (t.match(/m_\d{13}_[0-9a-f]{8}/g) ?? []).sort();
-    expect(ids(r.content)).toEqual(ids(original));
-  });
-
-  it("幂等：过滤一次后再过同一批准集 → 零变化", () => {
-    const { content, pairs } = marked([0, 1, 2]);
-    const approved = new Set([keyFor(0, 3)]);
-    const r1 = filterSupersededByApproval(content, original, pairs, approved, file);
-    // 二次运行：输入为已过滤 content + 同批准集（此时 kept 行的 key 仍命中）
-    const r2 = filterSupersededByApproval(r1.content, original, pairs, approved, file);
-    expect(r2.content).toBe(r1.content);
-    expect(r2.kept).toBe(1);
-    expect(r2.reverted).toBe(0);
-  });
-
-  it("pairs 为空 → 原样返回", () => {
-    const r = filterSupersededByApproval(original, original, [], new Set(["k"]), file);
-    expect(r.content).toBe(original);
-    expect(r.kept).toBe(0);
-    expect(r.reverted).toBe(0);
-  });
-
-  it("不认识的锚点行（pair 指向未标行）→ 不误撤销", () => {
-    // pair.oldIndex 指向的行本就没有前缀 → 跳过不计 reverted
-    const { content, pairs } = marked([0]);
-    const badPairs = [{ oldIndex: 1, newIndex: 3, anchor: "m_x", similarity: 0.6 }];
-    const r = filterSupersededByApproval(content, original, badPairs, new Set(), file);
-    expect(r.reverted).toBe(0);
-    expect(r.content).toBe(content);
+describe("buildJudgePrompt：替换模式注入防护（审查 R1 P2-1）", () => {
+  it("OLD/NEW 槽位对 $&/$'/$`/$$ 形态免疫（原样插入不展开不截断）", () => {
+    // buildJudgePrompt 走 same template engine；用 judge prompt 的同款修法路径验证
+    const oldLine = "旧 $& $' $` 模板";
+    const newLine = "新 $$ 模板";
+    const p = buildJudgePrompt([oldLine], [newLine]);
+    expect(p).toContain(oldLine);
+    expect(p).toContain(newLine);
+    expect(p).not.toContain("undefined");
   });
 });

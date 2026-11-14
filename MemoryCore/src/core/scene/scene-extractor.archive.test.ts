@@ -203,3 +203,65 @@ describe("Phase 5 sceneArchive 接线", () => {
     expect(plan.mainAfter).toBe(all);
   });
 });
+
+// ── 审查 R2 P1-1：同日期不同内容段不丢失（date+hash 签名去重）──
+describe("P2-A3 spill 去重：date+hash 签名（同日期不同内容不丢）", () => {
+  const cfgOn = { enabled: true, mode: "on" as const, ageDays: 10, protectScenes: [] as string[] };
+  it("同日期不同内容的段：第二次 spill 追加进 archive 而非丢弃（main 移走必有 archive 去处）", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sa-p11-"));
+    mkdirSync(join(dir, "scene_blocks"), { recursive: true });
+    // 第一次：老内容段 10-20
+    writeFileSync(join(dir, "scene_blocks", "测试.md"), v2File());
+    writeFileSync(join(dir, "persona.md"), "画像\n");
+    try {
+      await runExtract(dir, { sceneArchive: cfgOn });
+      const fs = require("node:fs");
+      const arch1 = fs.readFileSync(join(dir, "scene_blocks", "测试-archive.md"), "utf-8");
+      // 第二次：同日期 10-20 但内容不同的新段（模拟 LLM 旧日期写新段）
+      const newSeg = "### ★10-20 12:00Z 另一批\n- 全然不同的新内容行（m_1794000000009_eeee0009）\n";
+      const modified = v2File().replace(NEW_HEAD, newSeg + NEW_HEAD);
+      fs.writeFileSync(join(dir, "scene_blocks", "测试.md"), modified, "utf-8");
+      await runExtract(dir, { sceneArchive: cfgOn });
+      const arch2 = fs.readFileSync(join(dir, "scene_blocks", "测试-archive.md"), "utf-8");
+      // 新内容段必须进 archive（原 date 去重会整段丢弃）
+      expect(arch2).toContain("全然不同的新内容行");
+      expect(arch2).toContain("eeee0009");
+      // 主文件该段已移走（正常 spill 语义）
+      const main2 = fs.readFileSync(join(dir, "scene_blocks", "测试.md"), "utf-8");
+      expect(main2).not.toContain("eeee0009");
+      // 锚点全局守恒
+      const ids = (t) => new Set(t.match(/m_\d{13}_[0-9a-f]{8}/g) ?? []);
+      const union = new Set([...ids(modified), ...ids(arch2)]);
+      void union;
+      const mainAfter = fs.readFileSync(join(dir, "scene_blocks", "测试.md"), "utf-8");
+      const unionAll = new Set([...ids(mainAfter), ...ids(arch2)]);
+      const before = ids(modified);
+      expect([...before].filter((x) => !unionAll.has(x))).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("同日期同内容段（幂等重放）：不重复追加（签名命中跳过）", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sa-p11-idem-"));
+    mkdirSync(join(dir, "scene_blocks"), { recursive: true });
+    writeFileSync(join(dir, "scene_blocks", "测试.md"), v2File());
+    writeFileSync(join(dir, "persona.md"), "画像\n");
+    try {
+      await runExtract(dir, { sceneArchive: cfgOn });
+      const fs = require("node:fs");
+      const arch1 = fs.readFileSync(join(dir, "scene_blocks", "测试-archive.md"), "utf-8");
+      // 模拟崩溃恢复重放：主文件再次出现同日期同内容段
+      const replay = v2File().replace(NEW_HEAD, "### ★10-20 10:00Z 旧批\n- 旧批次叙事（m_1794000000001_bbbb0002）\n" + NEW_HEAD);
+      fs.writeFileSync(join(dir, "scene_blocks", "测试.md"), replay, "utf-8");
+      await runExtract(dir, { sceneArchive: cfgOn });
+      const arch2 = fs.readFileSync(join(dir, "scene_blocks", "测试-archive.md"), "utf-8");
+      // 段已签名命中：不重复追加（arch2 与 arch1 同·或至少该段不出现两份）
+      const dupCount = (arch2.match(/m_1794000000001_bbbb0002/g) ?? []).length;
+      expect(dupCount).toBeLessThanOrEqual(1);
+      void arch1;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

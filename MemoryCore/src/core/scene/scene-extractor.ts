@@ -25,7 +25,6 @@ import { parseSceneBlock } from "../scene/scene-format.js";
 import { compactSceneBlock } from "../scene/scene-compact.js";
 import type { SceneCompactionConfig } from "../scene/scene-compact.js";
 import { deterministicSupersede, type FactSupersedeConfig } from "./scene-supersede.js";
-import { filterSupersededByApproval, parseJudgeApprovalState } from "./fact-ops.js";
 import { planSceneSpill, type SceneArchiveConfig } from "./scene-archive.js";
 import { checkAnchorPreservation, countSupersededChars } from "../../utils/supersede.js";
 import { generateSceneNavigation, stripSceneNavigation } from "../scene/scene-navigation.js";
@@ -129,11 +128,6 @@ export interface SceneExtractorOptions {
    */
   sceneFormatV2?: boolean;
   /**
-   * [候选-C·TICKETS-C-read-dedup-20261113] run 内 read 结果去重（persona.l2ReadDedup，
-   * 经 LLMRunParams.l2ReadDedup 透传到 storage-tools）。缺省 off=行为逐字节不变。
-   */
-  l2ReadDedup?: import("../../utils/read-dedup.js").L2ReadDedupConfig;
-  /**
    * [P1 票⑦ 召回多信号排序]：updateSceneNavigation 的导航排序口径（已解析配置，
    * undefined=off=基线热度降序逐字节不变）。yaml `persona.recallRanking` 控制，
    * 经 pipeline-factory 传入。
@@ -235,7 +229,6 @@ export class SceneExtractor {
   private sceneCharCap: number | undefined;
   private explicitInvalidation: boolean;
   private sceneFormatV2: boolean;
-  private l2ReadDedup: import("../../utils/read-dedup.js").L2ReadDedupConfig | undefined;
   private recallRanking: ResolvedRecallRanking | undefined;
   private sceneCompaction: SceneCompactionConfig | undefined;
   private factSupersede: FactSupersedeConfig | undefined;
@@ -256,7 +249,6 @@ export class SceneExtractor {
     this.sceneCharCap = opts.sceneCharCap;
     this.explicitInvalidation = opts.explicitInvalidation ?? false;
     this.sceneFormatV2 = opts.sceneFormatV2 ?? false;
-    this.l2ReadDedup = opts.l2ReadDedup;
     this.recallRanking = opts.recallRanking;
     this.sceneCompaction = opts.sceneCompaction;
     this.factSupersede = opts.factSupersede;
@@ -431,8 +423,6 @@ export class SceneExtractor {
         explicitInvalidation: this.explicitInvalidation,
         // 票⑤：场景格式 v2 双层化（persona.sceneFormatV2，默认 off）—— 只在 L2 传入。
         sceneFormatV2: this.sceneFormatV2,
-        // [候选-C] run 内 read 去重（persona.l2ReadDedup，默认 off）—— 只在 L2 传入。
-        l2ReadDedup: this.l2ReadDedup,
         ...traceParams,
       }) ?? "";
       llmDurationMs = Date.now() - runnerStartMs;
@@ -744,9 +734,6 @@ export class SceneExtractor {
    *   `[SUPERSEDED <ISO>]` 前缀（只标不删，锚点多重集零变化）。
    * - mode=shadow：只打 `metric=l2_fact_supersede` 不落盘；mode=on：经
    *   checkAnchorPreservation 防御性守卫后写回（storage/本地 fs 两路）。
-   * - [P1-6b 批准桶] on 且配置 judgeStatePath：只标记 judge 批准的对；state 读不到
-   *   或批准集为空 ⇒ **fail-closed 一个都不标**（不是 fail-open 全量标记——
-   *   全量标记正是本机制要堵的「静默绕过闸门」缺口）。
    * - 读取当前文件态（可能已被 compactSceneFile 写回）；marked=0 时零日志零写。
    * - 容错：异常只 warn 不中断 Phase 5 后续文件与 L2 主流程。
    */
@@ -778,19 +765,44 @@ export class SceneExtractor {
           .readFile(path.default.join(this.dataDir, "scene_blocks", archName), "utf-8")
           .catch(() => "");
       }
-      const already = new Set(
-        (archExisting.match(/^###[ \t]+(?:★[ \t]*)?(\d{4}-\d{1,2}-\d{1,2}|\d{1,2}-\d{1,2})/gm) ?? []).map((h) =>
-          h.replace(/^###[ \t]+(?:★[ \t]*)?/, ""),
-        ),
-      );
-      const segText = (d: string) =>
-        plan.segments.filter((s) => s.date === d && !already.has(s.date)).map(() => plan.archiveAppend).join("\n\n");
-      const freshDates = plan.segments.filter((s) => !already.has(s.date)).map((s) => s.date);
-      if (freshDates.length > 0) {
+      // 审查 R2 P1-1 修复：去重粒度从 date 升级为 **date+hash 签名**。
+      // 原 date 集合去重会把「同日期不同内容」的段（LLM 旧日期写新段/头跨年复用）
+      // 整段跳过 archive 写但 mainAfter 照移 ⇒ 内容丢失。签名=fnv1a(段文本)：
+      // 已存在签名的段 archive 已有同内容（main 移走不丢）；fresh 段才追加。
+      const fnv = (t: string): string => {
+        let hh = 0x811c9dc5;
+        for (let i = 0; i < t.length; i++) {
+          hh ^= t.charCodeAt(i);
+          hh = Math.imul(hh, 0x01000193);
+        }
+        return (hh >>> 0).toString(16).padStart(8, "0");
+      };
+      const existingSigs = new Set<string>();
+      {
+        const exLines = archExisting.split("\n");
+        const exHeads: number[] = [];
+        for (let i = 0; i < exLines.length; i++) {
+          if (/^###[ \t]/.test(exLines[i])) exHeads.push(i);
+        }
+        for (let k = 0; k < exHeads.length; k++) {
+          const st = exHeads[k];
+          const en = k + 1 < exHeads.length ? exHeads[k + 1] : exLines.length;
+          const seg = exLines.slice(st, en).join("\n");
+          const dm = /^###[ \t]+(?:★[ \t]*)?(\d{4}-\d{1,2}-\d{1,2}|\d{1,2}-\d{1,2})/.exec(exLines[st]);
+          existingSigs.add(`${dm ? dm[1] : ""}|${fnv(seg.trimEnd())}`);
+        }
+      }
+      const freshSegs = plan.segments.filter((s) => !existingSigs.has(`${s.date}|${s.hash}`));
+      if (freshSegs.length > 0) {
+        // 按 fresh 段原行拼追加文本（plan.segments 无原文·用行界回查 raw）
+        const rawLines = raw.split("\n");
+        const appendText = freshSegs
+          .map((sgm) => rawLines.slice(sgm.startLine, sgm.endLine).join("\n"))
+          .join("\n\n");
         const merged =
           archExisting.length === 0
-            ? buildArchiveFile(plan.archiveAppend)
-            : mergeArchiveFile(archExisting, plan.archiveAppend);
+            ? buildArchiveFile(appendText)
+            : mergeArchiveFile(archExisting, appendText);
         if (this.storage) {
           await this.storage.writeFile(`${StoragePaths.sceneBlocksDir}${archName}`, merged);
         } else {
@@ -808,7 +820,7 @@ export class SceneExtractor {
         );
       }
       this.logger?.info?.(
-        `${TAG} metric=l2_scene_archive_spill file=${file} archived=${freshDates.length} freed=${plan.freedChars}`,
+        `${TAG} metric=l2_scene_archive_spill file=${file} archived=${freshSegs.length} freed=${plan.freedChars}`,
       );
     } catch (err) {
       this.logger?.warn(
@@ -833,54 +845,21 @@ export class SceneExtractor {
       const result = deterministicSupersede(current, { minSimilarity: cfg.minSimilarity });
       if (result.markedLines.length === 0) return;
       const chars = countSupersededChars(result.content) - countSupersededChars(current);
-      // 口径说明（P2-8）：marked=/chars= 均为**过滤前**读数（确定性候选规模），
-      // on+judgeStatePath 模式下会高于实际落盘量；实际落盘量看 approved=/reverted=。
-      // [P1-6b 批准桶] on 模式且配置了 judgeStatePath → 只标记 judge 批准的对。
-      // shadow 模式不过滤（保持分布观测口径）；
-      // 读不到 state / 畸形解析得空批准集 → fail-closed 一个都不标（不放大标记范围）。
-      let outContent = result.content;
-      let approved = 0;
-      let reverted = 0;
-      if (cfg.mode === "on" && cfg.judgeStatePath) {
-        const fsP = await import("node:fs/promises");
-        let raw: string | null = null;
-        try {
-          raw = await fsP.default.readFile(cfg.judgeStatePath, "utf-8");
-        } catch {
-          raw = null;
-        }
-        if (raw === null) {
-          // fail-closed：配了闸门却拿不到批准集 ⇒ 一个都不标。
-          // 选它而非 fail-open 全量标记，是因为全量标记正是本票要堵的结构性缺口
-          // （静默绕过 judge）；零标记=零信息损失（事实保持可见），与 shadow 等效。
-          this.logger?.warn(
-            `${TAG} judge state unavailable, factSupersede marks nothing (fail-closed, non-fatal): ${cfg.judgeStatePath}`,
-          );
-          return;
-        }
-        const idx = parseJudgeApprovalState(raw);
-        const f = filterSupersededByApproval(outContent, current, result.pairs, idx.approved, file);
-        outContent = f.content;
-        approved = f.kept;
-        reverted = f.reverted;
-      }
       this.logger?.info?.(
-        `${TAG} metric=l2_fact_supersede mode=${cfg.mode} file=${file} marked=${result.markedLines.length} chars=${chars} spared=${result.sparedLowSim} nodate=${result.sparedNoDate}` +
-          (cfg.mode === "on" && cfg.judgeStatePath ? ` approved=${approved} reverted=${reverted}` : ""),
+        `${TAG} metric=l2_fact_supersede mode=${cfg.mode} file=${file} marked=${result.markedLines.length} chars=${chars} spared=${result.sparedLowSim} nodate=${result.sparedNoDate}`,
       );
       if (cfg.mode !== "on") return;
-      if (cfg.judgeStatePath && approved === 0) return; // 无批准对 ⇒ 零写盘（metric 已留痕）
-      const loss = checkAnchorPreservation(current, outContent);
+      const loss = checkAnchorPreservation(current, result.content);
       if (loss) {
         this.logger?.warn(`${TAG} factSupersede anchor guard rejected (non-fatal): ${file} lost=${loss.lostCount}`);
         return;
       }
       if (this.storage) {
-        await this.storage.writeFile(`${StoragePaths.sceneBlocksDir}${file}`, outContent);
+        await this.storage.writeFile(`${StoragePaths.sceneBlocksDir}${file}`, result.content);
       } else {
         const fs = await import("node:fs/promises");
         const path = await import("node:path");
-        await fs.default.writeFile(path.default.join(this.dataDir, "scene_blocks", file), outContent, "utf-8");
+        await fs.default.writeFile(path.default.join(this.dataDir, "scene_blocks", file), result.content, "utf-8");
       }
     } catch (err) {
       this.logger?.warn(

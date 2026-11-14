@@ -176,7 +176,7 @@ export function selectArchiveSegments(
       date: h.date,
       startLine: h.line,
       endLine,
-      hash: fnv1a(text),
+      hash: fnv1a((text).trimEnd()),
       chars: text.length,
     });
   }

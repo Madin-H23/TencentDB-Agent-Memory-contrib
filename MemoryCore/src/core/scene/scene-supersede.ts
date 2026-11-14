@@ -251,14 +251,6 @@ export interface FactSupersedeConfig {
   mode: FactSupersedeMode;
   /** 同锚旧行与最新行的最低脱敏相似度（0,1）。 */
   minSimilarity: number;
-  /**
-   * [P1-6b 批准桶] judge state.json 路径。**仅 on 模式生效**：
-   * 只标记 judge 判 supersede 的对。
-   * - 未配置 → 不过滤（全量标记=接线前行为，退化保证）
-   * - 已配置但读失败/批准集为空 → **fail-closed 零标记**（不放大标记范围）
-   * 见 fact-ops.ts parseJudgeApprovalState / filterSupersededByApproval。
-   */
-  judgeStatePath?: string;
 }
 
 export const FACT_SUPERSEDE_DEFAULT_MIN_SIMILARITY = 0.55;
@@ -286,14 +278,5 @@ export function parseFactSupersedeConfig(raw: unknown): FactSupersedeConfig | un
     throw new Error(`persona.factSupersede.minSimilarity 须为 (0,1) 开区间数值: ${String(simRaw)}`);
   }
   if (modeRaw === "off") return undefined;
-  // judgeStatePath：非字符串 throw；null/空白 → undefined（视作未配置）
-  const pathRaw = o.judgeStatePath;
-  if (pathRaw !== undefined && pathRaw !== null && typeof pathRaw !== "string") {
-    throw new Error(`persona.factSupersede.judgeStatePath 须为字符串(绝对路径): ${String(pathRaw)}`);
-  }
-  // 注：只验字符串类型，不校验「绝对路径」——相对路径依进程 cwd 解析（启动件
-  // 固定 cwd 为 MemoryCore），票 P2-7 记录该口径而非在此加硬校验。
-  const judgeStatePath =
-    typeof pathRaw === "string" && pathRaw.trim().length > 0 ? pathRaw.trim() : undefined;
-  return { mode: modeRaw, minSimilarity: simRaw, judgeStatePath };
+  return { mode: modeRaw, minSimilarity: simRaw };
 }
