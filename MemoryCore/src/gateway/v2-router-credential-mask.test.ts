@@ -91,10 +91,7 @@ describe("handleConversationAdd：写入侧凭据掩码（origin#33）", () => {
   });
 
   it("insertL0Batch 路径（keyword-only store·无 embedding）同样掩净", async () => {
-    const store = makeStore();
     const masker = createCredentialMasker({ mode: "on", prefixes: [] });
-    await handleConversationAdd(bodyWithKey(), AUTH, "req-mask", makeDeps(store, { credentialMasker: masker, getEmbedding: () => undefined }));
-    // store 无 insertL0Batch 字段时才回退 upsertL0——这里显式提供 batch 路径
     const batchStore = {
       insertL0Batch: vi.fn(async () => 1),
       upsertL0: vi.fn(async () => true),
@@ -107,6 +104,7 @@ describe("handleConversationAdd：写入侧凭据掩码（origin#33）", () => {
     );
     const calls = batchStore.insertL0Batch.mock.calls as Array<[L0Record[]]>;
     expect(calls.length).toBeGreaterThan(0);
+    expect(batchStore.upsertL0).not.toHaveBeenCalled(); // batch 可用时不再回退
     for (const rec of calls[0][0]) expect(rec.messageText).not.toContain(KEY);
     expect(calls[0][0][0].messageText).toContain("sk-***masked***");
   });
