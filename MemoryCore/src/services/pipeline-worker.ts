@@ -18,6 +18,7 @@ import type { IStateBackend, TaskPayload } from "../core/state/types.js";
 import { buildPipelineTimerMember } from "../core/state/timer-member.js";
 import { serializeTraceContext } from "../core/report/trace-propagation.js";
 import { obsLogger } from "../core/report/obs-logger.js";
+import { parkedRetryDecision, parseParkedBackoffConfig, type ParkedBackoffConfig } from "../utils/parked-backoff.js";
 
 // ============================
 // Types
@@ -77,6 +78,12 @@ export interface PipelineWorkerConfig {
   pendingStaleMs?: number;
   /** 锁冲突 parked 队首的退避序列 (default: 200/600/1800/5000ms) */
   lockRetryDelaysMs?: readonly number[];
+  /**
+   * [origin#27] parked 锁冲突重试上限。undefined/false=off（现有无限重试逐字节不变）；
+   * true=8；对象 {maxRetries}。达到上限的 parked 任务转 deadLetter（复用 #13 语义
+   * 可查可重放）而非永久空转。解析走 parseParkedBackoffConfig（拒绝式）。
+   */
+  maxParkedRetries?: boolean | { maxRetries?: number; mode?: "off" | "on" };
   /** parked 重试延迟抖动比例，0 可用于确定性测试 (default: 0.2) */
   lockRetryJitterRatio?: number;
   /** 全局同时重试的 lock scope 上限 (default: min(concurrency, 8)) */
@@ -147,8 +154,9 @@ interface ParkedTask {
 export class PipelineWorker {
   private backend: IStateBackend;
   private executor: TaskExecutor;
-  private config: Required<Omit<PipelineWorkerConfig, "onDeadLetter" | "onL1Complete" | "onL2Complete" | "permitPool">> & {
+  private config: Required<Omit<PipelineWorkerConfig, "onDeadLetter" | "onL1Complete" | "onL2Complete" | "permitPool" | "maxParkedRetries">> & {
     onDeadLetter?: PipelineWorkerConfig["onDeadLetter"];
+    maxParkedRetries?: ParkedBackoffConfig;
     onL1Complete?: PipelineWorkerConfig["onL1Complete"];
     onL2Complete?: PipelineWorkerConfig["onL2Complete"];
     permitPool?: PipelineWorkerConfig["permitPool"];
@@ -280,6 +288,7 @@ export class PipelineWorker {
       lockRetryConcurrency: Math.min(requestedRetryConcurrency, maxParkedTasks),
       maxParkedTasks,
       parkedClaimHeartbeatMs,
+      maxParkedRetries: parseParkedBackoffConfig(config?.maxParkedRetries),
       onDeadLetter: config?.onDeadLetter,
       onL1Complete: config?.onL1Complete,
       onL2Complete: config?.onL2Complete,
@@ -857,8 +866,19 @@ export class PipelineWorker {
       }
       if (!acquired) {
         entry.attempt++;
-        entry.nextRetryAt = Date.now() + this.getParkedRetryDelay(entry.attempt);
         this.metrics.lockConflicts++;
+        // [origin#27] 重试上限：达 maxParkedRetries → 转 deadLetter（默认 off=无限重试原语义）。
+        const decision = parkedRetryDecision({ attempt: entry.attempt, cfg: this.config.maxParkedRetries });
+        if (decision.action === "dead-letter") {
+          this.removeParkedHead(scope, entry);
+          this.metrics.tasksParked = Math.max(0, this.metrics.tasksParked - 1);
+          this.logger?.warn?.(
+            `${TAG} parked retry limit reached [${entry.task.type}] (task=${entry.task.id}, attempts=${decision.attempt}) → dead letter`,
+          );
+          void this.moveToDeadLetter(entry.task, `parked lock-conflict retry limit (${decision.attempt})`, decision.attempt);
+          return;
+        }
+        entry.nextRetryAt = Date.now() + this.getParkedRetryDelay(entry.attempt);
         return;
       }
 
