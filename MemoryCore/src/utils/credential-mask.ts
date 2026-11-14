@@ -9,6 +9,8 @@
  * 设计取舍（防误伤优先——掩码不可逆，误掩正常代码比漏掩代价高）：
  * - sk- 前必须非 [A-Za-z0-9_-]（负回顾）："task-sk-xxx" 连字命名不掩、"sklearn" 无 "-" 恒不掩
  * - sk- 后需 20+ 位连续字母数字（19 位不掩）；OpenAI sk-proj- 二段形态需第二段 24+
+ *   且尾段连字符 ≤2（词组误伤防线·审查 P2）；智谱 key 为 {id}.{secret} 点分形态
+ *   非 sk- 前缀，不在覆盖面（注释订正·审查 P3）
  * - Bearer token 需 16+ 位；自定义前缀同理 16+ 位（短前缀误伤面大，不入默认）
  * - 掩码值保留前缀（sk-***masked***）供审计辨形；metric 行只打计数零回显
  * - 默认 off（未配置=行为逐字节不变）；shadow 先量（不改文只计量）后启用（on 留用户）
@@ -44,10 +46,15 @@ export function maskCredentials(text: string, prefixes: readonly string[] = []):
     "$1***masked***",
   );
   // OpenAI 二段形态（sk-proj-/sk-svcacct-…）：首段 3+ 位，第二段 24+ 位。
-  // 第二段阈值抬高（24）压词组误伤面（"sk-learn-model-pipeline" 14 位不掩）。
+  // 第二段阈值抬高（24）压词组误伤面（"sk-learn-model-pipeline" 14 位不掩）；
+  // 尾段连字符计数 ≤2（真实 key 尾段至多 0-1 个分隔段，连字长词组如
+  // "production-database-to-staging-area" 有 4 个 → 不掩，审查 P2 实证误伤例）。
   out = out.replace(
-    /(?<![A-Za-z0-9_-])(sk-)[A-Za-z0-9]{3,}-[A-Za-z0-9_-]{24,}/g,
-    "$1***masked***",
+    /(?<![A-Za-z0-9_-])(sk-)[A-Za-z0-9]{3,}-([A-Za-z0-9_-]{24,})/g,
+    (m, p1: string, p2: string) => {
+      const dashes = (p2.match(/-/g) ?? []).length;
+      return dashes <= 2 ? `${p1}***masked***` : m;
+    },
   );
   // HTTP Authorization 形态（Bearer 大小写不敏感·保留原文大小写）。
   out = out.replace(

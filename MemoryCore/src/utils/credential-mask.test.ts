@@ -26,6 +26,21 @@ describe("maskCredentials：内置模式（sk- / Bearer）", () => {
     expect(maskCredentials("sk-proj-AbCdEf0123456789AbCdEf")).toBe("sk-proj-AbCdEf0123456789AbCdEf");
   });
 
+  it("误伤校验：sk- + ≥24 位连字长词组不掩（尾段连字符 >2·审查 P2 实证例）", () => {
+    expect(maskCredentials("sk-copy-production-database-to-staging-area")).toBe(
+      "sk-copy-production-database-to-staging-area",
+    );
+  });
+
+  it("sk-proj- 尾段含 1 个连字符仍掩（真实 key 分隔段形态·回归钉）", () => {
+    expect(maskCredentials("sk-proj-AbCdEf0123456789-AbCdEfGh")).toBe("sk-***masked***");
+  });
+
+  it("Bearer 大小写不敏感掩码且保留原文前缀大小写（审查 P3）", () => {
+    expect(maskCredentials("BEARER xxxxxxxxxxxxxxxx")).toBe("BEARER ***masked***");
+    expect(maskCredentials("bearer xxxxxxxxxxxxxxxx")).toBe("bearer ***masked***");
+  });
+
   it("Bearer <token> 形态 → 掩码（HTTP Authorization·fixture 用占位 x 串过凭据闸）", () => {
     expect(maskCredentials("hdr: Bearer xxxxxxxxxxxxxxxx")).toBe(
       "hdr: Bearer ***masked***",
@@ -91,6 +106,9 @@ describe("parseCredentialMaskConfig：拒绝式解析", () => {
     expect(() => parseCredentialMaskConfig({ mode: "off" })).toThrow(); // off 用 false/缺省表达
     expect(() => parseCredentialMaskConfig({ mode: "on", prefixes: [""] })).toThrow(); // 空前缀
     expect(() => parseCredentialMaskConfig({ mode: "on", prefixes: "hf_" })).toThrow(); // 非数组
+    expect(() =>
+      parseCredentialMaskConfig({ mode: "on", prefixes: ["a".repeat(33)] }),
+    ).toThrow(); // 前缀 >32 字符（审查 P3 补测）
   });
 });
 
