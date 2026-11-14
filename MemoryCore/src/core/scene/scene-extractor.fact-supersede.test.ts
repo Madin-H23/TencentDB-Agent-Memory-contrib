@@ -6,6 +6,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { SceneExtractor } from "./scene-extractor.js";
+import { judgePairKey } from "./fact-ops.js";
 import type { LLMRunParams } from "../../core/types.js";
 
 const A = "m_1793500000000_aaaa0001";
@@ -58,7 +59,7 @@ async function seed(files: Record<string, string>): Promise<string> {
 
 async function runExtract(
   dataDir: string,
-  opts: { factSupersede?: { mode: "shadow" | "on"; minSimilarity: number } },
+  opts: { factSupersede?: { mode: "shadow" | "on"; minSimilarity: number; judgeStatePath?: string } },
 ) {
   const logger = makeLogger();
   const extractor = new SceneExtractor({
@@ -150,6 +151,147 @@ describe("Phase 5 factSupersede 接线：开关与模式", () => {
       expect(logger.lines.some((l) => l.includes("l2_fact_supersede"))).toBe(false);
     } finally {
       await fs.rm(dataDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── P1-6b 批准桶接线（T3·票 TICKETS-P1-6b-approval-gate-20261113.md）──
+// on 模式 + judgeStatePath：只标记 judge 批准的对；未批准对撤销标记。
+// 注意：judgePairKey 的 oldText/newText 取自**未加前缀的原文行**（与夜间脚本同口径）。
+
+function judgeStateFor(fixture: string): string {
+  // 用与 extractor 相同的口径预计算批准键：file + anchor + 脱敏 old/new 原文行
+  const lines = fixture.split("\n");
+  const oldIdx = lines.findIndex((l) => l.includes("2026-11-01T02:00:00Z"));
+  const newIdx = lines.findIndex((l) => l.includes("2026-11-08T03:00:00Z"));
+  const anchor = /m_\d{13}_[0-9a-f]{8}/.exec(lines[oldIdx]!)![0];
+  return JSON.stringify({
+    version: 1,
+    pairs: {
+      [judgePairKey("dup.md", anchor, lines[oldIdx]!, lines[newIdx]!)]: {
+        verdict: "supersede",
+        at: "2026-11-11T01:22:00Z",
+        attempts: 0,
+      },
+    },
+  });
+}
+
+describe("Phase 5 factSupersede on 模式：judge 批准桶过滤", () => {
+  it("on + judgeStatePath 命中：该对被标记（同无批准桶行为）", async () => {
+    const statePath = path.join(os.tmpdir(), `judge-approve-${Date.now()}.json`);
+    await fs.writeFile(statePath, judgeStateFor(dupFile()), "utf-8");
+    const dataDir = await seed({ "dup.md": dupFile() });
+    try {
+      const { logger } = await runExtract(dataDir, {
+        factSupersede: { mode: "on", minSimilarity: 0.55, judgeStatePath: statePath },
+      });
+      const after = await fs.readFile(path.join(dataDir, "scene_blocks", "dup.md"), "utf-8");
+      expect(after).toContain("[SUPERSEDED");
+      expect(logger.lines.some((l) => l.includes("metric=l2_fact_supersede"))).toBe(true);
+      expect(logger.lines.some((l) => l.includes("approved=1"))).toBe(true);
+      expect(logger.lines.some((l) => l.includes("reverted=0"))).toBe(true);
+    } finally {
+      await fs.rm(dataDir, { recursive: true, force: true });
+      await fs.rm(statePath, { force: true });
+    }
+  });
+
+  it("on + judgeStatePath 未命中：标记被撤销、文件回到原状（锚点零变化）", async () => {
+    const statePath = path.join(os.tmpdir(), `judge-empty-${Date.now()}.json`);
+    await fs.writeFile(statePath, JSON.stringify({ version: 1, pairs: {} }), "utf-8");
+    const dataDir = await seed({ "dup.md": dupFile() });
+    try {
+      await runExtract(dataDir, {
+        factSupersede: { mode: "on", minSimilarity: 0.55, judgeStatePath: statePath },
+      });
+      const after = await fs.readFile(path.join(dataDir, "scene_blocks", "dup.md"), "utf-8");
+      expect(after).toBe(dupFile()); // 逐字节回到原状
+      expect(anchorsOf(after)).toEqual(anchorsOf(dupFile()));
+    } finally {
+      await fs.rm(dataDir, { recursive: true, force: true });
+      await fs.rm(statePath, { force: true });
+    }
+  });
+
+  it("on + judgeStatePath 指向不存在文件：fail-closed 零标记（不 throw·不写盘）", async () => {
+    const dataDir = await seed({ "dup.md": dupFile() });
+    try {
+      const { logger } = await runExtract(dataDir, {
+        factSupersede: { mode: "on", minSimilarity: 0.55, judgeStatePath: path.join(os.tmpdir(), "no-such-state.json") },
+      });
+      const after = await fs.readFile(path.join(dataDir, "scene_blocks", "dup.md"), "utf-8");
+      expect(after).toBe(dupFile()); // 拿不到批准集 ⇒ 一个都不标（堵「静默绕过闸门」）
+      expect(logger.lines.some((l) => l.includes("judge state unavailable"))).toBe(true);
+      expect(logger.lines.some((l) => l.includes("fail-closed"))).toBe(true);
+    } finally {
+      await fs.rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("on + judgeStatePath 内容畸形：解析得空集 ⇒ 零标记（不 throw）", async () => {
+    const statePath = path.join(os.tmpdir(), `judge-bad-${Date.now()}.json`);
+    await fs.writeFile(statePath, "not a json at all {{{", "utf-8");
+    const dataDir = await seed({ "dup.md": dupFile() });
+    try {
+      const { logger } = await runExtract(dataDir, {
+        factSupersede: { mode: "on", minSimilarity: 0.55, judgeStatePath: statePath },
+      });
+      const after = await fs.readFile(path.join(dataDir, "scene_blocks", "dup.md"), "utf-8");
+      expect(after).toBe(dupFile()); // 空批准集 ⇒ 全撤销 ⇒ 零写盘
+      expect(logger.lines.some((l) => l.includes("approved=0"))).toBe(true);
+    } finally {
+      await fs.rm(dataDir, { recursive: true, force: true });
+      await fs.rm(statePath, { force: true });
+    }
+  });
+
+  it("shadow + judgeStatePath：仍全量打 metric 不过滤（shadow 语义不变）", async () => {
+    const statePath = path.join(os.tmpdir(), `judge-shadow-${Date.now()}.json`);
+    await fs.writeFile(statePath, JSON.stringify({ version: 1, pairs: {} }), "utf-8");
+    const dataDir = await seed({ "dup.md": dupFile() });
+    try {
+      await runExtract(dataDir, {
+        factSupersede: { mode: "shadow", minSimilarity: 0.55, judgeStatePath: statePath },
+      });
+      const after = await fs.readFile(path.join(dataDir, "scene_blocks", "dup.md"), "utf-8");
+      expect(after).toBe(dupFile()); // shadow 永不落盘
+      expect(after).not.toContain("[SUPERSEDED");
+    } finally {
+      await fs.rm(dataDir, { recursive: true, force: true });
+      await fs.rm(statePath, { force: true });
+    }
+  });
+
+  it("on + 无 judgeStatePath：全量标记（接线前行为·AC3 退化保证）", async () => {
+    const dataDir = await seed({ "dup.md": dupFile() });
+    try {
+      await runExtract(dataDir, { factSupersede: { mode: "on", minSimilarity: 0.55 } });
+      const after = await fs.readFile(path.join(dataDir, "scene_blocks", "dup.md"), "utf-8");
+      expect(after).toContain("[SUPERSEDED");
+    } finally {
+      await fs.rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("幂等：on + 批准桶命中后二次 extract 不重复标记", async () => {
+    const statePath = path.join(os.tmpdir(), `judge-idem-${Date.now()}.json`);
+    await fs.writeFile(statePath, judgeStateFor(dupFile()), "utf-8");
+    const dataDir = await seed({ "dup.md": dupFile() });
+    try {
+      await runExtract(dataDir, {
+        factSupersede: { mode: "on", minSimilarity: 0.55, judgeStatePath: statePath },
+      });
+      const once = await fs.readFile(path.join(dataDir, "scene_blocks", "dup.md"), "utf-8");
+      await runExtract(dataDir, {
+        factSupersede: { mode: "on", minSimilarity: 0.55, judgeStatePath: statePath },
+      });
+      const twice = await fs.readFile(path.join(dataDir, "scene_blocks", "dup.md"), "utf-8");
+      expect(twice).toBe(once);
+      expect((twice.match(/\[SUPERSEDED/g) ?? []).length).toBe(1);
+    } finally {
+      await fs.rm(dataDir, { recursive: true, force: true });
+      await fs.rm(statePath, { force: true });
     }
   });
 });

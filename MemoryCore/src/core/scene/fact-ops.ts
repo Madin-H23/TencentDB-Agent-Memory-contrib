@@ -9,6 +9,8 @@
  *   前缀（复用 utils/supersede 的守卫与帽排除口径）；本模块不直接改写文件。
  */
 
+
+import type { SupersedePair } from "./scene-supersede.js";
 export type FactOpKind = "add" | "update" | "delete" | "noop";
 
 export interface FactOp {
@@ -216,4 +218,101 @@ export function judgePairKey(file: string, anchor: string, oldText: string, newT
       .replace(/m_\d{13}_[0-9a-f]{8}/g, " ")
       .replace(/\s+/g, "");
   return `${file}|${anchor}|${fnv1a(strip(oldText))}|${fnv1a(strip(newText))}`;
+}
+
+// ── P1-6b 批准桶接线（T1·票 TICKETS-P1-6b-approval-gate-20261113.md）──
+
+/**
+ * judge state.json 的批准索引：`verdict === "supersede"` 的 pair key 集合。
+ *
+ * 上游 `exp-l2/scripts/factsup-judge-nightly.mjs` 只写 state.json，不参与运行时；
+ * extractor 在 on 模式下读它、只标记 judge 批准的对（票面「on 通过时点系于 Step2 批准」）。
+ */
+export interface JudgeApprovalIndex {
+  /** 批准集（仅 verdict=supersede）。distinct/unknown/未判一律不在内。 */
+  approved: Set<string>;
+}
+
+/**
+ * 解析 judge state.json 原文 → 批准集。零 I/O（读文件由调用方负责）。
+ *
+ * - 只收 `pairs[k].verdict` 归一后等于 `supersede` 的键（大小写/空白容忍）
+ * - 任何畸形输入（非 JSON / 非对象 / pairs 缺失或非对象 / 记录非对象 /
+ *   记录缺 verdict）→ 空集且**不 throw**
+ * - 端到端语义是 **fail-closed**：空集 ⇒ extractor 撤销全部候选标记 ⇒ 零写盘
+ *   （见 filterSupersededByApproval 与 scene-extractor.supersedeFactFile）。
+ *   绝不因 state 损坏而崩 L2 主流程；也绝不因损坏而放大标记范围
+ */
+export function parseJudgeApprovalState(raw: string): JudgeApprovalIndex {
+  const approved = new Set<string>();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { approved };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return { approved };
+  }
+  const pairs = (parsed as Record<string, unknown>).pairs;
+  if (typeof pairs !== "object" || pairs === null || Array.isArray(pairs)) {
+    return { approved };
+  }
+  for (const [key, rec] of Object.entries(pairs as Record<string, unknown>)) {
+    if (typeof rec !== "object" || rec === null) continue;
+    const verdict = (rec as Record<string, unknown>).verdict;
+    if (typeof verdict !== "string") continue;
+    if (verdict.trim().toLowerCase() === "supersede") approved.add(key);
+  }
+  return { approved };
+}
+
+/** `[SUPERSEDED <ISO>]` 行前缀（与 scene-supersede.ts:79 同口径·只用于剥离）。 */
+const SUPERSEDED_PREFIX_RE = /^\s*\[SUPERSEDED [^\]]*\]\s*/;
+
+/**
+ * on 模式批准桶过滤：对 `deterministicSupersede` 的结果，撤销未获 judge 批准的行标记。
+ *
+ * - `content`：已加 `[SUPERSEDED <ISO>]` 前缀的全文；`original`：未加前缀的原文
+ *   （用于按 `judgePairKey` 重算 delta 键，行号漂移免疫）
+ * - `pairs`：本次标记明细（`oldIndex` 指向被标行）；`approved`：批准集
+ * - 未批准 → 剥离该行前缀（只动前缀，锚点/正文零改动）；行本无前缀 → 跳过不计
+ * - 返回 kept=保留标记数、reverted=撤销数；`content` 无撤销时逐字节等于输入
+ *
+ * 幂等：已批准行二次过滤仍命中（键按原文重算，与已标状态无关）。
+ *
+ * 粘性标记限制（P2-6·有意为之）：某行一旦经批准集保留标记落盘，`deterministicSupersede`
+ * 会把已标行排除出候选（不再进 pairs），故即使日后 judge 改判 distinct，已落盘的
+ * `[SUPERSEDED]` 也不会被自动撤销——与 nightly「verdict 一经写入不重判」的不可变语义
+ * 自洽。需要回退时走人工/离线清理，不走本路径。
+ */
+export function filterSupersededByApproval(
+  content: string,
+  original: string,
+  pairs: SupersedePair[],
+  approved: Set<string>,
+  file: string,
+): { content: string; kept: number; reverted: number } {
+  if (pairs.length === 0) return { content, kept: 0, reverted: 0 };
+  const outLines = content.split("\n");
+  const origLines = original.split("\n");
+  let kept = 0;
+  let reverted = 0;
+  for (const p of pairs) {
+    const idx = p.oldIndex;
+    if (idx < 0 || idx >= outLines.length || idx >= origLines.length) continue;
+    const marked = outLines[idx]!;
+    if (!SUPERSEDED_PREFIX_RE.test(marked)) continue; // 该行未标（防御：pair 与实际不一致）
+    const oldRaw = origLines[idx]!;
+    const newIdx = p.newIndex;
+    const newRaw = newIdx >= 0 && newIdx < origLines.length ? origLines[newIdx]! : "";
+    const key = judgePairKey(file, p.anchor, oldRaw, newRaw);
+    if (approved.has(key)) {
+      kept += 1;
+      continue;
+    }
+    outLines[idx] = marked.replace(SUPERSEDED_PREFIX_RE, "");
+    reverted += 1;
+  }
+  return { content: outLines.join("\n"), kept, reverted };
 }
