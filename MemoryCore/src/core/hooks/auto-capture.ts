@@ -28,6 +28,7 @@ import {
   type SemanticGateMessage,
 } from "./capture-semantic-gate.js";
 import { redactError } from "../../utils/redact-secrets.js";
+import { createCredentialMasker } from "../../utils/credential-mask.js";
 
 import type { LLMRunner, Logger } from "../types.js";
 
@@ -182,6 +183,8 @@ export async function performAutoCapture(params: {
           afterTimestamp,
           originalUserMessageCount,
           storage,
+          // [origin#28] 写入侧凭据掩码：off/缺省=undefined（不接线·行为逐字节不变）
+          credentialMasker: createCredentialMasker(cfg.extraction?.captureCredentialMask, logger),
         });
 
         if (filteredMessages.length === 0) {

@@ -114,8 +114,14 @@ export async function recordConversation(params: {
   originalUserMessageCount?: number;
   /** StorageAdapter for file operations (COS/local). Falls back to fs when absent. */
   storage?: StorageAdapter;
+  /**
+   * [票 origin#28 写入侧凭据掩码] 写入前凭据掩码闭包（createCredentialMasker 产物）。
+   * undefined（off/缺省）=不接线、行为逐字节不变。掩码点在 sanitize 链尾——
+   * originalUserText 替换（Step 2）之后，JSONL 留痕/L0 行/L1 蒸馏源全下游统一干净。
+   */
+  credentialMasker?: (text: string) => string;
 }): Promise<ConversationMessage[]> {
-  const { sessionKey, sessionId, userId, agentId, rawMessages, baseDir, logger, originalUserText, afterTimestamp, originalUserMessageCount, storage } = params;
+  const { sessionKey, sessionId, userId, agentId, rawMessages, baseDir, logger, originalUserText, afterTimestamp, originalUserMessageCount, storage, credentialMasker } = params;
 
   // Step 1: Position slice + extract user/assistant messages.
   //
@@ -271,6 +277,10 @@ export async function recordConversation(params: {
       // Strip fenced code blocks from assistant replies to reduce embedding noise
       if (m.role === "assistant") {
         content = stripCodeBlocks(content);
+      }
+      // [origin#28] 写入侧凭据掩码（off/缺省=undefined 不接线；shadow 不改文只计量）
+      if (credentialMasker) {
+        content = credentialMasker(content);
       }
       return { id: m.id, role: m.role, content, timestamp: m.timestamp };
     })

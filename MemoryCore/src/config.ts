@@ -12,6 +12,7 @@
 // ============================
 
 import type { LlmLayersOverride } from "./adapters/standalone/llm-runner.js";
+import { parseCredentialMaskConfig, type CredentialMaskConfig } from "./utils/credential-mask.js";
 import { parseRecallRankingConfig } from "./core/scene/recall-ranking.js";
 import { parseL2ReadDedupConfig, type L2ReadDedupConfig } from "./utils/read-dedup.js";
 import {
@@ -134,6 +135,17 @@ export interface ExtractionConfig {
    * 畸形值 throw（parseSemanticGateConfig，对齐 recallRanking 拒绝先例）。
    */
   captureSemanticGate?: CaptureSemanticGateConfig;
+  /**
+   * [票 origin#28 写入侧凭据掩码] L0 写入前掩码 sk-/Bearer/自定义前缀形态凭据，
+   * 掩 JSONL 留痕/L0 行/L1 蒸馏源全下游（接线点 l0-recorder Step 3 sanitize 链）。
+   * **覆盖边界（审查 P1 留痕）**：仅 hook 链（auto-capture→recordConversation）；
+   * gateway /v2|/v3 conversation/add 直写路径（v2-router handleConversationAdd）
+   * 未接线，同缺陷类暴露面残留——后续票补齐。
+   * 缺省/false=off ⇒ 捕获路径零改动、行为逐字节同基线；shadow=不改文只计量
+   * （metric=capture_credential_mask_shadow）；on=真掩（on 切换留用户）。
+   * 畸形值 throw（parseCredentialMaskConfig，拒绝式先例）。
+   */
+  captureCredentialMask?: CredentialMaskConfig | false;
 }
 
 /** Persona (L2/L3) settings — controls scene extraction (L2) and user profile generation (L3). */
@@ -869,6 +881,7 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       userIdentityNames: strArray(extractionGroup, "userIdentityNames"),
       captureDedupGate: bool(extractionGroup, "captureDedupGate") ?? false,
       captureSemanticGate: parseSemanticGateConfig(extractionGroup.captureSemanticGate),
+      captureCredentialMask: parseCredentialMaskConfig(extractionGroup.captureCredentialMask),
       dedupRecallRerank: (() => {
         const raw = str(extractionGroup, "dedupRecallRerank");
         if (raw !== undefined && raw !== "none" && raw !== "lexical") {
