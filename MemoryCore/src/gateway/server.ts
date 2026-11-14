@@ -63,6 +63,7 @@ import { executeSeed } from "../core/seed/seed-runtime.js";
 import type { SeedProgress } from "../core/seed/types.js";
 import { handleV2Route, errorEnvelope, makeRequestId } from "./v2-router.js";
 import type { V2RouterDeps } from "./v2-router.js";
+import { createCredentialMasker } from "../utils/credential-mask.js";
 import { handleV3MetaRoute, V3_PREFIX } from "../metadata/router/v3-meta-router.js";
 import { handleV3TaskSourceRoute } from "../metadata/router/v3-task-source-router.js";
 import { handleV3SessionRoute, V3_SESSION_ADD_PATH } from "./v3-session-router.js";
@@ -1059,6 +1060,10 @@ export class TdaiGateway {
         getEmbedding: () => this.core.getEmbeddingService(),
         getStorage: () => this.core.getStorage(),
         deployMode: this.config.deployMode,
+        // [origin#33] 写入侧凭据掩码：与 hook 链（auto-capture→l0-recorder）同域同开关
+        // （memory.extraction.captureCredentialMask）。off/缺省=undefined 不接线、
+        // 行为逐字节不变；shadow 只计量；on 真掩（on 切换留用户）。
+        credentialMasker: createCredentialMasker(this.config.memory.extraction?.captureCredentialMask, this.logger),
         // Inject pipeline introspection deps for /v2/pipeline/status (standalone-only).
         // Both can be undefined in legacy standalone (no stateBackend configured) —
         // the handler returns 503 in that case.
