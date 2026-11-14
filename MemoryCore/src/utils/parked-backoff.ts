@@ -36,7 +36,7 @@ export function parseParkedBackoffConfig(raw: unknown): ParkedBackoffConfig | un
   const o = raw as Record<string, unknown>;
   const mode = o.mode;
   if (mode === "off") return undefined;
-  const n = o.maxRetries;
+  const n = o.maxRetries ?? PARKED_BACKOFF_DEFAULT_MAX_RETRIES;
   if (typeof n !== "number" || !Number.isInteger(n) || n < 1) {
     throw new Error(`maxParkedRetries.maxRetries 须为正整数: ${String(n)}`);
   }

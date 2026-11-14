@@ -871,11 +871,14 @@ export class PipelineWorker {
         const decision = parkedRetryDecision({ attempt: entry.attempt, cfg: this.config.maxParkedRetries });
         if (decision.action === "dead-letter") {
           this.removeParkedHead(scope, entry);
-          this.metrics.tasksParked = Math.max(0, this.metrics.tasksParked - 1);
           this.logger?.warn?.(
             `${TAG} parked retry limit reached [${entry.task.type}] (task=${entry.task.id}, attempts=${decision.attempt}) → dead letter`,
           );
-          void this.moveToDeadLetter(entry.task, `parked lock-conflict retry limit (${decision.attempt})`, decision.attempt);
+          void this.moveToDeadLetter(entry.task, `parked lock-conflict retry limit (${decision.attempt})`, decision.attempt).catch((err: unknown) => {
+            this.logger?.error?.(
+              `${TAG} parked dead-letter persistence failed (task=${entry.task.id}): ${err instanceof Error ? err.message : String(err)}`,
+            );
+          });
           return;
         }
         entry.nextRetryAt = Date.now() + this.getParkedRetryDelay(entry.attempt);

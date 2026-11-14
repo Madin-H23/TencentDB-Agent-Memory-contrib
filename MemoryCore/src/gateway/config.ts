@@ -134,6 +134,8 @@ export interface WorkerConfig {
   lockRetryConcurrency?: number;
   /** 锁冲突停车上限；未配置时由 PipelineWorker 按并发数计算。 */
   maxParkedTasks?: number;
+  /** [origin#27] parked 锁冲突重试上限：true=8（默认 off=无限重试）。 */
+  maxParkedRetries?: boolean | { maxRetries?: number; mode?: "off" | "on" };
 }
 
 export interface CosExtraConfig {
@@ -919,6 +921,7 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
     parkedClaimHeartbeatMs: envInt("WORKER_PARKED_HEARTBEAT_MS") ?? num(workerConfig, "parkedClaimHeartbeatMs"),
     lockRetryConcurrency: envInt("WORKER_LOCK_RETRY_CONCURRENCY") ?? num(workerConfig, "lockRetryConcurrency"),
     maxParkedTasks: envInt("WORKER_MAX_PARKED_TASKS") ?? num(workerConfig, "maxParkedTasks"),
+    maxParkedRetries: workerConfig.maxParkedRetries as boolean | { maxRetries?: number; mode?: "off" | "on" } | undefined,
   };
 
   // COS extra config

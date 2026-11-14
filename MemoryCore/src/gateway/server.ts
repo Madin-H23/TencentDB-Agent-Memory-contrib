@@ -2051,6 +2051,7 @@ export class TdaiGateway {
       parkedClaimHeartbeatMs: this.config.worker.parkedClaimHeartbeatMs,
       lockRetryConcurrency: this.config.worker.lockRetryConcurrency,
       maxParkedTasks: this.config.worker.maxParkedTasks,
+      maxParkedRetries: this.config.worker.maxParkedRetries,
       // L1 完成后推进 L2 timer（快路径：L1完成 → delay秒后触发L2）
       onL1Complete: statefulManager.advanceL2TimerAfterL1.bind(statefulManager),
       // L2 完成后设置 maxInterval 兜底 timer
