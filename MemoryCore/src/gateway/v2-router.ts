@@ -271,6 +271,17 @@ export interface V2RouterDeps {
   getMetadataService?: (instanceId: string) => Promise<import("../metadata/service/metadata-service.js").MetadataService>;
 
   /**
+   * [票 origin#33 写入侧凭据掩码] L0 直写路径落库前掩码闭包
+   * （createCredentialMasker 产物·server 装配处从 memory.extraction.captureCredentialMask 构造）。
+   * 覆盖：L0Record.messageText（→ 向量库 upsertL0/insertL0Batch、embedding 输入、
+   * standalone JSONL mirror 全下游统一干净）。
+   * undefined（off/缺省）=不接线、行为逐字节不变；shadow 闭包由 createCredentialMasker
+   * 保证返回原文只打 metric。与 origin#28 之③的 hook 链（auto-capture→l0-recorder）
+   * 同域同开关（extraction.captureCredentialMask）。
+   */
+  credentialMasker?: (text: string) => string;
+
+  /**
    * State backend handle, used by /v2/pipeline/status to call listQueuedTasks().
    * Wired in standalone and service modes, but the status endpoint itself is
    * standalone-only. The handler returns 404 in service mode before touching
@@ -742,7 +753,9 @@ async function handleConversationAdd(body: unknown, auth: V2AuthContext, request
       userId: iso?.userId,
       agentId: iso?.agentId,
       role: msg.role,
-      messageText: msg.content,
+      // [origin#33] 写入侧凭据掩码：off/缺省=undefined 不接线（原文逐字节不变）；
+      // on/shadow 语义由 createCredentialMasker 闭包保证（shadow 返回原文只计量）
+      messageText: deps.credentialMasker ? deps.credentialMasker(msg.content) : msg.content,
       recordedAt: new Date(recordedAtMs).toISOString(),
       timestamp: msg.timestamp ? new Date(msg.timestamp).getTime() : recordedAtMs,
     };

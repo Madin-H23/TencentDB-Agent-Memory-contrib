@@ -138,9 +138,9 @@ export interface ExtractionConfig {
   /**
    * [票 origin#28 写入侧凭据掩码] L0 写入前掩码 sk-/Bearer/自定义前缀形态凭据，
    * 掩 JSONL 留痕/L0 行/L1 蒸馏源全下游（接线点 l0-recorder Step 3 sanitize 链）。
-   * **覆盖边界（审查 P1 留痕）**：仅 hook 链（auto-capture→recordConversation）；
-   * gateway /v2|/v3 conversation/add 直写路径（v2-router handleConversationAdd）
-   * 未接线，同缺陷类暴露面残留——后续票补齐。
+   * **覆盖面**：hook 链（auto-capture→recordConversation）+ gateway /v2|/v3
+   * conversation/add 直写面（v2-router handleConversationAdd，origin#33 接线）
+   * 双面已全覆盖；skill 面 conversation-add 走归档 buffer 管线非 L0 直写面。
    * 缺省/false=off ⇒ 捕获路径零改动、行为逐字节同基线；shadow=不改文只计量
    * （metric=capture_credential_mask_shadow）；on=真掩（on 切换留用户）。
    * 畸形值 throw（parseCredentialMaskConfig，拒绝式先例）。
