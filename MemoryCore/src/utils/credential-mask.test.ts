@@ -41,6 +41,27 @@ describe("maskCredentials：内置模式（sk- / Bearer）", () => {
     expect(maskCredentials("bearer xxxxxxxxxxxxxxxx")).toBe("bearer ***masked***");
   });
 
+  it("OpenRouter 多段形态 sk-or-v1-<hex> → 掩码保留完整前缀（origin#34·形态实证·值系合成低熵）", () => {
+    const key = "sk-or-v1-" + "abcd1234".repeat(8);
+    expect(maskCredentials(`我的apikey:${key}`)).toBe("我的apikey:sk-or-v1-***masked***");
+  });
+
+  it("OpenRouter 形态边界：sk-or-v1- 后 19 位不命中", () => {
+    expect(maskCredentials("sk-or-v1-abc0123456789abcdef")).toBe("sk-or-v1-abc0123456789abcdef");
+  });
+
+  it("anysearch 下划线形态 as_sk_<hex> → 掩码保留前缀（origin#34·形态实证·值系合成低熵）", () => {
+    expect(maskCredentials("我申请了一个apikey：as_sk_" + "abcd1234".repeat(4))).toBe(
+      "我申请了一个apikey：as_sk_***masked***",
+    );
+  });
+
+  it("as_sk_ 形态边界：后 16 位为命中线（15 位不命中）；task_sk_ 词组命名不误伤", () => {
+    expect(maskCredentials("as_sk_abcdef012345678")).toBe("as_sk_abcdef012345678"); // 15 位不命中
+    expect(maskCredentials("as_sk_abcdef0123456789")).toBe("as_sk_***masked***"); // 恰 16 位命中
+    expect(maskCredentials("task_sk_abcdefgh012345")).toBe("task_sk_abcdefgh012345"); // 词组命名（前段是正常单词）
+  });
+
   it("Bearer <token> 形态 → 掩码（HTTP Authorization·fixture 用占位 x 串过凭据闸）", () => {
     expect(maskCredentials("hdr: Bearer xxxxxxxxxxxxxxxx")).toBe(
       "hdr: Bearer ***masked***",

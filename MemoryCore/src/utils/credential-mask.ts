@@ -61,6 +61,18 @@ export function maskCredentials(text: string, prefixes: readonly string[] = []):
     /(?<![A-Za-z0-9_-])(Bearer)\s+[A-Za-z0-9._~+/=-]{16,}/gi,
     "$1 ***masked***",
   );
+  // OpenRouter 多段形态（sk-or-v1-<64hex>·2026-08-27 实证）：SKa/SKb 首段位数
+  // 都接不住（or 仅 2 位），精确字面前缀零误伤（origin#34）。
+  out = out.replace(
+    /(?<![A-Za-z0-9_-])(sk-or-v1-)[A-Za-z0-9]{20,}/g,
+    "$1***masked***",
+  );
+  // anysearch 下划线形态（as_sk_<64hex>·2026-08-26 实证）：下划线连接不在
+  // sk-（连字符）系模式覆盖内，精确字面前缀（origin#34）。
+  out = out.replace(
+    /(?<![A-Za-z0-9_-])(as_sk_)[A-Za-z0-9]{16,}/g,
+    "$1***masked***",
+  );
   for (const prefix of prefixes) {
     const re = new RegExp(
       `(?<![A-Za-z0-9_-])(${escapeRegExp(prefix)})[A-Za-z0-9_-]{${CUSTOM_PREFIX_MIN_TOKEN},}`,
