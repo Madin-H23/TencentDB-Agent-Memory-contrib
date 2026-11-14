@@ -233,11 +233,10 @@ export interface PersonaConfig {
    */
   l1SmallBatchDefer?: L1SmallBatchDeferConfig;
   /**
-   * [候选-C 订正版·TICKETS-C-read-dedup-20261113] L2 scene-extract run 内 read
+   * [候选-C·TICKETS-C-read-dedup-20261113] L2 scene-extract run 内 read
    * 结果去重：同 run 内同 (storageKey,offset,limit,flags) 的重复读直接返回缓存
    * output（on 才生效；shadow 只打 metric=l2_read_dedup 计量）。
-   * 动机=实测单 task 24 次读/71% 全文重读率/run 峰值 147,955 破 80K 帽。
-   * 默认 undefined=off（schema 与行为逐字节不变）；true=shadow（影子先量）；
+   * 默认 undefined=off（yaml 不写=行为逐字节不变）；true=shadow（影子先量）；
    * 非法 throw（parseL2ReadDedupConfig，不静默回落）。
    */
   l2ReadDedup?: L2ReadDedupConfig;
