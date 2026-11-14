@@ -127,6 +127,12 @@ export interface LLMRunParams {
    * 缺省 off——off 时提示词/工具 schema/行为与基线逐字节一致。
    */
   sceneFormatV2?: boolean;
+  /**
+   * [候选-C·TICKETS-C-read-dedup-20261113] L2 run 内 read 结果去重（storage-tools）：
+   * off/undefined=零行为变化零 metric；shadow=只打 metric=l2_read_dedup；
+   * on=同参二次读返回缓存且不计 read-budget run 累计。只在 L2 传入。
+   */
+  l2ReadDedup?: import("../utils/read-dedup.js").L2ReadDedupConfig;
   /** Plugin instance ID for metric reporting (optional). */
   instanceId?: string;
   /**

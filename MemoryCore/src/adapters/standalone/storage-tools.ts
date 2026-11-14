@@ -18,6 +18,7 @@ import {
 import { readCacheMetrics, formatReadCacheNote } from "../../utils/read-cache-metrics.js";
 import { applyReadWindow } from "../../utils/read-window.js";
 import { checkSceneCharCap } from "../../utils/scene-char-cap.js";
+import { formatReadDedupNote, ReadDedupTracker, type L2ReadDedupConfig } from "../../utils/read-dedup.js";
 import {
   buildV2ReadView,
   isV2Format,
@@ -101,9 +102,18 @@ export function createStorageTools(
    * 与基线（含票⑥ on 形态）逐字节一致。
    */
   sceneFormatV2?: boolean,
+  /**
+   * [候选-C 订正版·TICKETS-C-read-dedup-20261113] run 内 read 结果去重配置。
+   * off/undefined=零行为变化零 metric；shadow=只打 metric=l2_read_dedup；
+   * on=同参二次读返回缓存 output 且不计 read-budget run 累计。
+   * 作用域 = 本 toolset 生命周期（与 ReadBudgetTracker 同），跨 run 归零。
+   */
+  l2ReadDedup?: L2ReadDedupConfig,
 ) {
   // S0 影子计量：一次 toolset = 一次 run，累计量随工具集生命周期归零。
   const readBudget = new ReadBudgetTracker();
+  // [候选-C] run 内 read 去重：同生命周期归零；write/edit 走 invalidate 失效。
+  const readDedup = l2ReadDedup ? new ReadDedupTracker() : undefined;
   // 方案C：帽作用域 = 非空前缀。空 prefix（L3 persona）→ 0（off）。
   const effectiveCharCap = prefix ? (sceneCharCap ?? 0) : 0;
   // 票⑥：失效语义作用域 = 非空前缀（同帽）。off 时 read/write/edit 全部走基线路径。
@@ -191,6 +201,17 @@ export function createStorageTools(
       execute: (async (args: { path: string; offset?: number; limit?: number; includeInvalidated?: boolean; includeArchive?: boolean }) => {
         const key = resolveStorageKey(prefix, args.path);
         if (!key) return JSON.stringify({ error: `Path "${args.path}" escapes workspace boundary.` });
+        const dedupArgs = { offset: args.offset, limit: args.limit, includeInvalidated: args.includeInvalidated, includeArchive: args.includeArchive };
+        // [候选-C on] 同参二次读：命中即返回缓存 output（与首次逐字节相同），
+        // 跳过 readFile 与 read-budget 计量（run 累计不增）。
+        if (readDedup && l2ReadDedup?.mode === "on") {
+          const cached = readDedup.get(key, dedupArgs);
+          if (cached !== undefined) {
+            const n = readDedup.note({ storageKey: key, output: cached, args: dedupArgs });
+            logger?.debug?.(`${TAG} ${formatReadDedupNote(n, args.path, cached.length, taskId)} (served from cache)`);
+            return cached;
+          }
+        }
         try {
           const content = await storage.readFile(key);
           if (content === null) {
@@ -223,6 +244,10 @@ export function createStorageTools(
           // read-budget 计量口径不变：observe 记实际返回的 chars（含截断标注行）。
           const obs = readBudget.observe(args.path, output.length);
           logger?.debug?.(`${TAG} ${formatReadBudgetObservation(obs, taskId)}`);
+          if (readDedup) {
+            const dn = readDedup.note({ storageKey: key, output, args: dedupArgs });
+            logger?.debug?.(`${TAG} ${formatReadDedupNote(dn, args.path, output.length, taskId)}`);
+          }
           if (obs.overFile || obs.crossedRunBudget) {
             logger?.warn?.(`${TAG} ${formatReadBudgetObservation(obs, taskId)} (shadow-only, no enforcement)`);
           }
@@ -290,6 +315,7 @@ export function createStorageTools(
         }
         try {
           await storage.writeFile(key, toPersist);
+          if (readDedup) readDedup.invalidate(key); // [候选-C] 写后失效同 key 全部窗口缓存
           logger?.debug?.(`${TAG} write: "${args.path}" → ${Buffer.byteLength(toPersist, "utf8")} bytes`);
           return JSON.stringify({ success: true });
         } catch (err) {
@@ -375,6 +401,7 @@ export function createStorageTools(
             if (delta > 0) logger?.info?.(`${TAG} metric=l2_supersede value=${delta} path=${args.path}`);
           }
           await storage.writeFile(key, toPersist);
+          if (readDedup) readDedup.invalidate(key); // [候选-C] 写后失效同 key 全部窗口缓存
           logger?.debug?.(
             `${TAG} edit: "${args.path}" → ${args.edits.length} replacement(s), ${Buffer.byteLength(toPersist, "utf8")} bytes`,
           );

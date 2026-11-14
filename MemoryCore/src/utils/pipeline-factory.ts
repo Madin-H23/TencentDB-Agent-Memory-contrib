@@ -1012,6 +1012,8 @@ export function createL2Runner(opts: {
         // 票⑤（exp/p1-5-scene-format-v2）：场景格式 v2 双层化（persona.sceneFormatV2，
         // 默认 off=行为与基线逐字节一致）。只在 L2 传入。
         sceneFormatV2: cfg.persona?.sceneFormatV2,
+        // [候选-C·TICKETS-C-read-dedup-20261113] run 内 read 去重（默认 off=逐字节不变）。只在 L2 传入。
+        l2ReadDedup: cfg.persona?.l2ReadDedup,
         // 票⑦（exp/p1-7-recall-ranking）：召回多信号排序（persona.recallRanking，
         // 默认 off=导航排序与基线逐字节一致）。只在 L2 传入。
         recallRanking: cfg.persona?.recallRanking,
