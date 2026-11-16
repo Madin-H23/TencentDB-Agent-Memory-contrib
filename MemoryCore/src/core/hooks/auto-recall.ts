@@ -540,6 +540,11 @@ async function searchMemories(
     return await searchHybrid(cleanText, pluginDataDir, maxResults, threshold, vectorStore!, embeddingService!, logger, embeddingCallOpts);
   } catch (err) {
     logger?.warn?.(`${TAG} Memory search failed (strategy=${effectiveStrategy}): ${err instanceof Error ? err.message : String(err)}`);
+    // [origin#36 第二分票] 通道异常降级可观测：静默空结果此前无 metric——巡检
+    // 无法区分「真无召回」与「通道异常降级」。零行为改动，只补计量行。
+    logger?.info?.(
+      `${TAG} metric=recall_channel_error strategy=${effectiveStrategy} value=1 err=${err instanceof Error ? err.message.slice(0, 120) : String(err).slice(0, 120)}`,
+    );
     if (vectorStore?.getCapabilities?.().nativeBm25Search) throw err;
     return emptyResult;
   }
