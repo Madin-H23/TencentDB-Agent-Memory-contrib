@@ -5,7 +5,7 @@
  * L1 runner, L2 runner, L3 runner, and persister wiring — keeping this
  * module focused on seed-specific concerns:
  * - Synchronous per-round L0 capture with progress reporting
- * - waitForL1Idle polling (L1 only — see FIXME below)
+ * - waitForL1Idle + waitForL2L3Idle polling (full L1+L2+L3 drain, origin#35)
  * - Ctrl+C graceful shutdown
  *
  * Full L1+L2+L3 idle wait before destroying the pipeline (origin#35): after
@@ -270,9 +270,10 @@ export async function waitForL2L3Idle(
 /**
  * Execute the seed pipeline: feed normalized input through L0 → L1.
  *
- * L2/L3 runners are wired but their completion is **not** awaited — see the
- * module-level FIXME.  The pipeline is destroyed after L1 idle, so L2/L3 may
- * be interrupted mid-run.
+ * L2/L3 completion is awaited with a bounded drain wait (waitForL2L3Idle,
+ * origin#35) after L1 idle — in-flight scene extraction / persona generation
+ * lands before destroy; a stuck queue warns and proceeds after maxWait
+ * (best effort rather than guaranteed complete).
  *
  * This is the core runtime called by `src/cli/commands/seed.ts` after
  * all input validation and user confirmation are complete.
