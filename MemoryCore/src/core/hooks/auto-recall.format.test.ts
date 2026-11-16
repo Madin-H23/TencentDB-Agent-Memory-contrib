@@ -54,17 +54,33 @@ describe("truncateRecallLine：码点安全截断（代理对不劈）", () => {
     expect(pure.length).toBe(50);
   });
 
-  it("代理对（非 BMP 字符）截断不劈码点——无 U+FFFD", () => {
+  it("代理对（非 BMP 字符）截断不劈码点——无 U+FFFD（审查 P2：精确断言钉实现）", () => {
     // 😀=U+1F600（2 UTF-16 码元·1 码点）；构造恰好劈中的长度
     const line = "a".repeat(49) + "😀" + "b".repeat(10);
     const out = truncateRecallLine(line, 50); // 码点 50 处恰在 😀 内
     expect(out.includes("\uFFFD")).toBe(false);
-    expect(Array.from(out).length).toBeLessThanOrEqual(50);
+    // 精确断言（审查 P2：naive UTF-16 slice 缺陷下 includes/长度断言同样过——
+    // 唯有精确值钉得住「码点安全」）：49 个 a + 😀（完整保住·b 全被截）
+    expect(out).toBe("a".repeat(49) + "😀");
+    // UTF-8 往返无替换字符（编码面双保险）
+    expect(Buffer.from(out, "utf-8").toString("utf-8")).not.toContain("\uFFFD");
   });
 
   it("maxChars ≤ 后缀长度 → 纯截断无后缀", () => {
     const out = truncateRecallLine("abcdef", 3);
     expect(out).toBe("abc");
+  });
+
+  it("SUFFIX 等值边界族：59/60/61（审查 P3-1·SUFFIX=60 UTF-16 码元）", () => {
+    // 60=后缀长等值 → 纯截断（≤ 分支）；61=后缀分支最小值
+    const line = "y".repeat(100);
+    const at59 = truncateRecallLine(line, 59);
+    const at60 = truncateRecallLine(line, 60);
+    const at61 = truncateRecallLine(line, 61);
+    expect(at59.includes("已截断")).toBe(false);
+    expect(at60.includes("已截断")).toBe(false);
+    expect(at61.includes("已截断")).toBe(true);
+    expect(at61.length).toBeLessThanOrEqual(61);
   });
 });
 
