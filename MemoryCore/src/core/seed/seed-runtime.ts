@@ -8,12 +8,11 @@
  * - waitForL1Idle polling (L1 only — see FIXME below)
  * - Ctrl+C graceful shutdown
  *
- * FIXME: Currently we only wait for L1 to become idle before destroying the
- * pipeline.  L2 (scene extraction) and L3 (persona generation) may still be
- * in-flight when `pipeline.destroy()` is called.  This is intentional for now
- * to avoid excessively long seed runs, but means seed output may not include
- * the latest L2/L3 artifacts.  Re-evaluate adding a full L1+L2+L3 idle wait
- * once pipeline-manager exposes reliable L2/L3 idle signals.
+ * Full L1+L2+L3 idle wait before destroying the pipeline (origin#35): after
+ * waitForL1Idle, waitForL2L3Idle polls the L2/L3 queues (idle signals exposed
+ * via pipeline-manager getQueueSizes) with a bounded maxWait — seed output now
+ * waits for in-flight scene extraction / persona generation to land, with a
+ * warn-and-proceed fallback so a stuck queue never hangs the run forever.
  */
 
 import path from "node:path";
@@ -197,6 +196,74 @@ async function waitForL1Idle(
 }
 
 // ============================
+// waitForL2L3Idle（origin#35）
+// ============================
+
+/**
+ * Poll pipeline queue status until **L2 and L3** are both fully drained
+ * (queues empty, nothing pending, idle). Called after waitForL1Idle so seed
+ * output includes the latest L2 (scene extraction) / L3 (persona) artifacts.
+ *
+ * Bounded: `maxWaitMs` (default 5 min) caps the wait — on expiry we warn and
+ * proceed ("best effort" rather than "guaranteed complete"), mirroring the
+ * waitForL1Idle fallback so a stuck queue can never hang a seed run forever.
+ * Exported for direct testing (fake scheduler injection).
+ */
+export async function waitForL2L3Idle(
+  scheduler: MemoryPipelineManager,
+  logger: PipelineLogger,
+  opts: {
+    pollIntervalMs?: number;
+    stableRounds?: number;
+    maxWaitMs?: number;
+  } = {},
+): Promise<void> {
+  const pollInterval = opts.pollIntervalMs ?? 1_000;
+  const stableRounds = opts.stableRounds ?? 3;
+  const maxWait = opts.maxWaitMs ?? 300_000; // 5 min default
+
+  const startTime = Date.now();
+  let consecutiveIdle = 0;
+
+  while (true) {
+    const elapsed = Date.now() - startTime;
+    if (elapsed > maxWait) {
+      const q = scheduler.getQueueSizes();
+      logger.warn(
+        `${TAG} [waitL2L3] Max wait time reached (${(maxWait / 1000).toFixed(0)}s), proceeding — ` +
+          `l2=${q.l2} l2Pending=${q.l2Pending} l3=${q.l3} l3Pending=${q.l3Pending}`,
+      );
+      break;
+    }
+
+    const queues = scheduler.getQueueSizes();
+    const drained =
+      queues.l2Idle &&
+      queues.l3Idle &&
+      queues.l2 === 0 &&
+      queues.l3 === 0 &&
+      !queues.l2Pending &&
+      !queues.l3Pending;
+
+    if (drained) {
+      consecutiveIdle++;
+      if (consecutiveIdle >= stableRounds) {
+        logger.debug?.(`${TAG} [waitL2L3] L2/L3 stable for ${stableRounds} consecutive polls`);
+        return;
+      }
+    } else {
+      consecutiveIdle = 0;
+      logger.debug?.(
+        `${TAG} [waitL2L3] Waiting: l2Queue=${queues.l2}, l2Pending=${queues.l2Pending}, l2Idle=${queues.l2Idle}, ` +
+          `l3Queue=${queues.l3}, l3Pending=${queues.l3Pending}, l3Idle=${queues.l3Idle}`,
+      );
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, pollInterval));
+  }
+}
+
+// ============================
 // Main execution function
 // ============================
 
@@ -361,6 +428,14 @@ export async function executeSeed(
       await waitForL1Idle(
         pipeline.scheduler,
         allKeys,
+        logger,
+        { pollIntervalMs: 1_000, stableRounds: 3, maxWaitMs: 300_000 },
+      );
+      // [origin#35] L2/L3 兜底等待：场景抽取/persona 生成在途任务落盘后再销毁——
+      // 有界（5 min）防卡死；到时 warn proceeding（尽力完成而非必然完整）。
+      logger.info(`${TAG} Final L2/L3 drain wait (bounded)...`);
+      await waitForL2L3Idle(
+        pipeline.scheduler,
         logger,
         { pollIntervalMs: 1_000, stableRounds: 3, maxWaitMs: 300_000 },
       );
