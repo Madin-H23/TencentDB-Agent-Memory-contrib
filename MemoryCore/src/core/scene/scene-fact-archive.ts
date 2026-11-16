@@ -7,12 +7,14 @@
  * 86% 压力主体=活跃（非 superseded）事实行堆积。提帽（300K→400K）只是买时间。
  *
  * 两段式（2026-11-17 拍板·用户授权以使用感受为主）：
- * - 段一：superseded 行归档——帽已排除它们（治帽无关）但 **buildV2ReadView 不过滤
- *   superseded 行**（只剥活动段）——被替代旧事实带着 [SUPERSEDED ...] 长前缀污染
- *   LLM 上下文；归档后默认读视图立即可感地去污染（纯收益零取舍）。
- * - 段二：冷活跃行归档（行内时间戳 age > ageDays·60d 默认）——治帽正解；取舍=
- *   场景召回缩窄（L1 检索/记忆搜索完全无损·archive 文件可 read 按需召回），
- *   走 shadow 先量候选规模再议 on（on 切换留用户）。
+ * - 段二（主菜）：冷活跃行归档（行内时间戳 age > ageDays·60d 默认）——治帽正解
+ *   （帽 86% 压力主体=活跃行堆积）；取舍=场景召回缩窄（L1 检索/记忆搜索完全
+ *   无损·archive 文件可 read 按需召回），走 shadow 先量候选规模再议 on（on
+ *   切换留用户）。
+ * - 段一（顺带）：superseded 行归档——帽已排除它们（治帽无关）；LLM 读路径
+ *   也已过滤（llm-runner/storage-tools 组合 filterSupersededLines·缺省剔除），
+ *   收益=纯体量卫生（物理文件瘦身·审计面 includeInvalidated 视图更干净），
+ *   零取舍随机制顺带。
  *
  * 硬设计（沿 C 案 scene-archive 先例）：
  * - 行级切片：只动 `## 事实` 段（精确 v2 头）内行；要点/META/活动段永不触碰
@@ -211,7 +213,9 @@ export function planFactSpill(
   let freed = 0;
   for (let k = cand.length - 1; k >= 0; k--) {
     const l = cand[k]!;
-    freed += l.text.length + 1; // +1 换行
+    // 审查 P3：末行候选无尾换行，不 +1（防 freedChars 口径虚高）
+    const isLastLine = l.startLine === lines.length - 1;
+    freed += l.text.length + (isLastLine ? 0 : 1);
     kept.splice(l.startLine, 1);
   }
   // 面包屑插活动段头后（防御：无活动段则不插）

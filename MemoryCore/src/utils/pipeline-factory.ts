@@ -1028,6 +1028,10 @@ export function createL2Runner(opts: {
         // （persona.sceneArchive，默认 undefined=off；true=shadow+ageDays10 只计量）。
         // 只在 L2 传入。
         sceneArchive: cfg.persona?.sceneArchive,
+        // 票 origin#31 两段式：事实段行级归档（persona.sceneFactArchive，默认
+        // undefined=off；true=shadow+ageDays60 只计量）。只在 L2 传入——假旋钮
+        // 防线：漏传=恒 off（#27 maxParkedRetries 未透传同款教训）。
+        sceneFactArchive: cfg.persona?.sceneFactArchive,
         // L2 场景抽取超时（2026-10-21）：此前工厂**不传** timeoutMs → 抽取器内部
         // 回落硬编码 300s（scene-extractor.ts `opts.timeoutMs ?? 300_000`）并以该
         // 值覆盖层配置 ⇒ yaml 的 llm.layers.l2.timeoutMs（600000）对场景抽取

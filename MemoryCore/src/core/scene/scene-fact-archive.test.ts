@@ -1,7 +1,7 @@
 // 票 origin#31（R4·v2 事实段治理两段式）：纯决策件+config 解析+extractor 接线测试。
-// 段一=事实段内 superseded 行归档（帽已排除它们【checkSceneCharCapWithSupersede】·
-//      但 read 视图【buildV2ReadView 只剥活动段】不过滤——归档后 LLM 上下文去污染·纯收益）
-// 段二=冷活跃行归档（行时间戳 age>ageDays·帽 86% 压力主体=活跃行堆积·治帽正解）
+// 段二（主菜）=冷活跃行归档（行时间戳 age>ageDays·帽 86% 压力主体=活跃行堆积·治帽正解）
+// 段一（顺带）=事实段内 superseded 行归档（帽已排除【checkSceneCharCapWithSupersede】·
+//      读工具面已过滤【filterSupersededLines】→收益=纯体量卫生零取舍）
 // 均行级（C 案是批次段级）；锚点守恒断言内建；shadow 只计量不写盘。
 import { describe, expect, it } from "vitest";
 import {
@@ -10,6 +10,7 @@ import {
   planFactSpill,
 } from "./scene-fact-archive.js";
 import { SceneExtractor } from "./scene-extractor.js";
+import { parseConfig } from "../../config.js";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -73,6 +74,22 @@ describe("parseSceneFactArchiveConfig：拒绝式解析", () => {
     expect(() => parseSceneFactArchiveConfig({ mode: "nope" })).toThrow();
     expect(() => parseSceneFactArchiveConfig({ ageDays: 0 })).toThrow();
     expect(() => parseSceneFactArchiveConfig({ protectScenes: "x" })).toThrow();
+  });
+
+  it("parseConfig 接线：yaml persona.sceneFactArchive 可达（审查 P1 假旋钮回归钉）", () => {
+    expect(parseConfig({}).persona.sceneFactArchive).toBeUndefined();
+    expect(parseConfig({ persona: { sceneFactArchive: true } }).persona.sceneFactArchive).toEqual({
+      enabled: true,
+      mode: "shadow",
+      ageDays: 60,
+      protectScenes: [],
+    });
+    expect(parseConfig({ persona: { sceneFactArchive: { mode: "on", ageDays: 30 } } }).persona.sceneFactArchive).toEqual({
+      enabled: true,
+      mode: "on",
+      ageDays: 30,
+      protectScenes: [],
+    });
   });
 });
 
@@ -271,6 +288,26 @@ describe("extractor 接线：factArchiveFile（origin#31）", () => {
       await runExtract(dir, { sceneFactArchive: { enabled: true, mode: "on", ageDays: 60, protectScenes: [] } });
       const arch2 = readFileSync(join(dir, "scene_blocks", "研究场景-archive.md"), "utf-8");
       expect(arch2).toBe(arch1); // 二跑零追加
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("on 崩溃恢复去重：archive 已有签名+main 原样 → main 摘净+archive 逐字节不变（审查 P2）", async () => {
+    const { dir, cleanup } = setupTmp();
+    try {
+      // 第一次 on：生成正常态（archive 含候选行·main 摘净）
+      await runExtract(dir, { sceneFactArchive: { enabled: true, mode: "on", ageDays: 60, protectScenes: [] } });
+      const archAfterFirst = readFileSync(join(dir, "scene_blocks", "研究场景-archive.md"), "utf-8");
+      // 模拟崩溃恢复半态：main 回滚为原 fixture（候选行回归）·archive 保留
+      writeFileSync(join(dir, "scene_blocks", "研究场景.md"), v2File(), "utf-8");
+      // 二跑：候选行签名命中 archive → 跳过追加但 main 照摘（不丢内容）
+      await runExtract(dir, { sceneFactArchive: { enabled: true, mode: "on", ageDays: 60, protectScenes: [] } });
+      const main = readFileSync(join(dir, "scene_blocks", "研究场景.md"), "utf-8");
+      expect(main).not.toContain("aaaa0001"); // 摘净
+      expect(main).not.toContain("bbbb0002");
+      const archAfterRecovery = readFileSync(join(dir, "scene_blocks", "研究场景-archive.md"), "utf-8");
+      expect(archAfterRecovery).toBe(archAfterFirst); // 逐字节不变（去重生效零重复追加）
     } finally {
       cleanup();
     }
