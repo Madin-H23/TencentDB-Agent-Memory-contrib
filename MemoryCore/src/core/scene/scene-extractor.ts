@@ -27,6 +27,7 @@ import type { SceneCompactionConfig } from "../scene/scene-compact.js";
 import { deterministicSupersede, type FactSupersedeConfig } from "./scene-supersede.js";
 import { filterSupersededByApproval, parseJudgeApprovalState } from "./fact-ops.js";
 import { planSceneSpill, type SceneArchiveConfig } from "./scene-archive.js";
+import { planFactSpill, type SceneFactArchiveConfig } from "./scene-fact-archive.js";
 import { checkAnchorPreservation, countSupersededChars } from "../../utils/supersede.js";
 import { generateSceneNavigation, stripSceneNavigation } from "../scene/scene-navigation.js";
 import type { ResolvedRecallRanking } from "../scene/recall-ranking.js";
@@ -155,6 +156,14 @@ export interface SceneExtractorOptions {
    * yaml `persona.sceneArchive` 控制；off 时 Phase 5 该分支零调用零 I/O。
    */
   sceneArchive?: SceneArchiveConfig;
+  /**
+   * [票 origin#31 两段式] 事实段行级归档（缺省 undefined=off）：事实段内 superseded
+   * 行（读工具面已过滤【filterSupersededLines】·纯体量卫生）+ 冷活跃行（行时间戳
+   * age>ageDays·帽 86% 压力主体=活跃行堆积【checkSceneCharCapWithSupersede 实证】·
+   * 治帽正解）摘到 `<scene>-archive.md`（行级·锚点全局守恒·L1 检索无损）。
+   * yaml `persona.sceneFactArchive` 控制；off 时 Phase 5 该分支零调用零 I/O。
+   */
+  sceneFactArchive?: SceneFactArchiveConfig;
   /** langfuse 上报身份四元组（team/user/agent/session）。传下来会填充 trace 顶级字段。 */
   traceContext?: TraceContext;
 }
@@ -234,6 +243,7 @@ export class SceneExtractor {
   private sceneCompaction: SceneCompactionConfig | undefined;
   private factSupersede: FactSupersedeConfig | undefined;
   private sceneArchive: SceneArchiveConfig | undefined;
+  private sceneFactArchive: SceneFactArchiveConfig | undefined;
   private traceContext: TraceContext | undefined;
 
   constructor(opts: SceneExtractorOptions) {
@@ -254,6 +264,7 @@ export class SceneExtractor {
     this.sceneCompaction = opts.sceneCompaction;
     this.factSupersede = opts.factSupersede;
     this.sceneArchive = opts.sceneArchive;
+    this.sceneFactArchive = opts.sceneFactArchive;
     this.traceContext = opts.traceContext;
 
     // Use injected LLMRunner if available, otherwise fall back to CleanContextRunner
@@ -529,6 +540,11 @@ export class SceneExtractor {
           // shadow=只打 metric 不落盘，on=写回）。off 时零调用、零 I/O。
           if (this.factSupersede) {
             await this.supersedeFactFile(file);
+          }
+          // [票 origin#31 两段式] 事实段行级归档（最后跑：读到 ⑥ 折叠后最新态——
+          // 新标 superseded 行一次 lag 后入档；shadow=只计量不写盘，on=摘行双写）。
+          if (this.sceneFactArchive?.enabled === true) {
+            await this.factArchiveFile(file);
           }
         }
         }
@@ -901,6 +917,78 @@ export class SceneExtractor {
     } catch (err) {
       this.logger?.warn(
         `${TAG} extract() factSupersede error (non-fatal, file kept as-is): ${file}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * [票 origin#31 两段式] 单文件事实段行级归档（Phase 5 内、supersedeFactFile 之后
+   * ——读到 ⑥ 折叠后最新态，新标行一次 lag 周期后入档）。
+   * shadow=只打 metric=l2_fact_archive 不写盘；on=摘行双写：archive 先行（行级签名
+   * fnv(行文本) 去重·防崩溃恢复重复追加）、main 后行；锚点守恒内建于 planFactSpill。
+   */
+  private async factArchiveFile(file: string): Promise<void> {
+    const cfg = this.sceneFactArchive;
+    if (!cfg) return; // off（parse 已把 enabled=false/mode=off 映射为 undefined）
+    try {
+      const sceneName = file.replace(/\.md$/, "");
+      let raw: string;
+      if (this.storage) {
+        const r = await this.storage.readFile(`${StoragePaths.sceneBlocksDir}${file}`);
+        if (!r) return;
+        raw = r;
+      } else {
+        const fs = await import("node:fs/promises");
+        const path = await import("node:path");
+        raw = await fs.default.readFile(path.default.join(this.dataDir, "scene_blocks", file), "utf-8");
+      }
+      const plan = planFactSpill(sceneName, raw, cfg, Date.now());
+      if (plan.lines.length === 0) return;
+      this.logger?.info?.(
+        `${TAG} metric=l2_fact_archive mode=${cfg.mode} file=${file} candidates=${plan.lines.length} superseded=${plan.supersededCount} cold=${plan.coldCount} freed=${plan.freedChars} conserved=${plan.anchorsConserved}`,
+      );
+      if (cfg.mode !== "on" || !plan.anchorsConserved) return;
+      const fs = await import("node:fs/promises");
+      const path = await import("node:path");
+      const archName = `${sceneName}-archive.md`;
+      // archive 先行：不存在则建（META archive:true）；存在则按行签名去重后追加
+      let archExisting = "";
+      if (this.storage) {
+        archExisting = (await this.storage.readFile(`${StoragePaths.sceneBlocksDir}${archName}`)) ?? "";
+      } else {
+        archExisting = await fs.default
+          .readFile(path.default.join(this.dataDir, "scene_blocks", archName), "utf-8")
+          .catch(() => "");
+      }
+      const existingSigs = new Set<string>();
+      for (const line of archExisting.split("\n")) {
+        if (line.trim() !== "") existingSigs.add(line.trimEnd());
+      }
+      const freshLines = plan.lines.filter((l) => !existingSigs.has(l.text.trimEnd()));
+      if (freshLines.length > 0) {
+        const appendText = freshLines.map((l) => l.text).join("\n") + "\n";
+        const merged =
+          archExisting.length === 0
+            ? buildArchiveFile(appendText)
+            : mergeArchiveFile(archExisting, appendText);
+        if (this.storage) {
+          await this.storage.writeFile(`${StoragePaths.sceneBlocksDir}${archName}`, merged);
+        } else {
+          await fs.default.writeFile(path.default.join(this.dataDir, "scene_blocks", archName), merged, "utf-8");
+        }
+      }
+      // main 后行
+      if (this.storage) {
+        await this.storage.writeFile(`${StoragePaths.sceneBlocksDir}${file}`, plan.mainAfter);
+      } else {
+        await fs.default.writeFile(path.default.join(this.dataDir, "scene_blocks", file), plan.mainAfter, "utf-8");
+      }
+      this.logger?.info?.(
+        `${TAG} metric=l2_fact_archive_spill file=${file} archived=${freshLines.length} freed=${plan.freedChars}`,
+      );
+    } catch (err) {
+      this.logger?.warn(
+        `${TAG} extract() factArchive error (non-fatal, file kept as-is): ${file}: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
