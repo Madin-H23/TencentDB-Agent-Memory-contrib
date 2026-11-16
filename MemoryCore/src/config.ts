@@ -32,6 +32,10 @@ import {
   type SceneArchiveConfig,
 } from "./core/scene/scene-archive.js";
 import {
+  parseSceneFactArchiveConfig,
+  type SceneFactArchiveConfig,
+} from "./core/scene/scene-fact-archive.js";
+import {
   parseSemanticGateConfig,
   type CaptureSemanticGateConfig,
 } from "./core/hooks/capture-semantic-gate.config.js";
@@ -234,6 +238,13 @@ export interface PersonaConfig {
    * 默认 undefined=off；true=shadow+10 天（影子先量）；非法 throw（不静默回落）。
    */
   sceneArchive?: SceneArchiveConfig;
+  /**
+   * [票 origin#31 两段式] 事实段行级归档：事实段内 superseded 行（读工具面已过滤·
+   * 纯体量卫生）+ 冷活跃行（行时间戳 age>ageDays·帽 86% 压力主体=活跃行堆积·
+   * 治帽正解）摘到 `<scene>-archive.md`（行级·锚点全局守恒·L1 检索无损）。
+   * 默认 undefined=off；true=shadow+60 天（影子先量）；非法 throw（不静默回落）。
+   */
+  sceneFactArchive?: SceneFactArchiveConfig;
   /**
    * [P2-A2 L1 小批空转攒批] L1 runner 组并行池前的门槛前置判据：本片全组
    * qualified 均 < minMessages 且 qualified 总 chars < minChars 且 age(切片最旧行)
@@ -914,6 +925,8 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       l1Archive: parseL1ArchiveConfig(personaGroup.l1Archive),
       // P2-A3 C 案：场景文件归档层，默认 undefined=off；true=shadow+10 天。
       sceneArchive: parseSceneArchiveConfig(personaGroup.sceneArchive),
+      // 票 origin#31（两段式）：事实段行级归档，默认 undefined=off（Phase 5 零 I/O）。
+      sceneFactArchive: parseSceneFactArchiveConfig(personaGroup.sceneFactArchive),
       // P2-A2：L1 小批空转攒批，默认 undefined=off；true=shadow+K5+chars200+30min。
       l1SmallBatchDefer: parseL1SmallBatchDeferConfig(personaGroup.l1SmallBatchDefer),
       l2ReadDedup: parseL2ReadDedupConfig(personaGroup.l2ReadDedup),
