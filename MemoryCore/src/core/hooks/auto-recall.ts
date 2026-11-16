@@ -817,7 +817,7 @@ async function searchHybrid(
  *   - [episodic] 用户今天加班到很晚。(活动时间: 2025-03-01)
  *   - [instruction] 用户要求回答时使用中文，保持简洁。
  */
-interface FormatableMemory {
+export interface FormatableMemory {
   type: string;
   content: string;
   scene_name?: string;
@@ -829,7 +829,7 @@ interface FormatableMemory {
   timestamp?: string;
 }
 
-function formatMemoryLine(m: FormatableMemory): string {
+export function formatMemoryLine(m: FormatableMemory): string {
   // 1. Type tag + optional scene name
   const tag = m.scene_name ? `${m.type}|${m.scene_name}` : m.type;
 
@@ -859,7 +859,7 @@ function formatMemoryLine(m: FormatableMemory): string {
   return line;
 }
 
-function applyRecallBudget(
+export function applyRecallBudget(
   lines: string[],
   recall: MemoryTdaiConfig["recall"],
   logger?: Logger,
@@ -925,12 +925,12 @@ function applyRecallBudget(
   return budgeted;
 }
 
-function normalizeBudgetLimit(value: number | undefined): number | undefined {
+export function normalizeBudgetLimit(value: number | undefined): number | undefined {
   if (value == null || !Number.isFinite(value) || value <= 0) return undefined;
   return Math.floor(value);
 }
 
-function truncateRecallLine(line: string, maxChars: number): string {
+export function truncateRecallLine(line: string, maxChars: number): string {
   // Count and slice by code point, not UTF-16 code unit, so a cut never lands
   // between the halves of a surrogate pair (which would corrupt a non-BMP
   // character to U+FFFD when the line is UTF-8 encoded for the request).
@@ -948,7 +948,7 @@ function truncateRecallLine(line: string, maxChars: number): string {
  * - Otherwise → show date + time (e.g. "2025-03-01 14:30")
  * - Returns undefined for empty/invalid inputs.
  */
-function formatTimestamp(ts: string | undefined): string | undefined {
+export function formatTimestamp(ts: string | undefined): string | undefined {
   if (!ts) return undefined;
   // Try to parse ISO format: "2025-03-01T14:30:00.000Z" or "2025-03-01"
   const match = ts.match(/^(\d{4}-\d{2}-\d{2})(?:T(\d{2}:\d{2})(?::\d{2})?)?/);
