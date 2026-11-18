@@ -37,15 +37,17 @@ afterEach(() => {
 });
 
 describe("loadGatewayConfig：运行态覆盖层（REQ-2026-001）", () => {
-  it("AC-02 覆盖字段取覆盖层、非覆盖字段仍取基线", () => {
+  it("AC-02 完整 llm 快照整段替换：覆盖层有的段用覆盖层、非覆盖段仍取基线", () => {
+    // 覆盖层保存完整 llm 快照（面板首启从基线复制后就地改），含 model/maxTokens。
     writeFileSync(join(tmp, "tdai-runtime-overrides.yaml"), [
       "llm:",
       "  model: overlay-model",
+      "  maxTokens: 200",
     ].join("\n"), "utf-8");
 
     const cfg = loadGatewayConfig();
-    expect(cfg.llm.model).toBe("overlay-model");       // 覆盖字段来自覆盖层
-    expect(cfg.llm.maxTokens).toBe(100);                // 同段未覆盖字段仍来自基线（递归合并保留）
+    expect(cfg.llm.model).toBe("overlay-model");       // llm 段来自覆盖层
+    expect(cfg.llm.maxTokens).toBe(200);                // 快照整段替换（基线 100 被覆盖）
     expect(cfg.server.port).toBe(8420);                 // 非覆盖段来自基线
     expect(cfg.worker.maxParkedRetries).toBe(true);
   });
@@ -61,23 +63,24 @@ describe("loadGatewayConfig：运行态覆盖层（REQ-2026-001）", () => {
     expect(cfg.llm.model).toBe("env-model");
   });
 
-  it("AC-02 嵌套段递归合并：覆盖层只给 llm.layers.l1，基线 l2/l3 保留（审查 P1-1）", () => {
-    // 基线补 layers.l2/l3（用第二个基线文件，避免污染 beforeEach 的 baseline）
+  it("AC-02 删除语义：覆盖层整段替换后基线旧 headers/层模型不残留（审查 P0-2 回归钉）", () => {
+    // 基线带旧厂商专项头 + 层模型（切厂商前状态）
     writeFileSync(baseline, [
       "server:", "  port: 8420",
       "llm:", "  model: baseline-model", "  maxTokens: 100",
-      "  layers:",
-      "    l2:", "      model: base-l2", "    l3:", "      model: base-l3",
+      "  headers:", "    x-old-session: OLD-SECRET",
+      "  layers:", "    l1:", "      model: old-l1",
     ].join("\n"), "utf-8");
+    // 覆盖层是切厂商后的完整 llm 快照：删掉了 headers、清掉了 layers
     writeFileSync(join(tmp, "tdai-runtime-overrides.yaml"), [
-      "llm:", "  layers:", "    l1:", "      model: overlay-l1",
+      "llm:", "  model: new-model", "  maxTokens: 200",
     ].join("\n"), "utf-8");
 
     const cfg = loadGatewayConfig();
-    const layers = (cfg.llm as unknown as { layers: Record<string, { model: string }> }).layers;
-    expect(layers.l1.model).toBe("overlay-l1");  // 覆盖层新增
-    expect(layers.l2.model).toBe("base-l2");      // 基线嵌套字段保留（浅合并会丢→红）
-    expect(layers.l3.model).toBe("base-l3");
+    const llm = cfg.llm as unknown as { headers?: Record<string, string>; layers?: Record<string, unknown> };
+    expect(llm.headers).toBeUndefined();  // 基线旧头被整段替换删除（递归合并会残留→红）
+    expect(llm.layers).toBeUndefined();   // 基线旧层模型被删除
+    expect(cfg.llm.model).toBe("new-model");
   });
 
   it("AC-04 坏覆盖层 fail-soft：记录错误 + 回落基线，不清空基线配置", () => {

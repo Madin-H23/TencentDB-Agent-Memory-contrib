@@ -1167,34 +1167,23 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
 // ============================
 
 /**
- * REQ-2026-001: 把运行态覆盖层递归合并进基线 fileConfig（原地修改）。
+ * REQ-2026-001: 把运行态覆盖层合并进基线 fileConfig（原地修改）。
  *
  * 路径优先级：env `TDAI_RUNTIME_OVERRIDES` > `<dataDir>/tdai-runtime-overrides.yaml`。
  * dataDir 用面板同款公式（~/.memory-tencentdb/memory-tdai，homedir 拼死），
  * 不走 resolveDefaultDataDir 的 legacy ~/memory-tdai 回退——否则面板写新路径、
- * 网关读 legacy 路径会静默错位（审查 P1-2）。MEMORY_TENCENTDB_ROOT 若被设值仍
- * 尊重（与面板可注入同款 env 对准）。
+ * 网关读 legacy 路径会静默错位。MEMORY_TENCENTDB_ROOT 若被设值仍尊重。
  *
- * 递归合并（纯对象递归、数组整体替换）：覆盖层给 llm.layers.l1 时基线 l2/l3
- * 保留（审查 P1-1），满足 AC-02 非覆盖字段来自基线 + SPEC 前置缺口2 全可写段。
+ * 合并语义 = **顶层段覆盖**（非递归）：覆盖层由面板写入时保存「完整 llm 段快照」
+ * （首启从基线复制），因此 llm 段整段替换基线即可正确表达删除——切厂商删掉旧
+ * headers/层模型时，快照里已无这些键，替换后生效配置不带旧值（否则残留旧
+ * x-opencode-session 会踩 400，见 yamlStore.ts:222-225 事故注释）。非覆盖段
+ * （worker 三键等）仍来自基线，自动继承基线变更——这正是覆盖层相对全量副本
+ * 的优势。递归合并无法实现删除语义（旧键会残留），故不采用。
  *
  * 失败策略（AC-04）：文件不存在=正常（空覆盖层）；解析损坏=记录错误并跳过，
  * 绝不改动 fileConfig 的基线内容。
  */
-function deepMergePlainObjects(base: Record<string, unknown>, overlay: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = { ...base };
-  for (const [key, value] of Object.entries(overlay)) {
-    if (key === "__proto__" || key === "constructor" || key === "prototype") continue; // 防御性：拒绝原型污染键
-    if (value && typeof value === "object" && !Array.isArray(value)
-        && base[key] && typeof base[key] === "object" && !Array.isArray(base[key])) {
-      out[key] = deepMergePlainObjects(base[key] as Record<string, unknown>, value as Record<string, unknown>);
-    } else {
-      out[key] = value; // 数组/标量整体替换；基线无此键则整段纳入
-    }
-  }
-  return out;
-}
-
 function applyRuntimeOverrides(fileConfig: Record<string, unknown>): void {
   const defaultDataDir = path.join(
     getEnv("MEMORY_TENCENTDB_ROOT") ?? path.join(getEnv("HOME") ?? getEnv("USERPROFILE") ?? "/tmp", ".memory-tencentdb"),
@@ -1225,13 +1214,14 @@ function applyRuntimeOverrides(fileConfig: Record<string, unknown>): void {
     return; // 独立 fail-soft：基线不动（AC-04）
   }
 
-  // 递归合并进基线：只动覆盖层出现的段，其余段原样保留。
-  // 注：deepMergePlainObjects 对纯对象递归、数组整体替换；顶层标量段（如 deployMode）
-  // 不在面板覆盖层写入范围（面板只写 llm/layers/persona 等嵌套段），故跳过标量顶层键。
+  // 顶层段覆盖：覆盖层保存完整 llm 段快照，整段替换；非覆盖段（worker 等）保留基线。
   for (const [key, value] of Object.entries(overlay)) {
-    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
-    const baseSection = obj(fileConfig, key);
-    fileConfig[key] = deepMergePlainObjects(baseSection, value as Record<string, unknown>);
+    if (key === "__proto__" || key === "constructor" || key === "prototype") continue;
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue; // 顶层标量不覆盖
+    // 空对象段（如首次骨架 llm: {}）视为「无有效覆盖」，跳过——否则整段替换成空
+    // 会让下游 model/baseUrl 回落默认值，破坏 AC-08「空覆盖层逐字节同基线」。
+    if (Object.keys(value as Record<string, unknown>).length === 0) continue;
+    fileConfig[key] = value;
   }
 }
 
