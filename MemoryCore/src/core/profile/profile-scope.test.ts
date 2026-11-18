@@ -158,16 +158,14 @@ describe("buildProfileStableId：作用域+类型+文件名的确定性行 id", 
     expect(buildProfileStableId("team:t|agent:a", "l2", "other.md")).not.toBe(base);
   });
 
-  it("\\u0000 分隔防三元组边界串味（a+bc ≠ ab+c）", () => {
-    const a = buildProfileStableId("x", "l2", "y\\u0000z");
-    const b = buildProfileStableId("x\\u0000y", "l2", "z");
-    // 用真实 NUL 字符构造碰撞尝试（JS 字符串里 \u0000 是单字符）
+  it("NUL 分隔防三元组边界串味——分隔符改成 | 会碰撞（审查 P2 变异敏感断言）", () => {
     const nul = String.fromCharCode(0);
     const c1 = buildProfileStableId("a" + nul + "b", "l2", "c");
     const c2 = buildProfileStableId("a", "l2", "b" + nul + "c");
     expect(c1).not.toBe(c2);
-    // 普通字符串版本也各自稳定（无转义污染）
-    expect(a).toMatch(/^profile:v1:/);
-    expect(b).toMatch(/^profile:v1:/);
+    // 关键：scope 本身含 '|'（本仓 team:t|agent:a 是常见形态）。若分隔符误用 '|'，
+    // 下面两组三元组会哈希成同一字符串 → 真碰撞。此断言对「分隔符≠NUL」变异敏感，
+    // 补上审查指出的缺口（旧 c1/c2 用例在 | 分隔下仍绿=弱断言）。
+    expect(buildProfileStableId("x|l2", "l2", "z")).not.toBe(buildProfileStableId("x", "l2", "l2|z"));
   });
 });
