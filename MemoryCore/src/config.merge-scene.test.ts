@@ -1,5 +1,5 @@
-// SPEC-E Stage 1：persona.mergeScene 配置解析。
-// 缺省/false=off（现有 L2 行为逐字节不变）；true=shadow+默认值；on 在 Stage 1
+// SPEC-E：persona.mergeScene 配置解析（Stage 1 基础字段 + Stage 2 candidatePairs）。
+// 缺省/false=off（现有 L2 行为逐字节不变）；true=shadow+默认值；on 在 Stage 1/2
 // 解析期显式拒绝；非法 mode/阈值/路径/禁入名单/cap 组合 → throw（不静默回落）。
 import { describe, expect, it } from "vitest";
 import { parseConfig } from "./config.js";
@@ -27,6 +27,7 @@ describe("parseConfig：persona.mergeScene 解析", () => {
         "技术研究-it-ops架构学习.md",
       ],
       maxPairsPerRound: 1,
+      candidatePairs: [],
     });
   });
 
@@ -49,6 +50,7 @@ describe("parseConfig：persona.mergeScene 解析", () => {
             journalDir: "meta/merge",
             headScenes: ["头部-甲.md"],
             maxPairsPerRound: 2,
+            candidatePairs: [{ a: "技术研究-a.md", b: "技术研究-b.md" }],
           },
         },
       }).persona.mergeScene,
@@ -62,6 +64,7 @@ describe("parseConfig：persona.mergeScene 解析", () => {
       journalDir: "meta/merge",
       headScenes: ["头部-甲.md"],
       maxPairsPerRound: 2,
+      candidatePairs: [{ a: "技术研究-a.md", b: "技术研究-b.md" }],
     });
   });
 
@@ -72,7 +75,7 @@ describe("parseConfig：persona.mergeScene 解析", () => {
     expect(cfg?.headScenes).toEqual(["技术研究-TDAI治理.md"]);
   });
 
-  it("mode=on 在 Stage 1 拒绝（fail-closed，不静默降级）", () => {
+  it("mode=on 在 Stage 1/2 拒绝（fail-closed，不静默降级）", () => {
     expect(() => parseConfig({ persona: { mergeScene: { mode: "on" } } })).toThrow(/mergeScene.*on/);
   });
 
@@ -117,5 +120,76 @@ describe("parseConfig：persona.mergeScene 解析", () => {
     expect(
       parseConfig({ persona: { sceneCharCap: 0, mergeScene: { mode: "off" } } }).persona.mergeScene?.mode,
     ).toBe("off");
+  });
+});
+
+describe("parseConfig：persona.mergeScene.candidatePairs", () => {
+  it("缺省为空数组，合法对按序透传", () => {
+    expect(parseConfig({ persona: { mergeScene: true } }).persona.mergeScene?.candidatePairs).toEqual([]);
+    const parsed = parseConfig({
+      persona: {
+        mergeScene: {
+          mode: "shadow",
+          candidatePairs: [
+            { a: "技术研究-a.md", b: "技术研究-b.md" },
+            { a: "技术研究-c.md", b: "技术研究-d.md" },
+          ],
+        },
+      },
+    }).persona.mergeScene!;
+    expect(parsed.candidatePairs).toEqual([
+      { a: "技术研究-a.md", b: "技术研究-b.md" },
+      { a: "技术研究-c.md", b: "技术研究-d.md" },
+    ]);
+  });
+
+  it("candidatePairs 含头部场景拒绝（白名单不得绕过禁入）", () => {
+    expect(() =>
+      parseConfig({
+        persona: {
+          mergeScene: {
+            mode: "shadow",
+            candidatePairs: [{ a: "技术研究-TDAI记忆系统治理与观测.md", b: "技术研究-x.md" }],
+          },
+        },
+      }).persona.mergeScene,
+    ).toThrow(/candidatePairs.*头部/);
+  });
+
+  it("最多 8 对；超过即拒绝", () => {
+    const pairs = Array.from({ length: 8 }, (_, i) => ({
+      a: "技术研究-a" + String(i) + ".md",
+      b: "技术研究-b" + String(i) + ".md",
+    }));
+    expect(
+      parseConfig({ persona: { mergeScene: { mode: "shadow", candidatePairs: pairs } } }).persona
+        .mergeScene?.candidatePairs,
+    ).toHaveLength(8);
+    expect(() =>
+      parseConfig({
+        persona: {
+          mergeScene: {
+            mode: "shadow",
+            candidatePairs: [...pairs, { a: "技术研究-x.md", b: "技术研究-y.md" }],
+          },
+        },
+      }),
+    ).toThrow(/candidatePairs/);
+  });
+
+  it("非法形状/路径/归档/自配对/重复对均拒绝", () => {
+    const withPairs = (candidatePairs: unknown): (() => unknown) => () =>
+      parseConfig({ persona: { mergeScene: { mode: "shadow", candidatePairs } } });
+    expect(withPairs("nope")).toThrow(/candidatePairs/);
+    expect(withPairs([{ a: "技术研究-a.md" }])).toThrow(/candidatePairs/);
+    expect(withPairs([{ a: "技术研究-a.md", b: "a/b.md" }])).toThrow(/candidatePairs/);
+    expect(withPairs([{ a: "技术研究-a-archive.md", b: "技术研究-b.md" }])).toThrow(/candidatePairs/);
+    expect(withPairs([{ a: "技术研究-a.md", b: "技术研究-a.md" }])).toThrow(/candidatePairs/);
+    expect(
+      withPairs([
+        { a: "技术研究-a.md", b: "技术研究-b.md" },
+        { a: "技术研究-b.md", b: "技术研究-a.md" },
+      ]),
+    ).toThrow(/candidatePairs/);
   });
 });

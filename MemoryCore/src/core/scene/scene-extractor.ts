@@ -28,6 +28,16 @@ import { deterministicSupersede, type FactSupersedeConfig } from "./scene-supers
 import { filterSupersededByApproval, parseJudgeApprovalState } from "./fact-ops.js";
 import { planSceneSpill, type SceneArchiveConfig } from "./scene-archive.js";
 import { planFactSpill, type SceneFactArchiveConfig } from "./scene-fact-archive.js";
+import {
+  MERGE_SCENE_SHADOW_BUDGET_MS,
+  countSharedMergeAnchors,
+  deriveMergeTargetName,
+  isMergeShadowCandidate,
+  mergeShadowPairChars,
+  planMerge,
+  selectMergeCandidate,
+} from "./scene-merge.js";
+import type { MergeSceneConfig, MergeShadowInput, MergeShadowSelection } from "./scene-merge.js";
 import { checkAnchorPreservation, countSupersededChars } from "../../utils/supersede.js";
 import { generateSceneNavigation, stripSceneNavigation } from "../scene/scene-navigation.js";
 import type { ResolvedRecallRanking } from "../scene/recall-ranking.js";
@@ -164,6 +174,13 @@ export interface SceneExtractorOptions {
    * yaml `persona.sceneFactArchive` 控制；off 时 Phase 5 该分支零调用零 I/O。
    */
   sceneFactArchive?: SceneFactArchiveConfig;
+  /**
+   * [N2/N3 场景确定性合并] Phase 4 成功后的 L2 shadow 钩子（缺省 undefined=off）：
+   * 按 candidatePairs 或共享锚点自动选一对活动场景，跑纯函数 planMerge 并输出
+   * `metric=l2_merge`。mode=shadow 只计量、零写；mode=on 属 Stage 3，解析期已拒绝。
+   * yaml `persona.mergeScene` 控制；off 时钩子零 I/O。
+   */
+  mergeScene?: MergeSceneConfig;
   /** langfuse 上报身份四元组（team/user/agent/session）。传下来会填充 trace 顶级字段。 */
   traceContext?: TraceContext;
 }
@@ -241,6 +258,7 @@ export class SceneExtractor {
   private factSupersede: FactSupersedeConfig | undefined;
   private sceneArchive: SceneArchiveConfig | undefined;
   private sceneFactArchive: SceneFactArchiveConfig | undefined;
+  private mergeScene: MergeSceneConfig | undefined;
   private traceContext: TraceContext | undefined;
 
   constructor(opts: SceneExtractorOptions) {
@@ -262,6 +280,7 @@ export class SceneExtractor {
     this.factSupersede = opts.factSupersede;
     this.sceneArchive = opts.sceneArchive;
     this.sceneFactArchive = opts.sceneFactArchive;
+    this.mergeScene = opts.mergeScene;
     this.traceContext = opts.traceContext;
 
     // Use injected LLMRunner if available, otherwise fall back to CleanContextRunner
@@ -273,6 +292,224 @@ export class SceneExtractor {
     });
 
     this.logger?.debug?.(`${TAG} Created: dataDir=${opts.dataDir}, model=${opts.model ?? "(default)"}, promptMode=${this.promptMode}, maxScenes=${this.maxScenes}, timeout=${this.timeoutMs}ms`);
+  }
+
+  /**
+   * Phase 4.5 场景合并 shadow 钩子（N2/N3，SPEC-E §4.13）。
+   *
+   * 只做：读目录事实 → 选对 → planMerge → 打一行 `metric=l2_merge`。
+   * 不做：executeMerge / 取锁 / 写 journal / sync index / 改文件 / GC。
+   * 整段受 MERGE_SCENE_SHADOW_BUDGET_MS 硬预算约束（读后/选对后/plan 后各查一次）；
+   * 超预算与异常只 warn，绝不影响 L2 抽取主流程。
+   */
+  private async runMergeShadowHook(): Promise<void> {
+    const config = this.mergeScene;
+    if (!config || config.mode !== "shadow") return;
+    const startMs = Date.now();
+    const elapsedMs = () => Date.now() - startMs;
+    try {
+      const sceneCharCap = this.sceneCharCap;
+      if (typeof sceneCharCap !== "number" || !Number.isFinite(sceneCharCap) || sceneCharCap <= 0) {
+        this.logMergeShadowMetric({ result: "rejected", code: "scene_char_cap_unset", elapsedMs: elapsedMs() });
+        return;
+      }
+      const inputs = await this.readMergeShadowInputs();
+      if (this.shadowBudgetExceeded(startMs, { scanned: inputs.length })) return;
+      const pick = this.pickMergeShadowPair(inputs, config);
+      if (this.shadowBudgetExceeded(startMs, { scanned: inputs.length })) return;
+      if (pick.kind === "unavailable") {
+        this.logMergeShadowMetric({ result: "rejected", code: "candidate_unavailable", scanned: inputs.length, elapsedMs: elapsedMs() });
+        return;
+      }
+      const selection: MergeShadowSelection | null = pick.selection;
+      if (selection === null) {
+        this.logMergeShadowMetric({ result: "skipped", code: "no_candidate", scanned: inputs.length, elapsedMs: elapsedMs() });
+        return;
+      }
+      const a = selection.a;
+      const b = selection.b;
+      const target = deriveMergeTargetName(a.filename, b.filename);
+      const planned = planMerge(a, b, {
+        config,
+        now: new Date().toISOString(),
+        target,
+        sceneCharCap,
+        existingSceneNames: inputs.map((input) => input.filename),
+      });
+      const pair = `${a.filename} + ${b.filename}`;
+      if (this.shadowBudgetExceeded(startMs, {
+        pair,
+        charsA: a.raw.length,
+        charsB: b.raw.length,
+        sharedAnchors: selection.sharedAnchors,
+      })) {
+        return;
+      }
+      if (!planned.ok) {
+        const rejection = planned.rejection;
+        const severe = rejection.code === "anchor_mismatch" || rejection.code === "body_mismatch";
+        this.logMergeShadowMetric({
+          result: "rejected",
+          code: rejection.code,
+          pair,
+          charsA: a.raw.length,
+          charsB: b.raw.length,
+          sharedAnchors: selection.sharedAnchors,
+          elapsedMs: elapsedMs(),
+          level: severe ? "warn" : "info",
+        });
+        return;
+      }
+      const plan = planned.plan;
+      this.logMergeShadowMetric({
+        result: "planned",
+        key: plan.key.slice(0, 12),
+        pair,
+        target: plan.target,
+        charsA: plan.metrics.charsA,
+        charsB: plan.metrics.charsB,
+        charsC: plan.metrics.charsC,
+        anchorsIn: plan.metrics.anchorsIn,
+        anchorsOut: plan.metrics.anchorsOut,
+        readViewChars: plan.metrics.readViewChars,
+        sharedAnchors: selection.sharedAnchors,
+        elapsedMs: elapsedMs(),
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      try {
+        this.logMergeShadowMetric({ result: "error", message, elapsedMs: elapsedMs(), level: "warn" });
+      } catch {
+        // logger 自身故障也不得影响 L2 抽取主流程。
+      }
+    }
+  }
+
+  /** 硬预算：超 MERGE_SCENE_SHADOW_BUDGET_MS 打 skipped/warn 并返回 true（不抛给 L2）。 */
+  private shadowBudgetExceeded(
+    startMs: number,
+    fields: { scanned?: number; pair?: string; charsA?: number; charsB?: number; sharedAnchors?: number },
+  ): boolean {
+    const elapsed = Date.now() - startMs;
+    if (elapsed <= MERGE_SCENE_SHADOW_BUDGET_MS) return false;
+    this.logMergeShadowMetric({ result: "skipped", code: "budget_exceeded", ...fields, elapsedMs: elapsed, level: "warn" });
+    return true;
+  }
+
+  /**
+   * 选对：candidatePairs 非空时按配置序取第一对"两文件均存在且通过统一过滤口径"者；
+   * 无一可用 → candidate_unavailable（不回退自动选择，SPEC-E §4.13）；
+   * 否则走共享锚点自动选对。
+   */
+  private pickMergeShadowPair(
+    inputs: readonly MergeShadowInput[],
+    config: MergeSceneConfig,
+  ):
+    | { kind: "configured"; selection: MergeShadowSelection }
+    | { kind: "auto"; selection: MergeShadowSelection | null }
+    | { kind: "unavailable" } {
+    const pairs = config.candidatePairs;
+    if (pairs.length > 0) {
+      const byName = new Map<string, MergeShadowInput>();
+      for (const input of inputs) byName.set(input.filename, input);
+      for (const pair of pairs) {
+        const a = byName.get(pair.a);
+        const b = byName.get(pair.b);
+        if (!a || !b) continue;
+        if (!isMergeShadowCandidate(a.filename, a.raw, config.headScenes)) continue;
+        if (!isMergeShadowCandidate(b.filename, b.raw, config.headScenes)) continue;
+        return {
+          kind: "configured",
+          selection: { a, b, sharedAnchors: countSharedMergeAnchors(a, b), pairChars: mergeShadowPairChars(a, b) },
+        };
+      }
+      return { kind: "unavailable" };
+    }
+    return {
+      kind: "auto",
+      selection: selectMergeCandidate(inputs, {
+        headScenes: config.headScenes,
+        pairCharLimit: config.pairCharLimit,
+      }),
+    };
+  }
+
+  /** 读取目录事实（全部 .md，含归档；过滤交给选对器）。只读，单文件失败 fail-soft。 */
+  private async readMergeShadowInputs(): Promise<MergeShadowInput[]> {
+    const names: string[] = [];
+    const inputs: MergeShadowInput[] = [];
+    if (this.storage) {
+      names.push(...(await this.storage.readdirNames(StoragePaths.sceneBlocksDir, ".md")));
+      names.sort();
+      for (const name of names) {
+        try {
+          const raw = await this.storage.readFile(`${StoragePaths.sceneBlocksDir}${name}`);
+          if (typeof raw === "string") inputs.push({ filename: name, raw });
+        } catch {
+          // 单文件读取失败不阻断选对：跳过该文件，等下一轮快照。
+        }
+      }
+      return inputs;
+    }
+    const fs = await import("node:fs/promises");
+    const path = await import("node:path");
+    const sceneBlocksDir = path.default.join(this.dataDir, "scene_blocks");
+    try {
+      names.push(...(await fs.default.readdir(sceneBlocksDir)).filter((name: string) => name.endsWith(".md")));
+    } catch (err) {
+      if ((err as { code?: string }).code === "ENOENT") return [];
+      throw err;
+    }
+    names.sort();
+    for (const name of names) {
+      try {
+        const raw = await fs.default.readFile(path.default.join(sceneBlocksDir, name), "utf-8");
+        inputs.push({ filename: name, raw });
+      } catch {
+        // 同上：读取失败跳过该文件。
+      }
+    }
+    return inputs;
+  }
+
+  /** Stage 2 观测：单行 metric=l2_merge；只打规模/计数，不输出正文、summary 或锚点列表。 */
+  private logMergeShadowMetric(fields: {
+    result: "planned" | "rejected" | "skipped" | "error";
+    code?: string;
+    key?: string;
+    pair?: string;
+    target?: string;
+    charsA?: number;
+    charsB?: number;
+    charsC?: number;
+    anchorsIn?: number;
+    anchorsOut?: number;
+    readViewChars?: number;
+    sharedAnchors?: number;
+    scanned?: number;
+    message?: string;
+    elapsedMs: number;
+    level?: "info" | "warn";
+  }): void {
+    const mode = this.mergeScene?.mode ?? "off";
+    const parts = ["metric=l2_merge", `mode=${mode}`, `result=${fields.result}`];
+    if (fields.code) parts.push(`code=${fields.code}`);
+    if (fields.key) parts.push(`key=${fields.key}`);
+    if (fields.pair) parts.push(`pair=${fields.pair}`);
+    if (fields.target) parts.push(`target=${fields.target}`);
+    if (typeof fields.charsA === "number") parts.push(`charsA=${fields.charsA}`);
+    if (typeof fields.charsB === "number") parts.push(`charsB=${fields.charsB}`);
+    if (typeof fields.charsC === "number") parts.push(`charsC=${fields.charsC}`);
+    if (typeof fields.anchorsIn === "number") parts.push(`anchorsIn=${fields.anchorsIn}`);
+    if (typeof fields.anchorsOut === "number") parts.push(`anchorsOut=${fields.anchorsOut}`);
+    if (typeof fields.readViewChars === "number") parts.push(`readViewChars=${fields.readViewChars}`);
+    if (typeof fields.sharedAnchors === "number") parts.push(`sharedAnchors=${fields.sharedAnchors}`);
+    if (typeof fields.scanned === "number") parts.push(`scanned=${fields.scanned}`);
+    if (fields.message) parts.push(`message=${JSON.stringify(fields.message)}`);
+    parts.push(`elapsedMs=${fields.elapsedMs}`);
+    const line = `${TAG} ${parts.join(" ")}`;
+    if (fields.level === "warn") this.logger?.warn(line);
+    else this.logger?.info(line);
   }
 
   /**
@@ -462,6 +699,17 @@ export class SceneExtractor {
       }
 
       return { memoriesProcessed: 0, success: false, error: errMsg };
+    }
+
+    // Phase 4.5: 场景合并 shadow 钩子（N2/N3）——Phase 4 成功后只读选对 + planMerge，
+    // 输出 metric=l2_merge；零写、无锁、无 journal，任何异常 fail-soft。
+    try {
+      await this.runMergeShadowHook();
+    } catch (err) {
+      // 双保险：钩子内部已 catch；此处只兜 logger 等极端故障，绝不影响 L2 返回。
+      this.logger?.warn(
+        `${TAG} mergeScene shadow hook failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
 
     // Phase 5: Subsequent processing — safe cleanup of soft-deleted files

@@ -1,6 +1,6 @@
 # SPEC-E：确定性 mergeScene（场景合并内核，默认 off）
 
-- 状态：Stage 1 已实现并完成三闸（双代理代码审 / 影子门禁 / kill -9 / 变异），已本地提交（未 push）；Stage 2/3 未开始｜日期：2026-11-19｜作者：DSH lead
+- 状态：Stage 1 已本地提交（amend 后实际 HEAD `e70b170`，未 push）并完成三闸（双代理代码审 / 影子门禁 / kill -9 / 变异）；Stage 2 shadow 钩子（S01–S03）已实现，S04 门禁 PASS，S05 双审 P1/P2 修复已落地并复跑门禁全绿（A–G，138 files / 1637 tests），已随本文件本地提交（未 push）；Stage 3 未开始｜日期：2026-11-20｜作者：DSH lead
 - 依据：`reviews/merge-tool-spec-draft-20261119.md`、`reviews/merge-tool-risk-20261119.md`、v3-wt HEAD `87b7567` 只读源码、2026-11-19 18:2x 现场只读实测。
 - 范围：Stage 1（纯内核 + 影子 CLI，默认 off、零生产写）。N2 橙档自动触发、D4 CREATE 硬闸、头部四场景、N3′ 归档召回均不在本文范围。
 - 证据标记：【已核】本会话直接读源码/文件；【实测】2026-11-19 现场只读扫描；【设计】待实现。
@@ -18,7 +18,7 @@
 1. **纯规划器 `planMerge`**：读入 A/B 的原始文本与 META，重排输入顺序，按 v2 三段做正文**全文拼接**（仅重复 v2 标题行归一化，见 §4.3），重算 META，执行锚点多重集/正文行多重集/字符帽三类断言，返回 `MergePlan`（含 C 全文、幂等键、指标）或结构化拒绝。零 fs、零 LLM、零网络。
 2. **事务执行器 `executeMerge`**：先写 journal + A/B preimage，再写 C、回读校验、标记 A/B `[DELETED]`，每阶段落 journal；启动/每次合并前/每轮 Phase4 后执行恢复扫描。跨进程文件锁保护，幂等键保证重跑不产生第二个 C。
 
-Stage 1 只交付这两层 + 影子 CLI；`persona.mergeScene.mode` 默认 `off`，不接 L2 提示词、不接橙档触发、不碰生产 `scene_blocks`。Stage 2 在临时目录真跑影子门禁；Stage 3 才考虑 Phase4 后/Phase5 前钩子与限定域 on，均需另行批准。
+Stage 1 只交付这两层 + 影子 CLI；`persona.mergeScene.mode` 默认 `off`，不接 L2 提示词、不接橙档触发、不碰生产 `scene_blocks`。Stage 2 在 Phase4 后/Phase5 前接 L2 钩子（只 shadow：选对 + plan + metric，零写）；Stage 3 才做 `mode=on` 限定域执行（用户已口头批准，以门禁通过为前提）。
 
 ## 3. User Stories
 
@@ -48,6 +48,7 @@ Stage 1 只交付这两层 + 影子 CLI；`persona.mergeScene.mode` 默认 `off`
 - 双保险硬拒：文件名 `-archive.md` 结尾，或 META `archive:true`，或内容为 `[DELETED]`，或文件不存在/为空/非 v2 布局（三标题首次序缺失）。
 - 顺序规范化：按 `(created asc, filename asc)` 重排为 A≺B；拼接顺序、`[DELETED]` 顺序、幂等键一律以规范序为准。换序调用必须得到逐字相同的 C 与相同 key。
 - `target`：Stage 1/2 由 CLI 或调用方指定；Stage 3 才自动派生。C 名必须经 `filename-normalizer.ts` 的 `normalizeSceneFilename` 同源校验：只允许单段 `.md` 文件名，禁路径分隔符/绝对路径/`..`/Windows 保留名/非法字符/尾点空格/超长；不得以 `-archive.md` 结尾，不得等于 A/B，不得与现有活动或归档文件同名（同名且 journal 无本 key → `MERGE_SKIPPED(target_exists)`）。
+- Stage 2 的调用方是 L2 钩子：它用 `deriveMergeTargetName(A,B)` 生成**仅用于 plan 校验的占位 target**，不写盘、不取锁、不构成 Stage 3 命名承诺（见 §4.13）。
 
 ### 4.3 C 的拼装（全文，不投影）
 
@@ -91,7 +92,7 @@ Stage 1 只交付这两层 + 影子 CLI；`persona.mergeScene.mode` 默认 `off`
 
 - `<dataDir>/.metadata/merge.lock`：本地 fs 的 `O_EXCL` 创建（`StorageAdapter` 无此原语）；内容 `{owner,pid,host,ts,ttlMs,key}`；TTL 300,000ms、心跳 30,000ms；已存在时等待 5,000ms，仍失败 → `MERGE_SKIPPED(lock_busy)`。仅 `stateBackend=local`（tdai-gateway.yaml:14）前提成立；非 local/多网关共享后端不承诺互斥。
 - 过期锁可接管；接管前重读一次锁内容，避免双接管。Windows 的 pid 复用/权限行为未取证：不把「pid 不存在」作为唯一接管依据，优先按 TTL+最后心跳判断，接管仍须 CAS+owner token。
-- 锁序：Phase4 从 `scene-extractor.ts:410` 开始；:359-377 是 Phase4 前的 LLM 内存快照、不持锁。Stage 3 钩子位于 Phase4 后/Phase5 前，此时 L2 已持 profile checkpoint 锁（yaml:252 注释）；merge 锁是**叶子锁**，持锁期间不得再取 checkpoint 锁，恢复扫描也不取 checkpoint 锁，避免锁序反转。
+- 锁序：Phase4 从 `scene-extractor.ts:410` 开始；:359-377 是 Phase4 前的 LLM 内存快照、不持锁。Stage 3 钩子位于 Phase4 后/Phase5 前，此时 L2 运行在 worker 的 profile 串行作用域内（`pipeline-worker.ts:577`），**并不持有 checkpoint 锁**（`checkpoint.ts:518-525` 仅备份/清理，无锁）；merge 锁是**叶子锁**，持锁期间不得再取 worker 作用域锁/checkpoint 锁，恢复扫描同样不取，避免锁序反转。Phase5 与工具 edit 的排他域由 Stage 3 执行路径与门禁保证。
 - 恢复扫描必须持 merge 锁执行；两进程同时恢复同一 journal 只允许一个生效。
 - 接管必须用 `rename`/CAS + owner token；释放前校验 token，不得 unlink 别人的锁。
 - Stage 3 排他域：Phase4 后至 Phase5 前不得有另一轮 Phase5 或工具 edit 同时写 A/B；否则 merge 锁保护不了，必须让 Phase5 取同一锁或串行化轮次。
@@ -102,7 +103,7 @@ Stage 1 只交付这两层 + 影子 CLI；`persona.mergeScene.mode` 默认 `off`
 - `key = sha256("merge-v1|" + sortedNames + "|" + sha256(A) + "|" + sha256(B) + "|" + concatOrder)`；换序调用 key 不变；**key 不含 target**（target 由调用方指定，但同对输入换 target 不得产生第二个 C），target 存入 journal 供审计。
 - `stage=done` 且 journal 记录的 target 存在且 sha256 匹配 → `MERGE_SKIPPED_IDEMPOTENT`（调用方换 target 也返回 skip，不得产生第二个 C），零写入。
 - `stage∈{prepared,c_persisted,a_deleted}` → 先跑恢复扫描再返回；`failed/rolled_back` 允许同 key 重试（attempts+1，C 若已存在先校验 sha256）。
-- journal 保留最近 200 条或 90 天（先到为准）；failed 保留至解决；GC 只删 journal/preimage，不删 C。**Stage 1 不实现自动 GC**：工具默认 off，journal 只由显式 CLI 在隔离 dataDir 产生；GC 与 Stage 2 钩子同票实现。
+- journal 保留最近 200 条或 90 天（先到为准）；failed 保留至解决；GC 只删 journal/preimage，不删 C。**Stage 1/2 不实现自动 GC**：Stage 1 工具默认 off，journal 只由显式 CLI 在隔离 dataDir 产生；Stage 2 shadow 钩子零写，不调用 GC。`gcMergeJournals`（200 条/90 天、failed 永不删）已随 S01 实现，由 Stage 3 执行路径或 CLI maintenance 在持 merge 锁时调用，不在本轮接入。
 
 ### 4.9 配置（Stage 1 新增，默认关闭）
 
@@ -125,11 +126,11 @@ Stage 1 只交付这两层 + 影子 CLI；`persona.mergeScene.mode` 默认 `off`
 
 ### 4.11 观测
 
-Stage 1 无 logger seam：观测以 `plan.metrics`、`executeMerge`/`recoverMergeJournal` 返回值与 CLI 单行 JSON 交付。以下网关侧 metric/ALERT 属 Stage 2 钩子接入时实现：
+Stage 1 以 `plan.metrics`、`executeMerge`/`recoverMergeJournal` 返回值与 CLI 单行 JSON 交付；Stage 2 已有 logger seam，钩子 metric 见 §4.13，字段为实现子集（不再承诺 `anchorLost`/`linesConserved`/`capRatio`——守恒断言已由 `planMerge` 直接拒绝）：
 
-- `metric=l2_merge`：mode/pair/key/charsA/charsB/charsC/capRatio/anchorsIn/anchorsOut/anchorLost(=0)/linesConserved/duplicateAnchorIds/elapsedMs/stage/result。
+- `metric=l2_merge`（Stage 2 已实现）：mode/result(planned|rejected|skipped|error)/code/key(前 12 位)/pair/target/charsA/charsB/charsC/anchorsIn/anchorsOut/readViewChars/sharedAnchors/scanned/elapsedMs；禁正文/summary/锚点 id 列表。超预算与异常一律 warn。
 - `metric=l2_merge_lock`：waitMs/acquired/staleReclaimed/LOCK_BUSY。
-- 每次 run 结束对活动场景做锚点多重集 diff；`anchorLost>0` 立即 ALERT 并停用工具。
+- 锚点全局 diff/ALERT 推迟到 Stage 3：Phase 5 的合法删场景与 `preExtractSnapshots`（Phase 4 前按 index 的内存快照）口径冲突会稳定误报；Stage 2 shadow 只对单次 planned A/B 做正文锚点守恒（复用 `planMerge` 已有断言），不实现全局 diff、不停用工具。
 - journal stage 迁移逐条落日志；`MERGE_RECOVERED` 计数。
 
 ### 4.12 回滚
@@ -137,6 +138,23 @@ Stage 1 无 logger seam：观测以 `plan.metrics`、`executeMerge`/`recoverMerg
 - 关闭：`mode=off` + 重启 → 钩子不再进入；已合并 C 不回滚（内容合法、守恒）。
 - journal 回放：由 `recoverMergeJournal` 等价提供（未提交事务回到 3 场景或补完到 2 场景，preimage 恢复 A/B）；Stage 1 不提供独立 `--rollback` CLI flag；已完成合并的 C 不回滚（首条）。
 - 外部全量快照优先（`scene_blocks` + `scene_index.json` + checkpoint + persona.md + SHA256SUMS），仓库内 `.backup` 只有 10 轮/108 分钟且不恢复，不能当唯一回滚件。
+
+### 4.13 Stage 2：L2 钩子（shadow）
+
+- 位置：`scene-extractor.ts` `extract()` Phase 4 成功之后、Phase 5 之前（约 :466）。**fail-soft**：钩子任何异常只 `logger.warn`，不得影响 L2 抽取结果/返回码。
+- 启用：仅 `persona.mergeScene.mode === "shadow"` 时进入；`off` 零调用零 I/O；`on` 仍在解析期拒绝（Stage 3 才允许）。钩子不读提示词、不注入工具，自治靠代码。
+- 输入：以 `scene_blocks` 目录事实为准，跳过 `-archive.md`、META `archive:true`、`[DELETED]`/空、非 v2 布局文件。不信任 `scene_index` sidecar（可能 stale/含软删）。读取必须与 Phase 5 同款双模式：有 `this.storage` 时用 `storage.readdirNames(StoragePaths.sceneBlocksDir, ".md")` + `storage.readFile`（只读），否则用 `node:fs/promises`。**不得以 `this.storage` 非空推断「非本地」**：`gateway/server.ts:704-715` 对 standalone/local 也无条件注入 `LocalStorageBackend`，在役网关该字段恒非空；执行器（Stage 3）的原子性门禁只看 `backend.type === "local"`。shadow 下禁止任何 storage 写。
+- 选对（确定性，无 LLM/随机）：
+  1. 配置 `candidatePairs` 非空时按配置顺序取第一对可用者（两文件都存在、非头部、非归档、v2、非空、非 `[DELETED]`；可用性与自动选对共用 `isMergeShadowCandidate` 同一过滤口径，不合格对继续试下一对）；列表非空但无一可用 → `result=rejected code=candidate_unavailable`，**不回退**自动选择（白名单是显式意图）。每轮最多 1 对。
+  2. 否则 `selectMergeCandidate` 自动选择：候选为两两组合（非头部/非归档/v2/均非空），过滤 `A+B > pairCharLimit`；评分 = 共享锚点 id 数（`extractAnchorIds` 交集）降序 → A+B 字符升序 → 文件名字典序；共享锚点数为 0 不选（同主题证据）；返回 top1。
+- 行为：`planMerge({filename,raw}×2,{config,now,target:deriveMergeTargetName(A,B),sceneCharCap})`；target 是占位，仅过 plan 校验，绝不落盘。成功打 `metric=l2_merge mode=shadow result=planned key=<前12位> pair=A|B charsA= charsB= charsC= anchorsIn= anchorsOut= readViewChars= elapsedMs=`；拒绝 `result=rejected code=...`（anchor/body mismatch 用 warn，其余 info）；异常 `result=error` 只打 `err.message`。**metric 禁输出正文/summary/锚点 id 列表**。**不调用 executeMerge、不取锁、不写 journal、不 sync index、不修改任何文件、不 GC**。整段包硬预算 `MERGE_SCENE_SHADOW_BUDGET_MS=2000`：读取后、选对后、plan 后各检查一次，超时 → `result=skipped code=budget_exceeded`（warn，不抛给 L2）；异常 → `result=error`（warn，只打 `err.message`）。
+- GC：**shadow 钩子不调用 GC**（零写契约）。`gcMergeJournals` 已实现，留给 Stage 3 执行路径 / CLI maintenance 在持 merge 锁时调用；shadow 期间 journal 目录本应为空。
+- 锚点全局告警：**Stage 2 不实现**。`preExtractSnapshots` 是 Phase 4 前按 index 的内存快照，而 Phase 5 会合法删除场景，二者口径不一致会稳定误报；锚点守恒改为 Stage 3 在 planned A/B 的 preimage 上做，并对存活文件 diff（见 §4.11）。
+- 配置新增：`candidatePairs?: Array<{ a: string; b: string }>`（最多 8 对；两名字**先拒路径**再经 `normalizeSceneFilename`，拒绝 `-archive`、自配对、无序重复；`parseMergeSceneConfig` 内与 `headScenes` 求交，命中头部名解析期 throw；Stage 2 白名单，Stage 3 可作 override）。
+- 测试 seam：selector 纯函数；GC 用临时 dataDir；extractor 集成用 fake `llmRunner`（返回 "done"）+ 临时 dataDir + logger 捕获，**opts 必须显式传 `mergeScene`**（否则 off 分支掩盖装配漏传），断言 metric 出现；零写断言分两种口径——直调私有 `runMergeShadowHook`（不跑 Phase 5）时要求 dataDir 整树 sha256 全等；跑完整 `extract()` 时只要求 `scene_blocks` 子树逐字节不变且无 merge 产物（Phase 5 写 `.metadata` 是合法行为，不算钩子写入）。装配级两层：`pipeline-factory.merge-scene.test.ts` mock 构造器只验 `SceneExtractorOptions` 透传；`pipeline-factory.merge-scene.integration.test.ts` 不 mock，走真实工厂装配 → 真实 `extract()` → Phase 4.5 钩子，断言 `result=planned` metric（门禁 A 证据）。
+- Stage 2 门禁（A-G）：A 网关真实装配级 metric（`pipeline-factory` 传参 + 不 mock 的集成测试：真实工厂装配 → 真实 `extract()` → `l2_merge result=planned`）；B 直调私有 `runMergeShadowHook`（不跑 Phase 5）后 `dataDir` 整树（含 `.metadata`）sha256 全等，同目录完整 `extract()` 对照只要求 `scene_blocks` 子树逐字节不变且无 journal/.merge-tmp/.part；C backend 矩阵（`LocalStorageBackend` 读取正常、无 storage 的 fs 路径正常、不得以 storage 非空判不支持）；D 确定性（同输入两次 selection/metric 相同）；E 故障注入（candidatePairs 不可用 / readdir throw / 超预算 → L2 结果 success 不变，`scene_blocks` 子树零写）；F 生产 23 场景只读副本整轮 <5s、≥1 对 planned 且 metrics 字段完整、`scene_blocks` 逐字节不变；G 全量回归全绿（沙箱 HOME）+ 变异覆盖 selection/candidatePairs/装配/预算分支 ≥8 条；报告带源码 sha 且 `sourceStable`。Stage 2 通过后才进 Stage 3（`mode=on` 生产开关用户已口头批准，仍以门禁通过为前提）。
+- 2026-11-20 00:05 CST Stage 2 门禁首跑（报告 `reviews/merge-stage2-shadow-gate-20261119.json`）：verdict=pass，A–G 全 pass，G 为 137 files / 1632 tests 全绿，F 自动选对 `AIHOT晨报-自动化发送与免费模型观察.md` + OpenCode 场景（charsA=18,492 / charsB=12,158 / charsC=31,045 / anchors=90 / 158ms），生产 profile 462 文件 sha256+mtime 前后全等，`sourceStable=true`，总耗时约 27.9s。
+- 2026-11-20 00:3x CST S05 双审修复后门禁重跑（同一报告路径已刷新）：verdict=pass，A–G 全 pass——A 含真实工厂装配 → 真实 extract 的 `planned` 集成用例；G 为 138 files / 1637 tests 全绿 + 变异 12/12 killed（survived/invalid=0，originalSha 与当前源码一致）；F 仍自动选对同一对（charsA=18,492 / charsB=12,158 / charsC=31,045 / anchorsIn=90 / anchorsOut=90 / 157ms）；生产 profile 462 文件 sha256+mtime 前后全等，`sourceStable=true`，总耗时 35.8s。
 
 ## 5. Testing Decisions
 

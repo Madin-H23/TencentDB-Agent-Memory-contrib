@@ -26,7 +26,13 @@ import {
   type SceneBlock,
   type SceneBlockMeta,
 } from "./scene-format.js";
-import { buildV2ReadView, extractV2Gist, syncV2MetaSummary, V2_HEADING_RE } from "./scene-format-v2.js";
+import {
+  buildV2ReadView,
+  extractV2Gist,
+  isV2Format,
+  syncV2MetaSummary,
+  V2_HEADING_RE,
+} from "./scene-format-v2.js";
 import { checkSceneCharCap } from "../../utils/scene-char-cap.js";
 import { checkSceneCharCapWithSupersede, extractAnchorIds } from "../../utils/supersede.js";
 import { renameWithRetry } from "../../utils/checkpoint.js";
@@ -55,6 +61,8 @@ export interface MergeSceneConfig {
   headScenes: string[];
   /** Stage 3 每轮最多合并对数。 */
   maxPairsPerRound: number;
+  /** Stage 2 显式指定优先合并对（按配置序取第一对）；空数组表示自动选对。 */
+  candidatePairs: MergeSceneCandidatePair[];
 }
 
 export const MERGE_SCENE_DEFAULT_PAIR_CHAR_LIMIT = 40_000;
@@ -64,6 +72,9 @@ export const MERGE_SCENE_DEFAULT_HEARTBEAT_MS = 30_000;
 export const MERGE_SCENE_DEFAULT_LOCK_WAIT_MS = 5_000;
 export const MERGE_SCENE_DEFAULT_JOURNAL_DIR = ".metadata/merge-journal";
 export const MERGE_SCENE_DEFAULT_MAX_PAIRS_PER_ROUND = 1;
+
+/** Stage 2 shadow 钩子单轮硬预算（SPEC-E §4.13）：整段只读+选对+plan 超时只 warn。 */
+export const MERGE_SCENE_SHADOW_BUDGET_MS = 2_000;
 
 /**
  * 头部四场景禁入名单（SPEC-E §4.9）。名字必须是 `normalizeSceneFilenames`
@@ -110,6 +121,66 @@ function parseJournalDir(raw: unknown): string {
     fail(`journalDir 非法值 ${JSON.stringify(raw)}（不得包含 . / .. / 空段）`);
   }
   return parts.join("/");
+}
+
+/** candidatePairs 的硬上限（SPEC-E §4.13：≤8 对）。 */
+export const MERGE_SCENE_MAX_CANDIDATE_PAIRS = 8;
+
+export interface MergeSceneCandidatePair {
+  a: string;
+  b: string;
+}
+
+function parseCandidateName(raw: unknown, label: string): string {
+  if (typeof raw !== "string" || raw.trim().length === 0) {
+    fail(`candidatePairs.${label} 非法值 ${JSON.stringify(raw)}（必须是非空字符串）`);
+  }
+  const name = raw.trim();
+  if (/[\\/]/.test(name) || name === "." || name === "..") {
+    fail(`candidatePairs.${label} 非法值 ${JSON.stringify(raw)}（只能是文件名，不得含路径）`);
+  }
+  if (/-archive\.md$/i.test(name)) {
+    fail(`candidatePairs.${label} 非法值 ${JSON.stringify(raw)}（不得指向归档场景）`);
+  }
+  const normalized = normalizeSceneFilename(name);
+  if (!normalized.endsWith(".md")) {
+    fail(`candidatePairs.${label} 非法值 ${JSON.stringify(raw)}（规范化后不是 .md 文件名）`);
+  }
+  return normalized;
+}
+
+/**
+ * candidatePairs：显式指定优先合并对，按配置序取第一对。
+ * 规则：≤8 对、单段 .md 文件名、不得指向 -archive.md、不得自配对、不得重复（无序）。
+ */
+function parseCandidatePairs(raw: unknown): MergeSceneCandidatePair[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) {
+    fail(`candidatePairs 非法值 ${JSON.stringify(raw)}（必须是数组）`);
+  }
+  if (raw.length > MERGE_SCENE_MAX_CANDIDATE_PAIRS) {
+    fail(`candidatePairs 非法值 长度 ${raw.length}（最多 ${MERGE_SCENE_MAX_CANDIDATE_PAIRS} 对）`);
+  }
+  const out: MergeSceneCandidatePair[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      fail(`candidatePairs 含非法项 ${JSON.stringify(item)}（必须是 {a,b} 对象）`);
+    }
+    const pair = item as { a?: unknown; b?: unknown };
+    const a = parseCandidateName(pair.a, "a");
+    const b = parseCandidateName(pair.b, "b");
+    if (lowerName(a) === lowerName(b)) {
+      fail(`candidatePairs 含自配对 ${JSON.stringify([a, b])}（a/b 不能是同一个场景）`);
+    }
+    const dedupeKey = [lowerName(a), lowerName(b)].sort().join("|");
+    if (seen.has(dedupeKey)) {
+      fail(`candidatePairs 含重复对 ${JSON.stringify([a, b])}（同一对只允许出现一次）`);
+    }
+    seen.add(dedupeKey);
+    out.push({ a, b });
+  }
+  return out;
 }
 
 function parseHeadScenes(raw: unknown): string[] {
@@ -213,6 +284,16 @@ export function parseMergeSceneConfig(
   );
   const journalDir = parseJournalDir(obj.journalDir);
   const headScenes = parseHeadScenes(obj.headScenes);
+  const candidatePairs = parseCandidatePairs(obj.candidatePairs);
+  // candidatePairs 是白名单，不允许把头部场景塞进来绕过禁入（parse 期 fail-closed）。
+  const headSceneSet = new Set(headScenes);
+  for (const pair of candidatePairs) {
+    for (const name of [pair.a, pair.b]) {
+      if (headSceneSet.has(name)) {
+        fail(`candidatePairs 含头部场景 ${JSON.stringify(name)}（头部场景禁止合并）`);
+      }
+    }
+  }
 
   if (
     mode !== "off" &&
@@ -233,6 +314,7 @@ export function parseMergeSceneConfig(
     journalDir,
     headScenes,
     maxPairsPerRound,
+    candidatePairs,
   };
 }
 
@@ -2178,4 +2260,270 @@ export async function recoverMergeJournal(opts: RecoverMergeOptions): Promise<Re
   } catch (err) {
     return { ok: false, error: executionError(err), outcomes };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Stage 2：shadow 选对与 journal GC（SPEC-E §4.13）
+//
+// 选对是纯函数：只吃目录事实（filename + raw），零 fs/时钟/随机；钩子负责读目录。
+// GC 只删 journal 与 preimage，不删场景文件；failed 永不自动删除。
+// ---------------------------------------------------------------------------
+
+export interface MergeShadowInput {
+  filename: string;
+  raw: string;
+}
+
+export interface MergeShadowSelection {
+  a: MergeShadowInput;
+  b: MergeShadowInput;
+  /** 两个场景共享的锚点 id 数（评分第一关键字）。 */
+  sharedAnchors: number;
+  /** A.content.length + B.content.length。 */
+  pairChars: number;
+}
+
+export interface SelectMergeCandidateOptions {
+  headScenes: readonly string[];
+  pairCharLimit: number;
+}
+
+interface ShadowCandidate {
+  filename: string;
+  raw: string;
+  content: string;
+  anchorIds: string[];
+}
+
+/** 目录事实 → 可选候选；不合格返回 null（不抛错，不影响 L2 返回）。 */
+function toShadowCandidate(
+  filename: unknown,
+  raw: unknown,
+  headSet: Set<string>,
+): ShadowCandidate | null {
+  if (typeof filename !== "string" || typeof raw !== "string") return null;
+  if (validateInputFilename(filename) !== null) return null;
+  if (headSet.has(lowerName(normalizeSceneFilename(filename)))) return null;
+  if (isArchiveSceneFile(filename, raw)) return null;
+  if (raw.trim().length === 0) return null;
+  if (!isV2Format(raw)) return null;
+  const content = parseSceneBlock(raw, filename).content;
+  if (content.length === 0 || content.trim() === "[DELETED]") return null;
+  return { filename, raw, content, anchorIds: extractAnchorIds(content) };
+}
+
+/**
+ * Stage 2 白名单候选可用性（SPEC-E §4.13）：candidatePairs 与自动选对共用同一
+ * 过滤口径（文件名合法 / 非头部 / 非归档 / 空 / v2 / 非 [DELETED]）。
+ */
+export function isMergeShadowCandidate(
+  filename: unknown,
+  raw: unknown,
+  headScenes: readonly string[],
+): boolean {
+  if (!Array.isArray(headScenes)) return false;
+  const headSet = new Set(headScenes.map((name) => lowerName(normalizeSceneFilename(name))));
+  return toShadowCandidate(filename, raw, headSet) !== null;
+}
+
+/** 配对字符口径：两个场景正文（parseSceneBlock().content）长度之和，与自动选对一致。 */
+export function mergeShadowPairChars(a: MergeShadowInput, b: MergeShadowInput): number {
+  return parseSceneBlock(a.raw, a.filename).content.length + parseSceneBlock(b.raw, b.filename).content.length;
+}
+
+/** 共享锚点 id 数：两边各自去重后取交集基数。 */
+function sharedAnchorCount(a: string[], b: string[]): number {
+  if (a.length === 0 || b.length === 0) return 0;
+  const left = new Set(a);
+  let n = 0;
+  const seen = new Set<string>();
+  for (const id of b) {
+    if (!left.has(id) || seen.has(id)) continue;
+    seen.add(id);
+    n += 1;
+  }
+  return n;
+}
+
+/** 两个原始场景文件共享锚点 id 数（正文口径；两边各自去重后取交集基数）。 */
+export function countSharedMergeAnchors(a: MergeShadowInput, b: MergeShadowInput): number {
+  const idsA = extractAnchorIds(parseSceneBlock(a.raw, a.filename).content);
+  const idsB = extractAnchorIds(parseSceneBlock(b.raw, b.filename).content);
+  return sharedAnchorCount(idsA, idsB);
+}
+
+/**
+ * Stage 2 选对（纯函数）。
+ *
+ * 过滤：头部场景 / -archive.md 或 META archive:true / [DELETED] / 空正文 / 非 v2。
+ * 评分：共享锚点 id 数降序 → A+B 字符升序 → 文件名字典序；共享锚点=0 不选。
+ * 输入顺序不影响结果（内部先按文件名排序）。
+ */
+export function selectMergeCandidate(
+  inputs: readonly MergeShadowInput[],
+  opts: SelectMergeCandidateOptions,
+): MergeShadowSelection | null {
+  if (!Array.isArray(inputs) || inputs.length < 2) return null;
+  if (!opts || !Array.isArray(opts.headScenes)) return null;
+  if (
+    typeof opts.pairCharLimit !== "number" ||
+    !Number.isFinite(opts.pairCharLimit) ||
+    opts.pairCharLimit <= 0
+  ) {
+    return null;
+  }
+  const headSet = new Set(opts.headScenes.map((name) => lowerName(normalizeSceneFilename(name))));
+  const candidates: ShadowCandidate[] = [];
+  for (const input of inputs) {
+    const candidate = toShadowCandidate(input?.filename, input?.raw, headSet);
+    if (candidate) candidates.push(candidate);
+  }
+  if (candidates.length < 2) return null;
+  candidates.sort((x, y) => (x.filename < y.filename ? -1 : x.filename > y.filename ? 1 : 0));
+
+  let best: { a: ShadowCandidate; b: ShadowCandidate; sharedAnchors: number; pairChars: number } | null =
+    null;
+  for (let i = 0; i < candidates.length; i += 1) {
+    const a = candidates[i]!;
+    for (let j = i + 1; j < candidates.length; j += 1) {
+      const b = candidates[j]!;
+      const pairChars = a.content.length + b.content.length;
+      if (pairChars > opts.pairCharLimit) continue;
+      const sharedAnchors = sharedAnchorCount(a.anchorIds, b.anchorIds);
+      if (sharedAnchors === 0) continue;
+      if (best === null) {
+        best = { a, b, sharedAnchors, pairChars };
+        continue;
+      }
+      if (sharedAnchors > best.sharedAnchors) {
+        best = { a, b, sharedAnchors, pairChars };
+        continue;
+      }
+      if (sharedAnchors < best.sharedAnchors) continue;
+      if (pairChars < best.pairChars) {
+        best = { a, b, sharedAnchors, pairChars };
+        continue;
+      }
+      if (pairChars > best.pairChars) continue;
+      // 平手：按文件名兜底，保证跨调用确定性。
+      if (a.filename < best.a.filename || (a.filename === best.a.filename && b.filename < best.b.filename)) {
+        best = { a, b, sharedAnchors, pairChars };
+      }
+    }
+  }
+  if (!best) return null;
+  return {
+    a: { filename: best.a.filename, raw: best.a.raw },
+    b: { filename: best.b.filename, raw: best.b.raw },
+    sharedAnchors: best.sharedAnchors,
+    pairChars: best.pairChars,
+  };
+}
+
+export const MERGE_SCENE_GC_MAX_JOURNALS = 200;
+export const MERGE_SCENE_GC_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
+
+export interface GcMergeJournalsOptions {
+  dataDir: string;
+  config: Pick<MergeSceneConfig, "journalDir">;
+  fsMod?: typeof fs;
+  /** 注入当前时间（毫秒）；缺省 Date.now()。 */
+  now?: number;
+  /** 保留条数，缺省 200。 */
+  maxJournals?: number;
+  /** 保留时长，缺省 90 天。 */
+  maxAgeMs?: number;
+}
+
+export interface GcMergeJournalsResult {
+  scanned: number;
+  removed: number;
+  kept: number;
+  corrupt: number;
+}
+
+function journalTimestamp(journal: MergeJournal): number {
+  const updated = Date.parse(journal.updatedAt);
+  if (Number.isFinite(updated)) return updated;
+  const started = Date.parse(journal.startedAt);
+  return Number.isFinite(started) ? started : 0;
+}
+
+/**
+ * journal GC：保留最近 maxJournals 条或 maxAgeMs（先到为准）。
+ *
+ * 只回收终态 journal（done / rolled_back）：prepared / c_persisted / a_deleted /
+ * b_deleted 可能是崩溃后等待 recoverMergeJournal 补完的现场，按龄回收会连同
+ * preimage 一起销毁唯一证据；failed 同样永不自动删除（Stage 2 审查 P0-2）。
+ *
+ * - journalDir 不存在 → 全 0 返回（零 I/O、零写）。
+ * - 损坏 journal 跳过且不删（未知状态不主动销毁现场）。
+ * - 只删 key.json 与 key/ preimage 目录，不触碰 scene_blocks；先删 journal 再删 preimage。
+ * - 调用方保证只在本地 dataDir 使用，且由 Stage 3 执行路径/CLI maintenance 在持
+ *   merge 锁时调用（本函数自身不取锁）。
+ */
+export async function gcMergeJournals(opts: GcMergeJournalsOptions): Promise<GcMergeJournalsResult> {
+  const result: GcMergeJournalsResult = { scanned: 0, removed: 0, kept: 0, corrupt: 0 };
+  if (!opts || typeof opts.dataDir !== "string" || opts.dataDir.trim().length === 0) return result;
+  if (!opts.config || typeof opts.config.journalDir !== "string") return result;
+  const fsMod = opts.fsMod ?? fs;
+  const now = typeof opts.now === "number" && Number.isFinite(opts.now) ? opts.now : Date.now();
+  const maxJournals =
+    typeof opts.maxJournals === "number" && Number.isInteger(opts.maxJournals) && opts.maxJournals >= 0
+      ? opts.maxJournals
+      : MERGE_SCENE_GC_MAX_JOURNALS;
+  const maxAgeMs =
+    typeof opts.maxAgeMs === "number" && Number.isFinite(opts.maxAgeMs) && opts.maxAgeMs >= 0
+      ? opts.maxAgeMs
+      : MERGE_SCENE_GC_MAX_AGE_MS;
+  const root = path.join(path.resolve(opts.dataDir), ...opts.config.journalDir.split("/"));
+  let names: string[];
+  try {
+    names = await fsMod.readdir(root);
+  } catch (err) {
+    if (isErrnoCode(err, "ENOENT")) return result;
+    throw err;
+  }
+  for (const name of names) {
+    if (name.endsWith(".json.tmp")) await unlinkIfExists(fsMod, path.join(root, name));
+  }
+  const entries: { file: string; journal: MergeJournal }[] = [];
+  for (const name of names.filter((name) => name.endsWith(".json")).sort()) {
+    const file = path.join(root, name);
+    result.scanned += 1;
+    const read = await readJournalFile(fsMod, file);
+    if (read.kind === "missing") continue;
+    if (read.kind === "corrupt") {
+      result.corrupt += 1;
+      result.kept += 1;
+      continue;
+    }
+    entries.push({ file, journal: read.journal });
+  }
+  entries.sort((x, y) => journalTimestamp(y.journal) - journalTimestamp(x.journal));
+  let freshKept = 0;
+  for (const entry of entries) {
+    const { file, journal } = entry;
+    // 只回收终态 journal：非终态可能仍在途，或是崩溃后等待 recoverMergeJournal
+    // 补完的现场；按龄回收会连同 preimage 一起销毁唯一证据（Stage 2 审查 P0-2）。
+    if (journal.stage !== "done" && journal.stage !== "rolled_back") {
+      result.kept += 1;
+      continue;
+    }
+    const expired = now - journalTimestamp(journal) > maxAgeMs;
+    const overCap = freshKept >= maxJournals;
+    if (!expired && !overCap) {
+      freshKept += 1;
+      result.kept += 1;
+      continue;
+    }
+    await unlinkIfExists(fsMod, file);
+    try {
+      await fsMod.rm(path.join(root, journal.key), { recursive: true, force: true });
+    } catch {
+      // preimage 目录可能本就不存在；journal 已删即可，不阻断 GC。
+    }
+    result.removed += 1;
+  }
+  return result;
 }
