@@ -2,7 +2,7 @@
  * Scene Index: maintains a JSON index of all scene blocks for quick lookup.
  */
 
-import { normalizeSceneSummary, parseSceneBlock } from "./scene-format.js";
+import { isArchiveSceneFile, normalizeSceneSummary, parseSceneBlock } from "./scene-format.js";
 import type { StorageAdapter } from "../storage/adapter.js";
 import { StoragePaths } from "../storage/types.js";
 
@@ -26,6 +26,19 @@ interface SceneIndexDerivable {
 function asSceneIndexDerivable(storage: StorageAdapter | undefined): SceneIndexDerivable | null {
   const backend = storage?.getBackend() as unknown as Partial<SceneIndexDerivable> | undefined;
   return backend && typeof backend.deriveSceneIndex === "function" ? backend as SceneIndexDerivable : null;
+}
+
+/**
+ * [归档计数补丁 2026-11-19] 场景索引只收「活动场景」。
+ *
+ * P2-A3 归档层（sceneArchive on）把旧批次段落成 `<scene>-archive.md` 只读文件，
+ * 但它们与活动场景同目录、同后缀，此前被本索引全量收录 → 提示词里的
+ * 「当前场景总数 = index.length / maxScenes」与 persona 导航把归档算作场景，
+ * 触发假性「36/24 已满」并迫使 L2 把只读归档当 MERGE 目标（2026-11-19 事故）。
+ * 归档文件不参与 maxScenes 计量，也不进场景摘要/导航。
+ */
+function filterActiveScenes(entries: SceneIndexEntry[]): SceneIndexEntry[] {
+  return entries.filter((e) => !isArchiveSceneFile(e.filename));
 }
 
 // ── fs fallback helpers (used when no StorageAdapter is provided) ──
@@ -61,7 +74,7 @@ async function fsReaddir(absDir: string, suffix: string): Promise<string[]> {
 export async function readSceneIndex(dataDir: string, storage?: StorageAdapter): Promise<SceneIndexEntry[]> {
   // P2-D2: rowfs 模式索引实时派生自 L2 行，不读 sidecar 文件。
   const derivable = asSceneIndexDerivable(storage);
-  if (derivable) return derivable.deriveSceneIndex();
+  if (derivable) return filterActiveScenes(await derivable.deriveSceneIndex());
   try {
     let raw: string | null;
     if (storage) {
@@ -90,7 +103,7 @@ export async function readSceneIndex(dataDir: string, storage?: StorageAdapter):
         updated: typeof item.updated === "string" ? item.updated : "",
       });
     }
-    return entries;
+    return filterActiveScenes(entries);
   } catch {
     return [];
   }
@@ -119,7 +132,7 @@ export async function writeSceneIndex(
 export async function syncSceneIndex(dataDir: string, storage?: StorageAdapter): Promise<SceneIndexEntry[]> {
   // P2-D2: rowfs 模式索引实时派生，不落盘（scene_index.json 退役）。
   const derivable = asSceneIndexDerivable(storage);
-  if (derivable) return derivable.deriveSceneIndex();
+  if (derivable) return filterActiveScenes(await derivable.deriveSceneIndex());
   let files: string[];
   if (storage) {
     files = await storage.readdirNames(StoragePaths.sceneBlocksDir, ".md");
@@ -139,6 +152,8 @@ export async function syncSceneIndex(dataDir: string, storage?: StorageAdapter):
         raw = await fsReadFile(path.default.join(dataDir, "scene_blocks", file));
       }
       if (!raw) continue;
+      // [归档计数补丁 2026-11-19] 只读归档不进活动场景索引（不计 maxScenes、不进提示词/导航）。
+      if (isArchiveSceneFile(file, raw)) continue;
       const block = parseSceneBlock(raw, file);
       entries.push({
         filename: file,

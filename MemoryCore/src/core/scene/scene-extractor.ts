@@ -21,7 +21,7 @@ import { CheckpointManager } from "../../utils/checkpoint.js";
 import { BackupManager } from "../../utils/backup.js";
 import { readSceneIndex, syncSceneIndex } from "../scene/scene-index.js";
 import type { SceneIndexEntry } from "../scene/scene-index.js";
-import { parseSceneBlock } from "../scene/scene-format.js";
+import { isArchiveSceneFile, parseSceneBlock } from "../scene/scene-format.js";
 import { compactSceneBlock } from "../scene/scene-compact.js";
 import type { SceneCompactionConfig } from "../scene/scene-compact.js";
 import { deterministicSupersede, type FactSupersedeConfig } from "./scene-supersede.js";
@@ -217,12 +217,9 @@ function mergeArchiveFile(existing: string, appendText: string): string {
   return `${body}\n${appendText.replace(/\n{3,}/g, "\n\n")}`;
 }
 
-/** [P2-A3 审核 P1-3] 归档文件识别（META archive:true·防 ⑧/⑥b 误处理）。 */
-function isArchiveFile(raw: string): boolean {
-  const m = raw.match(/-----META-START-----([\s\S]*?)-----META-END-----/);
-  if (!m) return false;
-  return /^archive:[ \t]*true[ \t]*$/m.test(m[1] ?? "");
-}
+/** [P2-A3 审核 P1-3 → 2026-11-19 归档计数补丁] 归档识别统一走 scene-format 的
+ * `isArchiveSceneFile(filename, raw)`：文件名 `-archive.md` 或 META `archive: true` 任一命中即归档。
+ * 本地旧实现只看 META，META 被 `[DELETED]` 覆盖后失明（2026-11-19 事故根因之一）。 */
 
 export class SceneExtractor {
   private dataDir: string;
@@ -498,6 +495,9 @@ export class SceneExtractor {
           raw = await fs.default.readFile(path.default.join(this.dataDir, "scene_blocks", file), "utf-8");
         }
         if (!raw || raw.trim().length === 0 || raw.trim() === "[DELETED]") {
+          // [归档计数补丁 2026-11-19] 只读归档不参与软删清理：L2 模型可能把归档当
+          // MERGE 目标写 [DELETED]（2026-11-19 事故即沿此路径 unlink 了 7 个归档）。
+          if (isArchiveSceneFile(file, raw)) continue;
           // Empty file or [DELETED] marker — soft-delete
           if (this.storage) {
             await this.storage.unlink(`${StoragePaths.sceneBlocksDir}${file}`);
@@ -511,7 +511,7 @@ export class SceneExtractor {
         } else {
           // Check if file has only META header but no actual content
           const block = parseSceneBlock(raw, file);
-          if (!block.content || block.content.trim().length === 0) {
+          if ((!block.content || block.content.trim().length === 0) && !isArchiveSceneFile(file, raw)) {
             if (this.storage) {
               await this.storage.unlink(`${StoragePaths.sceneBlocksDir}${file}`);
             } else {
@@ -521,7 +521,7 @@ export class SceneExtractor {
             }
             cleanedCount++;
             this.logger?.debug?.(`${TAG} extract() removed META-only file (no content): ${file}`);
-        } else if (isArchiveFile(raw)) {
+        } else if (isArchiveSceneFile(file, raw)) {
           // [P2-A3 审核 P1-3] 归档文件（META archive:true）不参与 spill/⑧/⑥b——
           // 防 archive 被 toV2Format 迁移退化与 factSupersede 污染只读语义。
         } else {

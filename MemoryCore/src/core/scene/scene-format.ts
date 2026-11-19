@@ -22,6 +22,26 @@ export const META_START = "-----META-START-----";
 export const META_END = "-----META-END-----";
 
 /**
+ * [归档计数补丁 2026-11-19] 归档文件（P2-A3 只读层）识别。
+ *
+ * 判据双保险：
+ *   ① 文件名 `-archive.md` 后缀——META 被空写/软删标记覆盖时仍可识别
+ *      （2026-11-19 事故：L2 模型按「36/24 触顶须 MERGE」把只读归档当合并目标，
+ *       写入 `[DELETED]` 后 Phase 5 清理整文件 unlink，META 随之消失）；
+ *   ② META `archive: true`——文件名被规范化/重命名时的兜底。
+ *
+ * 读侧（场景索引、提示词场景总数、persona 导航）与写侧清理都必须排除，
+ * 否则归档文件会被当作活动场景参与 maxScenes 计量并诱发假性「已满」。
+ */
+export function isArchiveSceneFile(filename: string, raw?: string | null): boolean {
+  if (/-archive\.md$/i.test(filename)) return true;
+  if (!raw) return false;
+  const m = raw.match(/-----META-START-----([\s\S]*?)-----META-END-----/);
+  if (!m) return false;
+  return /^archive:[ \t]*true[ \t]*$/m.test(m[1] ?? "");
+}
+
+/**
  * Parse a Scene Block file into structured data.
  */
 export function parseSceneBlock(raw: string, filename: string): SceneBlock {
