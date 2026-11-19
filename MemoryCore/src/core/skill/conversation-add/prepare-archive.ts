@@ -84,7 +84,7 @@ export function prepareArchivePayload(
   };
 }
 
-function totalMessagesBytes(msgs: Array<{ role: string; content: string }>): number {
+export function totalMessagesBytes(msgs: Array<{ role: string; content: string }>): number {
   let sum = 0;
   for (const m of msgs) sum += Buffer.byteLength(JSON.stringify(m), "utf8");
   return sum;
