@@ -131,6 +131,36 @@ export interface DeadLetterEntry {
   deadAt: number;
 }
 
+/**
+ * 死信条目 → 可序列化 DTO（origin#44）：只摘关键字段，天然脱敏。
+ * task.data 可能含凭据形态内容、_msgId/_stream/_ownerId 是内部投递元数据——都不进 DTO。
+ */
+export function serializeDeadLetter(entry: DeadLetterEntry): {
+  taskId: string; taskType: string; sessionId: string;
+  error: string; retryCount: number; deadAt: number;
+} {
+  return {
+    taskId: entry.task.id,
+    taskType: entry.task.type,
+    sessionId: entry.task.sessionId,
+    error: entry.error,
+    retryCount: entry.retryCount,
+    deadAt: entry.deadAt,
+  };
+}
+
+/**
+ * 重投门控（origin#44）：默认 off=恒拒绝（敏感闸留用户）；on 且未入队才允许，幂等。
+ */
+export function deadLetterRetryDecision(
+  mode: "off" | "on" | undefined,
+  alreadyEnqueued: boolean,
+): { allowed: boolean; reason: "mode-off" | "already-enqueued" | "ok" } {
+  if (mode !== "on") return { allowed: false, reason: "mode-off" };
+  if (alreadyEnqueued) return { allowed: false, reason: "already-enqueued" };
+  return { allowed: true, reason: "ok" };
+}
+
 const TAG = "[pipeline-worker]";
 
 interface ClaimedTask extends TaskPayload {
