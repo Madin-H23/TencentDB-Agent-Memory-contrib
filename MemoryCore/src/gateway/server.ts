@@ -129,6 +129,7 @@ import { getSharedMongoClientPool } from "../core/store/mongodb/client-pool.js";
 import type { FsOthersKind } from "../core/backend-selection/index.js";
 import { requireProfileRowStore } from "../core/store/profile-row-store.js";
 import type { TaskPayload } from "../core/state/types.js";
+import { buildDeadLetterList } from "../services/pipeline-worker.js";
 import type { TaskExecutor } from "../services/pipeline-worker.js";
 import type { IStateBackend } from "../core/state/types.js";
 import type { TimerScanner } from "../services/timer-scanner.js";
@@ -1232,6 +1233,8 @@ export class TdaiGateway {
           return await this.handleSessionEnd(req, res);
         case "POST /seed":
           return await this.handleSeed(req, res);
+        case "GET /api/ops/dead-letters":
+          return this.handleDeadLetters(res);
         default:
           sendError(res, 404, `Not found: ${method} ${pathname}`);
       }
@@ -1560,6 +1563,16 @@ export class TdaiGateway {
       },
     };
     sendJson(res, 200, response);
+  }
+
+  /**
+   * GET /api/ops/dead-letters（origin#44 阶段2）：只读列出滞留死信条目。
+   * 数据源 = pipelineWorker.getDeadLetterQueue()，逐条经 buildDeadLetterList 脱敏（不含 task.data）。
+   * worker 未启动 → 返回空列表（与 /health 的 null 语义一致，不崩）。
+   */
+  private handleDeadLetters(res: http.ServerResponse): void {
+    const entries = this.pipelineWorker?.getDeadLetterQueue() ?? [];
+    sendJson(res, 200, { deadLetters: buildDeadLetterList(entries) });
   }
 
   private async handleRecall(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
