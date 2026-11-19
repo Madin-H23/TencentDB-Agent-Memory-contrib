@@ -46,7 +46,7 @@ export const LEGACY_INSTANCE_ID = "__legacy__";
 
 const TUPLE_FORBIDDEN_CHAR = "|";
 
-function assertTupleField(name: string, value: string): void {
+export function assertTupleField(name: string, value: string): void {
   if (typeof value !== "string" || value.length === 0) {
     throw new Error(`[skill-agent-queue] ${name} must be a non-empty string`);
   }
@@ -479,7 +479,7 @@ return raw
  * 语义边界: 只匹配"命令不认识 / 未启用"这一类, 其他错误 (连接断、认证失败) 必须穿透
  * 抛给 caller, 避免误判导致降级到非原子路径。
  */
-function isUnknownCommand(err: unknown): boolean {
+export function isUnknownCommand(err: unknown): boolean {
   const msg = (err as Error)?.message ?? "";
   return /ERR\s+unknown command/i.test(msg) || /command\s+.*\s+is not allowed/i.test(msg);
 }
@@ -488,7 +488,7 @@ function isUnknownCommand(err: unknown): boolean {
  * 判断是否 EVALSHA 返回的 NOSCRIPT (Redis 重启 / 脚本缓存被清)。收到 NOSCRIPT 时
  * 应该重新 SCRIPT LOAD 再 EVALSHA, 而不是当成失败降级。
  */
-function isNoScript(err: unknown): boolean {
+export function isNoScript(err: unknown): boolean {
   const msg = (err as Error)?.message ?? "";
   return /NOSCRIPT/i.test(msg);
 }
@@ -497,7 +497,7 @@ function isNoScript(err: unknown): boolean {
  * 判断是否 EVAL / SCRIPT 被集群策略拒 (permission / 集群禁用)。这一类跟
  * unknown-command 同样是"能力不支持", 需要降级到下一层。
  */
-function isEvalDisabled(err: unknown): boolean {
+export function isEvalDisabled(err: unknown): boolean {
   const msg = (err as Error)?.message ?? "";
   return (
     /command\s+'?EVAL'?\s+is not allowed/i.test(msg) ||

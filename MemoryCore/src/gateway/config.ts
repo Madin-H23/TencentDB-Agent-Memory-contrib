@@ -636,6 +636,11 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
     }
   }
 
+  // REQ-2026-001: 运行态覆盖层——面板切厂商写非跟踪覆盖文件，不再改 git 跟踪 yaml。
+  // 合并优先级 基线 < 覆盖层 < env（env 在下游各字段构造处已用 ?? 保证最高）。
+  // 独立 catch：覆盖层损坏只回落基线，绝不复用基线的 catch 清空 fileConfig。
+  applyRuntimeOverrides(fileConfig);
+
   // Server config
   const serverConfig = obj(fileConfig, "server");
   const port = envInt("TDAI_GATEWAY_PORT") ?? num(serverConfig, "port") ?? 8420;
@@ -1160,6 +1165,65 @@ export function loadGatewayConfig(overrides?: GatewayConfigOverrides): GatewayCo
 // ============================
 // Helpers
 // ============================
+
+/**
+ * REQ-2026-001: 把运行态覆盖层合并进基线 fileConfig（原地修改）。
+ *
+ * 路径优先级：env `TDAI_RUNTIME_OVERRIDES` > `<dataDir>/tdai-runtime-overrides.yaml`。
+ * dataDir 用面板同款公式（~/.memory-tencentdb/memory-tdai，homedir 拼死），
+ * 不走 resolveDefaultDataDir 的 legacy ~/memory-tdai 回退——否则面板写新路径、
+ * 网关读 legacy 路径会静默错位。MEMORY_TENCENTDB_ROOT 若被设值仍尊重。
+ *
+ * 合并语义 = **顶层段覆盖**（非递归）：覆盖层由面板写入时保存「完整 llm 段快照」
+ * （首启从基线复制），因此 llm 段整段替换基线即可正确表达删除——切厂商删掉旧
+ * headers/层模型时，快照里已无这些键，替换后生效配置不带旧值（否则残留旧
+ * x-opencode-session 会踩 400，见 yamlStore.ts:222-225 事故注释）。非覆盖段
+ * （worker 三键等）仍来自基线，自动继承基线变更——这正是覆盖层相对全量副本
+ * 的优势。递归合并无法实现删除语义（旧键会残留），故不采用。
+ *
+ * 失败策略（AC-04）：文件不存在=正常（空覆盖层）；解析损坏=记录错误并跳过，
+ * 绝不改动 fileConfig 的基线内容。
+ */
+function applyRuntimeOverrides(fileConfig: Record<string, unknown>): void {
+  const defaultDataDir = path.join(
+    getEnv("MEMORY_TENCENTDB_ROOT") ?? path.join(getEnv("HOME") ?? getEnv("USERPROFILE") ?? "/tmp", ".memory-tencentdb"),
+    "memory-tdai",
+  );
+  const envOverride = getEnv("TDAI_RUNTIME_OVERRIDES")?.trim();
+  const overridePath = envOverride || path.join(defaultDataDir, "tdai-runtime-overrides.yaml");
+  let raw: string;
+  try {
+    raw = fs.readFileSync(overridePath, "utf-8");
+  } catch {
+    return; // 文件不存在=无覆盖，基线逐字节不变（AC-08）
+  }
+  if (!raw.trim()) return; // 空文件=无覆盖
+
+  let overlay: Record<string, unknown>;
+  try {
+    const parsed = YAML.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("覆盖层根节点非对象");
+    }
+    overlay = expandEnvVars(parsed) as Record<string, unknown>;
+  } catch (err) {
+    console.error(
+      `[tdai-gateway][config] Failed to parse runtime overrides ${overridePath}; ignoring overlay, baseline kept:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    return; // 独立 fail-soft：基线不动（AC-04）
+  }
+
+  // 顶层段覆盖：覆盖层保存完整 llm 段快照，整段替换；非覆盖段（worker 等）保留基线。
+  for (const [key, value] of Object.entries(overlay)) {
+    if (key === "__proto__" || key === "constructor" || key === "prototype") continue;
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue; // 顶层标量不覆盖
+    // 空对象段（如首次骨架 llm: {}）视为「无有效覆盖」，跳过——否则整段替换成空
+    // 会让下游 model/baseUrl 回落默认值，破坏 AC-08「空覆盖层逐字节同基线」。
+    if (Object.keys(value as Record<string, unknown>).length === 0) continue;
+    fileConfig[key] = value;
+  }
+}
 
 function resolveConfigPath(): string | null {
   // 1. Explicit env var

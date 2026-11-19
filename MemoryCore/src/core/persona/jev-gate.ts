@@ -92,7 +92,7 @@ interface JevCallObservation {
   rawResponse?: unknown;
 }
 
-class JevGateAnswerError extends Error {
+export class JevGateAnswerError extends Error {
   constructor(readonly reason: "missing_answer" | "invalid_choice", message: string) {
     super(message);
     this.name = "JevGateAnswerError";
@@ -484,12 +484,12 @@ function emitInvariant(
   );
 }
 
-function summarizeSnapshot(snapshot: SceneFileSnapshot): SceneSummary {
+export function summarizeSnapshot(snapshot: SceneFileSnapshot): SceneSummary {
   const { filename, sha256: hash, chars, parseable, created, updated, heat } = snapshot;
   return { filename, sha256: hash, chars, parseable, created, updated, heat };
 }
 
-function l2ChangedNames(diff?: L2SceneDiffDiagnostic): string[] {
+export function l2ChangedNames(diff?: L2SceneDiffDiagnostic): string[] {
   if (!diff) return [];
   return [
     ...diff.created.map((scene) => scene.filename),
@@ -497,15 +497,15 @@ function l2ChangedNames(diff?: L2SceneDiffDiagnostic): string[] {
   ].sort();
 }
 
-function isChangeType(value: string): value is JevChangeType {
+export function isChangeType(value: string): value is JevChangeType {
   return Object.prototype.hasOwnProperty.call(JEV_CRITERIA, value);
 }
 
-function sha256(value: string): string {
+export function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function redactKnownSecret(value: unknown, secret: string): unknown {
+export function redactKnownSecret(value: unknown, secret: string): unknown {
   if (!secret) return value;
   if (typeof value === "string") return value.split(secret).join("[REDACTED]");
   if (Array.isArray(value)) return value.map((item) => redactKnownSecret(item, secret));
@@ -557,7 +557,7 @@ function observeJevFetch(
   };
 }
 
-function classifyJevFailure(error: unknown, status?: number): string {
+export function classifyJevFailure(error: unknown, status?: number): string {
   if (error instanceof JevGateAnswerError) return error.reason;
   if (status !== undefined && (status < 200 || status >= 300)) return `http_${status}`;
   if (error instanceof DecisionProviderError) {
@@ -576,7 +576,7 @@ function classifyJevFailure(error: unknown, status?: number): string {
   return "jev_error";
 }
 
-function endpointHost(endpoint: string): string {
+export function endpointHost(endpoint: string): string {
   try {
     return new URL(endpoint).hostname;
   } catch {
@@ -584,7 +584,7 @@ function endpointHost(endpoint: string): string {
   }
 }
 
-function throwIfAborted(signal?: AbortSignal): void {
+export function throwIfAborted(signal?: AbortSignal): void {
   if (!signal?.aborted) return;
   if (signal.reason instanceof Error) throw signal.reason;
   throw new Error("L3 task aborted");
