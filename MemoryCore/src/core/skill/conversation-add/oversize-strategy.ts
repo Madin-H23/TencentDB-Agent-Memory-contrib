@@ -49,11 +49,11 @@ export interface OversizeResult {
   omittedBytes: number;
 }
 
-function messageBytes(msg: OversizeMessage): number {
+export function messageBytes(msg: OversizeMessage): number {
   return Buffer.byteLength(JSON.stringify(msg), "utf8");
 }
 
-function totalBytes(msgs: OversizeMessage[]): number {
+export function totalBytes(msgs: OversizeMessage[]): number {
   let sum = 0;
   for (const m of msgs) sum += messageBytes(m);
   return sum;
