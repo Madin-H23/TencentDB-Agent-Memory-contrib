@@ -368,7 +368,7 @@ export class SkillConversationAddHandler {
   }
 }
 
-function totalMessagesBytes(msgs: CompressibleMessage[]): number {
+export function totalMessagesBytes(msgs: CompressibleMessage[]): number {
   let sum = 0;
   for (const m of msgs) {
     sum += Buffer.byteLength(JSON.stringify(m), "utf8");
@@ -376,7 +376,7 @@ function totalMessagesBytes(msgs: CompressibleMessage[]): number {
   return sum;
 }
 
-function countRoles(msgs: CompressibleMessage[], roles: ReadonlySet<CompressibleRole>): number {
+export function countRoles(msgs: CompressibleMessage[], roles: ReadonlySet<CompressibleRole>): number {
   let n = 0;
   for (const m of msgs) if (roles.has(m.role as CompressibleRole)) n++;
   return n;
