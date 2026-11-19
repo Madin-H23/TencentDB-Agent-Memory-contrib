@@ -1,6 +1,6 @@
 # SPEC-E：确定性 mergeScene（场景合并内核，默认 off）
 
-- 状态：Stage 1 已本地提交（amend 后实际 HEAD `e70b170`，未 push）并完成三闸（双代理代码审 / 影子门禁 / kill -9 / 变异）；Stage 2 shadow 钩子（S01–S03）已实现，S04 门禁 PASS，S05 双审 P1/P2 修复已落地并复跑门禁全绿（A–G，138 files / 1637 tests），已随本文件本地提交（未 push）；Stage 3 未开始｜日期：2026-11-20｜作者：DSH lead
+- 状态：Stage 1 已本地提交（amend 后实际 HEAD `e70b170`，未 push）；Stage 2 shadow 钩子已提交（`ca34a68`，未 push）；Stage 3（S3-01–S3-06：on 解析放行、allowProductionDataDir、on 执行钩子、门禁 H、生产启用、回归/变异/双审）实现完成并本地提交（未 push）；生产网关 2026-11-20 01:22 CST 重启后 `mode=on` 生效，01:30 首轮实跑 `result=merged`（场景 23→22）｜日期：2026-11-20｜作者：DSH lead
 - 依据：`reviews/merge-tool-spec-draft-20261119.md`、`reviews/merge-tool-risk-20261119.md`、v3-wt HEAD `87b7567` 只读源码、2026-11-19 18:2x 现场只读实测。
 - 范围：Stage 1（纯内核 + 影子 CLI，默认 off、零生产写）。N2 橙档自动触发、D4 CREATE 硬闸、头部四场景、N3′ 归档召回均不在本文范围。
 - 证据标记：【已核】本会话直接读源码/文件；【实测】2026-11-19 现场只读扫描；【设计】待实现。
@@ -101,7 +101,7 @@ Stage 1 只交付这两层 + 影子 CLI；`persona.mergeScene.mode` 默认 `off`
 ### 4.8 幂等
 
 - `key = sha256("merge-v1|" + sortedNames + "|" + sha256(A) + "|" + sha256(B) + "|" + concatOrder)`；换序调用 key 不变；**key 不含 target**（target 由调用方指定，但同对输入换 target 不得产生第二个 C），target 存入 journal 供审计。
-- `stage=done` 且 journal 记录的 target 存在且 sha256 匹配 → `MERGE_SKIPPED_IDEMPOTENT`（调用方换 target 也返回 skip，不得产生第二个 C），零写入。
+- `stage=done` 且 journal 记录的 target **存在且非空** → `MERGE_SKIPPED_IDEMPOTENT`（调用方换 target 也返回 skip，不得产生第二个 C），零写入。**sha256 强校验只用于非终态 stage**（prepared/c_persisted/a_deleted/b_deleted 的补完判定）；done 之后 C 被 Phase 5 治理（spill/compact/supersede/factArchive）或 LLM 合法改写属正常，按存在性幂等，不得因 sha 变化报 MERGE_CONFLICT（seams P0 修复，见 §4.14）。
 - `stage∈{prepared,c_persisted,a_deleted}` → 先跑恢复扫描再返回；`failed/rolled_back` 允许同 key 重试（attempts+1，C 若已存在先校验 sha256）。
 - journal 保留最近 200 条或 90 天（先到为准）；failed 保留至解决；GC 只删 journal/preimage，不删 C。**Stage 1/2 不实现自动 GC**：Stage 1 工具默认 off，journal 只由显式 CLI 在隔离 dataDir 产生；Stage 2 shadow 钩子零写，不调用 GC。`gcMergeJournals`（200 条/90 天、failed 永不删）已随 S01 实现，由 Stage 3 执行路径或 CLI maintenance 在持 merge 锁时调用，不在本轮接入。
 
@@ -129,7 +129,6 @@ Stage 1 只交付这两层 + 影子 CLI；`persona.mergeScene.mode` 默认 `off`
 Stage 1 以 `plan.metrics`、`executeMerge`/`recoverMergeJournal` 返回值与 CLI 单行 JSON 交付；Stage 2 已有 logger seam，钩子 metric 见 §4.13，字段为实现子集（不再承诺 `anchorLost`/`linesConserved`/`capRatio`——守恒断言已由 `planMerge` 直接拒绝）：
 
 - `metric=l2_merge`（Stage 2 已实现）：mode/result(planned|rejected|skipped|error)/code/key(前 12 位)/pair/target/charsA/charsB/charsC/anchorsIn/anchorsOut/readViewChars/sharedAnchors/scanned/elapsedMs；禁正文/summary/锚点 id 列表。超预算与异常一律 warn。
-- `metric=l2_merge_lock`：waitMs/acquired/staleReclaimed/LOCK_BUSY。
 - 锚点全局 diff/ALERT 推迟到 Stage 3：Phase 5 的合法删场景与 `preExtractSnapshots`（Phase 4 前按 index 的内存快照）口径冲突会稳定误报；Stage 2 shadow 只对单次 planned A/B 做正文锚点守恒（复用 `planMerge` 已有断言），不实现全局 diff、不停用工具。
 - journal stage 迁移逐条落日志；`MERGE_RECOVERED` 计数。
 
@@ -142,7 +141,7 @@ Stage 1 以 `plan.metrics`、`executeMerge`/`recoverMergeJournal` 返回值与 C
 ### 4.13 Stage 2：L2 钩子（shadow）
 
 - 位置：`scene-extractor.ts` `extract()` Phase 4 成功之后、Phase 5 之前（约 :466）。**fail-soft**：钩子任何异常只 `logger.warn`，不得影响 L2 抽取结果/返回码。
-- 启用：仅 `persona.mergeScene.mode === "shadow"` 时进入；`off` 零调用零 I/O；`on` 仍在解析期拒绝（Stage 3 才允许）。钩子不读提示词、不注入工具，自治靠代码。
+- 启用：仅 `persona.mergeScene.mode === "shadow"` 时进入；`off` 零调用零 I/O；`on` 在 Stage 3 已解析期放行（须非空 `candidatePairs` 且 `maxPairsPerRound=1`，见 §4.14）。钩子不读提示词、不注入工具，自治靠代码。
 - 输入：以 `scene_blocks` 目录事实为准，跳过 `-archive.md`、META `archive:true`、`[DELETED]`/空、非 v2 布局文件。不信任 `scene_index` sidecar（可能 stale/含软删）。读取必须与 Phase 5 同款双模式：有 `this.storage` 时用 `storage.readdirNames(StoragePaths.sceneBlocksDir, ".md")` + `storage.readFile`（只读），否则用 `node:fs/promises`。**不得以 `this.storage` 非空推断「非本地」**：`gateway/server.ts:704-715` 对 standalone/local 也无条件注入 `LocalStorageBackend`，在役网关该字段恒非空；执行器（Stage 3）的原子性门禁只看 `backend.type === "local"`。shadow 下禁止任何 storage 写。
 - 选对（确定性，无 LLM/随机）：
   1. 配置 `candidatePairs` 非空时按配置顺序取第一对可用者（两文件都存在、非头部、非归档、v2、非空、非 `[DELETED]`；可用性与自动选对共用 `isMergeShadowCandidate` 同一过滤口径，不合格对继续试下一对）；列表非空但无一可用 → `result=rejected code=candidate_unavailable`，**不回退**自动选择（白名单是显式意图）。每轮最多 1 对。
@@ -155,6 +154,23 @@ Stage 1 以 `plan.metrics`、`executeMerge`/`recoverMergeJournal` 返回值与 C
 - Stage 2 门禁（A-G）：A 网关真实装配级 metric（`pipeline-factory` 传参 + 不 mock 的集成测试：真实工厂装配 → 真实 `extract()` → `l2_merge result=planned`）；B 直调私有 `runMergeShadowHook`（不跑 Phase 5）后 `dataDir` 整树（含 `.metadata`）sha256 全等，同目录完整 `extract()` 对照只要求 `scene_blocks` 子树逐字节不变且无 journal/.merge-tmp/.part；C backend 矩阵（`LocalStorageBackend` 读取正常、无 storage 的 fs 路径正常、不得以 storage 非空判不支持）；D 确定性（同输入两次 selection/metric 相同）；E 故障注入（candidatePairs 不可用 / readdir throw / 超预算 → L2 结果 success 不变，`scene_blocks` 子树零写）；F 生产 23 场景只读副本整轮 <5s、≥1 对 planned 且 metrics 字段完整、`scene_blocks` 逐字节不变；G 全量回归全绿（沙箱 HOME）+ 变异覆盖 selection/candidatePairs/装配/预算分支 ≥8 条；报告带源码 sha 且 `sourceStable`。Stage 2 通过后才进 Stage 3（`mode=on` 生产开关用户已口头批准，仍以门禁通过为前提）。
 - 2026-11-20 00:05 CST Stage 2 门禁首跑（报告 `reviews/merge-stage2-shadow-gate-20261119.json`）：verdict=pass，A–G 全 pass，G 为 137 files / 1632 tests 全绿，F 自动选对 `AIHOT晨报-自动化发送与免费模型观察.md` + OpenCode 场景（charsA=18,492 / charsB=12,158 / charsC=31,045 / anchors=90 / 158ms），生产 profile 462 文件 sha256+mtime 前后全等，`sourceStable=true`，总耗时约 27.9s。
 - 2026-11-20 00:3x CST S05 双审修复后门禁重跑（同一报告路径已刷新）：verdict=pass，A–G 全 pass——A 含真实工厂装配 → 真实 extract 的 `planned` 集成用例；G 为 138 files / 1637 tests 全绿 + 变异 12/12 killed（survived/invalid=0，originalSha 与当前源码一致）；F 仍自动选对同一对（charsA=18,492 / charsB=12,158 / charsC=31,045 / anchorsIn=90 / anchorsOut=90 / 157ms）；生产 profile 462 文件 sha256+mtime 前后全等，`sourceStable=true`，总耗时 35.8s。
+
+### 4.14 Stage 3：mode=on 执行路径（2026-11-20 立项；门禁 H 冻结复跑 PASS（A–L + M/N），H-7 回归 138/1652 绿，双审 P0/P1 清零；2026-11-20 01:30 生产首轮 merged 23→22，`mode=on` 生效中）
+
+- 启用：`persona.mergeScene.mode="on"` 解析期放行（删除 Stage 1 的解析期拒绝）；**on 必须同时配置非空 `candidatePairs`**（显式白名单，解析期 fail-closed），`maxPairsPerRound` 只允许 1（>1 解析期拒绝）。Stage 3 首轮不做自动选对，防止生产意外合并。
+- 位置与顺序：复用 Stage 2 钩子位置（Phase 4 成功 → Phase 5 前）。on 分支先 `recoverMergeJournal`（收敛上一轮中断），再选对 → `planMerge` → `executeMerge`；每轮最多 1 对；不循环、不追赶。
+- dataDir 与 backend：执行器使用 `this.dataDir`（生产 profile 目录）与 `backend=this.storage?.type`（无 storage 视为 local）；非 local（COS/rowfs）→ 不执行，`result=skipped code=unsupported_backend`（warn），L2 继续。`executeMerge`/`recoverMergeJournal` 新增**仅内部用**的 `allowProductionDataDir?: true`（缺省 false；类型只接受字面量 true）：CLI 恒不传，只有 extractor on 分支传 true；生产目录保护对 Stage 1 CLI 不变。
+- 事务：完全复用 Stage 1 内核（preimage/journal/锁/崩溃恢复/幂等），钩子不自行实现写序。成功后 C 已落盘、A/B 已 unlink、索引/导航已 sync。**同轮 Phase 5 必须跳过本轮合并产物 C**（seams P0：生产 yaml 的 sceneArchive/sceneFactArchive/sceneCompaction/factSupersede 会改写 C，使 done journal 的 sha 与现状不符）——钩子把 merged target 记入实例字段，Phase 5 文件级空分支跳过 spill/compact/supersede/factArchive，下轮恢复治理；`done` journal 的恢复判定放宽为「目标存在且非空即 noop」，sha 强校验只用于非终态 stage。
+- fail-soft：单轮任何异常 → `result=error` + `ALERT=l2_merge_error`（warn），不改变 L2 extract 的 success、不重试本轮；未完成事务由下一轮 `recoverMergeJournal` 收敛。锁忙 → `result=skipped code=lock_busy` 不阻塞 L2。
+- metric：`metric=l2_merge mode=on result=merged|skipped|rejected|error code= key(前12位) pair target charsA/B/C anchorsIn/Out readViewChars journalStage message elapsedMs`；规模字段只在 result=merged 输出；skipped 带 `code=idempotent|retry_completed|recovered|MERGE_LOCK_BUSY` 与 journalStage；白名单两文件被消费后的 `candidate_unavailable` 降为 info（常态），异常/超预算/锁忙 skipped 只 warn；禁正文/summary/锚点 id 列表。
+- 命名：target 由 `deriveMergeTargetName(A,B)` 派生（排序 stems + `-合并.md`），落盘前经 `normalizeSceneFilename` 校验；Stage 1/2 的调用方指定 target 语义保留。
+- GC：on 钩子不调用 `gcMergeJournals`（避免与在途事务竞态）；GC 由 CLI maintenance 在持 merge 锁时执行。
+- 生产启用（用户 2026-11-19 已全权批准）：离线副本门禁 H 全绿 → 备份 `scene_blocks`/`scene_index.json`/`persona.md`/journal → yaml 增 `mergeScene: {mode:"on", candidatePairs:[真实对]}` → 确认 L2 空闲后重启网关 → 观察首轮 metric、场景数 23→22、索引/导航一致；异常回滚 `mode:"off"` + 重启（已合并 C 不回滚，preimage/journal 留存）。
+- 门禁 H：1) 生产副本 23 活动 + 旁观：on 一轮收敛 22、索引/导航 22、旁观 21 逐字节不变、journal=done、metric=merged；2) 独立 verifier 校验 C 结构/锚点正文守恒/读视图；3) 非 local backend → unsupported_backend 零写；4) 生产目录保护：allow=false 时 `MERGE_PRODUCTION_DATADIR`，allow=true 仅内部路径；5) kill -9 在 hook 内 execute 各阶段，下一轮 recover 收敛且不产生第二 C；6) 锁忙/并发不阻塞 L2；7) 全量回归 + 变异 ≥8（on gate/candidatePairs 必填/allow 标志/backend 分支/fail-soft/metric）；8) 双代理审 P0/P1 清零；报告带源码 sha 与 sourceStable。
+- 2026-11-20 01:17 CST 门禁 H 冻结复跑（报告 `reviews/merge-stage3-gate-20261120.json/.md`，源码 sha merge=5c700bd5… extractor=217634a1… config=ae666d07… pipeline-factory=4b99024a…，`sourceStable`）：verdict=pass，A–L 全 pass，并新增 M（done journal 且 C 被改写后再跑一轮：rejected candidate_unavailable、无 `ALERT=l2_merge_error`、journal 仍 done、C 逐字保留）、N（Phase 5 四治理分支对 merged target 零调用、对其他场景有调用）；totalElapsedMs=9689。J kill -9 四点 prepared（trigger=lock，observedStage 空）/c_persisted（observedStage 越过为 a_deleted）/a_deleted（observedStage=a_deleted）/b_deleted（observedStage=b_deleted）均 killed=true、attemptsUsed=1，恢复后 active=22、C 唯一、journal=done、lockReleased=true、无 `.part/.merge-tmp/.json.tmp`（含 `.backup` 递归，快照已过滤原子临时文件）；K 生产 462 文件 sha256+mtime 全等；A metric charsA=12158/charsB=12957/charsC=25509/anchorsIn=Out=88/readView=18000/127ms。
+- 2026-11-20 01:18 CST H-7：沙箱 HOME 全量 `npx vitest run` → 138 files / 1652 tests 全绿（10.97s）；变异 14/14 killed、survived/invalid=0、originalSha=restoredSha=当前源码（`reviews/merge-stage3-mutation-20261120.json`）。
+- 回滚与观测：见 §4.12；生产 on 首轮成功后保留 journal 与备份，7 天观察期内不出问题再 GC。
+- 2026-11-20 01:22–01:31 CST 生产启用实跑：备份 `C:/Users/28951/.memory-tencentdb/memory-tdai/backup-merge-stage3-on-20261120-0121`（38 个 .md + persona.md + scene_index/checkpoint + tdai-gateway.yaml.pre-on + SHA256SUMS.txt 42 行）；yaml 在 `persona.maxL2Batch` 后插入 `mergeScene: {mode:"on", candidatePairs:[AIHOT晨报-自动化发送与免费模型观察.md, 技术研究-Trending日报自动化与开源生态.md], maxPairsPerRound:1}`（改后 20,574 bytes / 345 行，探针按 `doc.memory.persona` 解析得 mode=on、pairs、cap 500000、target 不存在）；旧网关 server PID 28908（wrapper 38708）停止后按 `start-gateway-hidden-v3.bat` 重启，新 server PID 33080，/health ok。L2 timer 01:25:31 推进 +90s 后 01:27 启动首轮 L2 抽取，01:30:12 metric `mode=on result=merged`：key=54d15daff7f2、pair=AIHOT晨报-自动化发送与免费模型观察.md + 技术研究-Trending日报自动化与开源生态.md、target=AIHOT晨报-自动化发送与免费模型观察-技术研究-Trending日报自动化与开源生态-合并.md、charsA=12158 charsB=12957 charsC=25509、anchorsIn=88 anchorsOut=88、readViewChars=18000 sharedAnchors=0、journalStage=done、elapsedMs=416。结果：active 23→22、archive 15（total 37）；C 落盘 48,157 bytes / 134 行 / sha256=14a9b1ce…；A/B 已 unlink；journal stage=done（阶段序列 c_persisted→a_deleted→b_deleted→done，pid 33080，anchorLost=0、bodyLinesLost=0、duplicateAnchorIds=16、pairChars=25115）；scene_index 22 条（含 C、无 A/B）、persona.md 导航 22 个 `### Path:` 且含 C；live `scene_blocks` 无 .part/.merge-tmp/.json.tmp；`ALERT=l2_merge_error` 计数 0；/health status=ok。
 
 ## 5. Testing Decisions
 

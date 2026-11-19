@@ -68,6 +68,8 @@ export class BackupManager {
    * @param category  - Logical grouping (e.g. "scene_blocks")
    * @param tag       - Additional identifier (e.g. "offset42")
    * @param maxKeep   - Max backup directories to retain in this category (0 = unlimited)
+   * @param filter    - Optional file-name predicate; entries rejected are not copied.
+   *                    Used by scene snapshots to skip in-flight atomic temp files.
    * @returns Destination directory path, or undefined when nothing was backed up
    *          (source missing or empty). 2026-10-27 追加返回值供调用方把关联元文件
    *          （persona/index/checkpoint）放进同一次快照。
@@ -77,6 +79,7 @@ export class BackupManager {
     category: string,
     tag: string,
     maxKeep: number,
+    filter?: (name: string) => boolean,
   ): Promise<string | undefined> {
     let entries: import("node:fs").Dirent[];
     try {
@@ -86,7 +89,9 @@ export class BackupManager {
     }
 
     // Only backup regular files (skip subdirectories to avoid EISDIR errors)
-    const files = entries.filter((e) => e.isFile()).map((e) => e.name);
+    const files = entries
+      .filter((e) => e.isFile() && (filter ? filter(e.name) : true))
+      .map((e) => e.name);
     if (files.length === 0) return undefined;
 
     const parentDir = path.join(this.backupRoot, category);

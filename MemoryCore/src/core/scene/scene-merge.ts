@@ -39,7 +39,7 @@ import { renameWithRetry } from "../../utils/checkpoint.js";
 import { readSceneIndex, syncSceneIndex, type SceneIndexEntry } from "./scene-index.js";
 import { generateSceneNavigation, stripSceneNavigation } from "./scene-navigation.js";
 
-/** Stage 1 允许的合并模式；on 在 Stage 3 另行批准前不可用。 */
+/** 合并模式：off=不做（零 I/O）；shadow=只读选对+plan 计量；on=真实事务（Stage 3，需白名单）。 */
 export type MergeSceneMode = "off" | "shadow" | "on";
 
 /** `persona.mergeScene` 的已解析配置。 */
@@ -237,11 +237,8 @@ export function parseMergeSceneConfig(
   const modeRaw = obj.mode === undefined ? "off" : obj.mode;
   if (modeRaw !== "off" && modeRaw !== "shadow" && modeRaw !== "on") {
     fail(
-      `mode 非法值 ${JSON.stringify(obj.mode)}（合法：off|shadow|on；Stage 1 只允许 off|shadow）`,
+      `mode 非法值 ${JSON.stringify(obj.mode)}（合法：off|shadow|on）`,
     );
-  }
-  if (modeRaw === "on") {
-    fail("mode=on 在 Stage 1 不允许（Stage 1 只允许 off|shadow；on 需 Stage 3 另行批准）");
   }
   const mode = modeRaw as MergeSceneMode;
 
@@ -292,6 +289,16 @@ export function parseMergeSceneConfig(
       if (headSceneSet.has(name)) {
         fail(`candidatePairs 含头部场景 ${JSON.stringify(name)}（头部场景禁止合并）`);
       }
+    }
+  }
+
+  // Stage 3 首轮把 on 收紧为「显式白名单 + 每轮单对」，防止生产意外自动合并。
+  if (mode === "on") {
+    if (candidatePairs.length === 0) {
+      fail("mode=on 必须显式配置非空 candidatePairs（Stage 3 首轮禁止自动选对）");
+    }
+    if (maxPairsPerRound !== 1) {
+      fail(`mode=on 时 maxPairsPerRound 必须为 1（当前 ${maxPairsPerRound}）`);
     }
   }
 
@@ -986,7 +993,7 @@ export function planMerge(
 // 冒充可收敛。生产 dataDir 由路径守卫硬拒绝，只有隔离的临时 dataDir 可执行。
 // ---------------------------------------------------------------------------
 
-export type MergeSceneBackend = "local" | "storage" | "cos" | "rowfs";
+export type MergeSceneBackend = "local" | "storage" | "cos" | "rowfs" | "mongofs";
 
 export type MergeSceneExecuteErrorCode =
   | "MERGE_UNSUPPORTED_ATOMICITY"
@@ -1013,6 +1020,11 @@ export interface ExecuteMergeOptions {
   backend?: MergeSceneBackend;
   /** 仅供测试注入；缺省 node:fs/promises（真实本地 fs）。 */
   fsMod?: typeof fs;
+  /**
+   * 仅内部使用：允许在生产 profile dataDir 执行（Stage 3 extractor on 分支传字面量 true）。
+   * CLI 与测试缺省 false，生产目录保护不变；类型收窄为 true 防止误传变量。
+   */
+  allowProductionDataDir?: true;
 }
 
 export type MergeJournalStage =
@@ -1060,6 +1072,8 @@ export interface MergeSceneExecuted {
   ok: true;
   /** merged=本事务写入；skipped=幂等命中已有 journal，零写。 */
   status: "merged" | "skipped";
+  /** skipped 时区分幂等命中与重试补完（指标聚合用，Standards P1-2）。 */
+  code?: "idempotent" | "retry_completed";
   /** skipped 时可能来自别的 target，故以 journal 记录为准。 */
   journalStage?: MergeJournalStage;
   /** 幂等/不重试原因等人类可读说明。 */
@@ -1112,7 +1126,7 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-/** 生产数据目录硬拒绝：Stage 1/2 只允许隔离临时 dataDir。 */
+/** 生产数据目录硬拒绝：CLI/测试只允许隔离临时 dataDir；仅 extractor on 分支传 allowProductionDataDir=true 放行。 */
 function assertNotProductionDataDir(dataDir: string): void {
   const normalized = path.resolve(dataDir).replace(/\\/g, "/").toLowerCase();
   if (
@@ -1123,7 +1137,7 @@ function assertNotProductionDataDir(dataDir: string): void {
   ) {
     throw new MergeExecutionError(
       "MERGE_PRODUCTION_DATADIR",
-      "拒绝在生产数据目录执行合并事务（Stage 1/2 只允许隔离临时 dataDir）",
+      "拒绝在生产数据目录执行合并事务（仅 on 分支传 allowProductionDataDir=true 可放行）",
       { dataDir },
     );
   }
@@ -1199,7 +1213,8 @@ async function writeFileDurable(fsMod: typeof fs, file: string, content: string)
   }
 }
 
-const ATOMIC_REPLACE_TMP_SUFFIX = ".merge-tmp";
+/** 原子替换临时后缀；快照/备份据此排除瞬时文件（门禁 H J_kill9 残留根因）。 */
+export const MERGE_ATOMIC_REPLACE_TMP_SUFFIX = ".merge-tmp";
 
 /**
  * 原子替换已存在文件：同目录临时文件写完 fsync，再 rename 覆盖目标。
@@ -1209,7 +1224,7 @@ const ATOMIC_REPLACE_TMP_SUFFIX = ".merge-tmp";
  * 临时文件后缀不以 .md 结尾，不会进入 scene_index / Phase5 清理范围。
  */
 async function writeFileAtomicDurable(fsMod: typeof fs, file: string, content: string): Promise<void> {
-  const tmp = file + ATOMIC_REPLACE_TMP_SUFFIX;
+  const tmp = file + MERGE_ATOMIC_REPLACE_TMP_SUFFIX;
   await writeFileDurable(fsMod, tmp, content);
   await renameWithRetry(fsMod, tmp, file);
 }
@@ -1224,7 +1239,7 @@ async function removeAtomicReplaceTemps(fsMod: typeof fs, dir: string): Promise<
     throw err;
   }
   for (const name of names) {
-    if (!name.endsWith(ATOMIC_REPLACE_TMP_SUFFIX)) continue;
+    if (!name.endsWith(MERGE_ATOMIC_REPLACE_TMP_SUFFIX)) continue;
     await unlinkIfExists(fsMod, path.join(dir, name));
   }
 }
@@ -1485,7 +1500,7 @@ export async function executeMerge(opts: ExecuteMergeOptions): Promise<ExecuteMe
     if (backend !== "local") {
       throw new MergeExecutionError(
         "MERGE_UNSUPPORTED_ATOMICITY",
-        "Stage 1/2 只支持本地 fs；storage/COS/rowfs 不具备原子 rename，拒绝进入写路径",
+        "Stage 1/2 只支持本地 fs；storage/COS/rowfs/mongofs 不具备原子 rename，拒绝进入写路径",
         { backend },
       );
     }
@@ -1499,7 +1514,7 @@ export async function executeMerge(opts: ExecuteMergeOptions): Promise<ExecuteMe
       throw new MergeExecutionError("MERGE_IO_ERROR", "dataDir 必须是非空字符串");
     }
     const dataDir = path.resolve(opts.dataDir);
-    assertNotProductionDataDir(dataDir);
+    if (!opts.allowProductionDataDir) assertNotProductionDataDir(dataDir);
     const plan = opts.plan;
     assertPlanShape(plan);
 
@@ -1557,6 +1572,7 @@ export async function executeMerge(opts: ExecuteMergeOptions): Promise<ExecuteMe
           return {
             ok: true,
             status: "skipped",
+            code: "idempotent",
             key: existingJournal.key,
             target: existingJournal.target.filename,
             journalPath: existingPaths.file,
@@ -1585,6 +1601,7 @@ export async function executeMerge(opts: ExecuteMergeOptions): Promise<ExecuteMe
             return {
               ok: true,
               status: "skipped",
+              code: "retry_completed",
               key: finalJournal.key,
               target: finalJournal.target.filename,
               journalPath: existingPaths.file,
@@ -1768,6 +1785,8 @@ export interface RecoverMergeOptions {
   fsMod?: typeof fs;
   /** 只恢复指定 key；缺省扫描 journalDir 下全部 *.json。 */
   key?: string;
+  /** 仅内部使用：允许在生产 profile dataDir 恢复（Stage 3 extractor on 分支传字面量 true）。 */
+  allowProductionDataDir?: true;
 }
 
 export type RecoverMergeResult =
@@ -1969,7 +1988,11 @@ async function finishMergedJournal(
       target: journal.target.filename,
     });
   }
-  const tolerateMissing = journal.stage === "b_deleted";
+  // C 已校验存在且 sha 匹配：从 a_deleted/b_deleted/failed 恢复时，A/B 可能已被前一轮
+  // Phase 5 的软删清理 unlink，视为删除已完成（Stage 3 执行与 Phase 5 交错的关键容忍）。
+  // 但 prepared/c_persisted 阶段尚未开始删 A/B，缺失说明存在外部并发删除，仍须报冲突
+  // （Standards P1-1：按阶段容忍，不做 blanket true）。
+  const tolerateMissing = stageBefore !== "prepared" && stageBefore !== "c_persisted";
   const aCurrent = await readTextOrNull(fsMod, aPath);
   const bCurrent = await readTextOrNull(fsMod, bPath);
   await writeRecoveredDeletion(fsMod, aPath, aCurrent, preimages.a, "A", tolerateMissing);
@@ -2003,12 +2026,17 @@ async function recoverJournalUnderLock(
   const sceneDir = path.join(dataDir, "scene_blocks");
   const targetPath = path.join(sceneDir, journal.target.filename);
   const targetRaw = await readTextOrNull(fsMod, targetPath);
+  // [Stage 3 seams P0] done 只要求 C 存在且非空：同轮 Phase 5 治理（spill/compact/
+  // supersede/factArchive）或后续 LLM 正常编辑都会改写 C，若继续按 sha256 强校验会
+  // 每轮误报 MERGE_CONFLICT 并永久阻塞新合并。sha256 严格比对只保留在非终态 stage
+  // （c_persisted 等）用于判定“补齐重写是否已发生”；终态下 sha 仅作为执行时快照记录。
+  const cExistsNonEmpty = targetRaw !== null && targetRaw.trim().length > 0;
   const cValid =
     targetRaw !== null && targetRaw.trim().length > 0 && sha256Text(targetRaw) === journal.target.sha256;
 
   if (stageBefore === "done") {
-    if (!cValid) {
-      throw new MergeExecutionError("MERGE_CONFLICT", "journal=done 但目标 C 缺失或 sha 不匹配");
+    if (!cExistsNonEmpty) {
+      throw new MergeExecutionError("MERGE_CONFLICT", "journal=done 但目标 C 缺失或为空");
     }
     return {
       key: journal.key,
@@ -2182,7 +2210,7 @@ export async function recoverMergeJournal(opts: RecoverMergeOptions): Promise<Re
     if (backend !== "local") {
       throw new MergeExecutionError(
         "MERGE_UNSUPPORTED_ATOMICITY",
-        "Stage 1/2 只支持本地 fs 的 journal 恢复",
+        "Stage 1/2 只支持本地 fs 的 journal 恢复（storage/COS/rowfs/mongofs 一律拒绝）",
         { backend },
       );
     }
@@ -2193,7 +2221,7 @@ export async function recoverMergeJournal(opts: RecoverMergeOptions): Promise<Re
       throw new MergeExecutionError("MERGE_IO_ERROR", "config 缺失");
     }
     const dataDir = path.resolve(opts.dataDir);
-    assertNotProductionDataDir(dataDir);
+    if (!opts.allowProductionDataDir) assertNotProductionDataDir(dataDir);
     const journalRoot = path.join(dataDir, ...opts.config.journalDir.split("/"));
     let files: string[];
     if (opts.key) {

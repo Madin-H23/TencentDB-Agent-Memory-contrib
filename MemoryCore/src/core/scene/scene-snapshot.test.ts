@@ -132,4 +132,26 @@ describe("writeSceneSnapshot（只写快照，不接 restore）", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  // 门禁 H J_kill9（2026-11-20）：kill -9 可能把 merge 原子替换临时文件
+  // <name>.md.merge-tmp 留在 scene_blocks；快照必须排除它，否则恢复只清 live 目录，
+  // 快照内残留会污染备份并让递归产物检查误判。
+  it("排除 merge 原子替换临时文件（.merge-tmp 不进快照）", async () => {
+    const dir = mkdata();
+    const tmpName = "c.md.merge-tmp";
+    try {
+      writeFileSync(join(dir, "scene_blocks", tmpName), "# in-flight\n");
+      expect(await writeSceneSnapshot({ dataDir: dir, keep: 10, tag: "atomic", logger })).toBe(true);
+      const snap = snapshots(dir)[0];
+      expect(readdirSync(join(dir, ".backup", "scene_blocks", snap)).sort()).toEqual(["a.md", "b.md"]);
+      // 源目录不动：临时文件仍留给恢复路径清理
+      expect(readdirSync(join(dir, "scene_blocks")).sort()).toEqual(["a.md", "b.md", tmpName]);
+      const manifest = JSON.parse(
+        readFileSync(join(dir, ".backup", "profile_meta", snap, "manifest.json"), "utf8"),
+      );
+      expect(manifest.sceneFiles).toBe(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

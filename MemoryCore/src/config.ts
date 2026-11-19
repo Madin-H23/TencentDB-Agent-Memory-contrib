@@ -938,7 +938,7 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       sceneArchive: parseSceneArchiveConfig(personaGroup.sceneArchive),
       // 票 origin#31（两段式）：事实段行级归档，默认 undefined=off（Phase 5 零 I/O）。
       sceneFactArchive: parseSceneFactArchiveConfig(personaGroup.sceneFactArchive),
-      // SPEC-E Stage 1：确定性 mergeScene（默认 off）；on 在解析期显式拒绝。
+      // SPEC-E：确定性 mergeScene（默认 off）；on 需非空 candidatePairs 且 maxPairsPerRound=1。
       mergeScene: parseMergeSceneConfig(
         personaGroup.mergeScene,
         num(personaGroup, "sceneCharCap") ?? DEFAULT_SCENE_CHAR_CAP,

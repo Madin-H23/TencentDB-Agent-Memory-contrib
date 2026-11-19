@@ -227,6 +227,18 @@ describe("recoverMergeJournal (T04)", () => {
     expect(listScenes(f.dataDir)).toEqual(["merged-scene.md", "other.md"]);
   });
 
+  it("a_deleted with A already unlinked by Phase 5 still completes to 2 scenes", async () => {
+    const f = fixture();
+    writeJournal(f, { stage: "a_deleted" });
+    // 模拟 Stage 3 执行失败后、下一轮恢复前 Phase 5 把 [DELETED] A unlink 掉。
+    unlinkSync(join(f.dataDir, "scene_blocks", "alpha.md"));
+    const result = await recoverMergeJournal({ dataDir: f.dataDir, config: f.config });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error.message);
+    expect(result.outcomes[0].action).toBe("completed");
+    expect(listScenes(f.dataDir)).toEqual(["merged-scene.md", "other.md"]);
+  });
   it("b_deleted unlinks both soft-deleted files and converges to 2 scenes", async () => {
     const f = fixture();
     writeJournal(f, { stage: "b_deleted" });
@@ -249,6 +261,25 @@ describe("recoverMergeJournal (T04)", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error(result.error.message);
     expect(result.outcomes[0]).toMatchObject({ action: "noop", stageBefore: "done", stageAfter: "done" });
+    expect(listScenes(f.dataDir)).toEqual(["merged-scene.md", "other.md"]);
+  });
+
+  it("done with a legitimately rewritten C (Phase 5 governance) is still a no-op", async () => {
+    // [Stage 3 seams P0] 终态 journal 的 sha256 只是执行时快照：同轮 Phase 5 治理或后续
+    // LLM 正常编辑都会改写 C，恢复必须按「存在且非空」判定 noop，不能按 sha 误报冲突。
+    const f = fixture();
+    const journalPath = writeJournal(f, { stage: "done" });
+    const targetPath = join(f.dataDir, "scene_blocks", f.plan.target);
+    const rewritten = f.plan.c.raw + "\n\n## 活动\n- 合并后 Phase 5 追加行";
+    writeFileSync(targetPath, rewritten, "utf8");
+
+    const result = await recoverMergeJournal({ dataDir: f.dataDir, config: f.config });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error.message);
+    expect(result.outcomes[0]).toMatchObject({ action: "noop", stageBefore: "done", stageAfter: "done" });
+    expect(readFileSync(targetPath, "utf8")).toBe(rewritten);
+    expect(readJournal(journalPath).stage).toBe("done");
     expect(listScenes(f.dataDir)).toEqual(["merged-scene.md", "other.md"]);
   });
 
@@ -519,5 +550,44 @@ describe("executeMerge idempotency (T04)", () => {
     if (result.ok) throw new Error("expected conflict");
     expect(result.error.code).toBe("MERGE_CONFLICT");
     expect(listScenes(f.dataDir)).toEqual(["alpha.md", "beta.md", "merged-scene.md", "other.md"]);
+  });
+
+  it("rejects non-local backends and the production dataDir unless allowProductionDataDir", async () => {
+    const dataDir = tempDataDir();
+    const config = getConfig();
+    const nonLocal = await recoverMergeJournal({ dataDir, config, backend: "storage" });
+    expect(nonLocal.ok).toBe(false);
+    if (nonLocal.ok) throw new Error("expected unsupported backend");
+    expect(nonLocal.error.code).toBe("MERGE_UNSUPPORTED_ATOMICITY");
+    expect(existsSync(join(dataDir, ".metadata"))).toBe(false);
+
+    const productionLike = join(tmpdir(), ".memory-tencentdb", "memory-tdai", "merge-stage3-recover-" + Date.now());
+    cleanupDirs.push(productionLike);
+    const guarded = await recoverMergeJournal({ dataDir: productionLike, config });
+    expect(guarded.ok).toBe(false);
+    if (guarded.ok) throw new Error("expected production guard");
+    expect(guarded.error.code).toBe("MERGE_PRODUCTION_DATADIR");
+    expect(existsSync(productionLike)).toBe(false);
+
+    const allowed = await recoverMergeJournal({ dataDir: productionLike, config, allowProductionDataDir: true });
+    expect(allowed.ok).toBe(true);
+    if (!allowed.ok) throw new Error(allowed.error.message);
+    expect(allowed.scanned).toBe(0);
+  });
+
+  it("prepared 阶段 A 已被外部删除时仍报 MERGE_CONFLICT（不放宽为 blanket 容忍）", async () => {
+    const f = fixture();
+    const journalPath = writeJournal(f, { stage: "prepared", withC: true });
+    expect(existsSync(journalPath)).toBe(true);
+    const aPath = join(f.dataDir, "scene_blocks", f.plan.a.filename);
+    unlinkSync(aPath); // 模拟外部并发删除；prepared 阶段尚未轮到删 A
+
+    const result = await recoverMergeJournal({ dataDir: f.dataDir, config: f.config });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected conflict");
+    expect(result.error.code).toBe("MERGE_CONFLICT");
+    // 不覆盖外部事实：A 不会被凭 preimage 重建，C 已落盘但事务未收敛。
+    expect(existsSync(aPath)).toBe(false);
+    expect(existsSync(join(f.dataDir, "scene_blocks", f.plan.target))).toBe(true);
   });
 });

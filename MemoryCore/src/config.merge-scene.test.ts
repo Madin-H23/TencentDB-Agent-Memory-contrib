@@ -75,8 +75,43 @@ describe("parseConfig：persona.mergeScene 解析", () => {
     expect(cfg?.headScenes).toEqual(["技术研究-TDAI治理.md"]);
   });
 
-  it("mode=on 在 Stage 1/2 拒绝（fail-closed，不静默降级）", () => {
-    expect(() => parseConfig({ persona: { mergeScene: { mode: "on" } } })).toThrow(/mergeScene.*on/);
+  it("mode=on 解析放行，但必须带非空 candidatePairs（Stage 3 白名单）", () => {
+    expect(() => parseConfig({ persona: { mergeScene: { mode: "on" } } })).toThrow(/candidatePairs/);
+    const cfg = parseConfig({
+      persona: {
+        sceneCharCap: 500_000,
+        mergeScene: { mode: "on", candidatePairs: [{ a: "技术研究-a.md", b: "技术研究-b.md" }] },
+      },
+    }).persona.mergeScene!;
+    expect(cfg.mode).toBe("on");
+    expect(cfg.candidatePairs).toHaveLength(1);
+  });
+
+  it("mode=on 时 maxPairsPerRound 必须为 1", () => {
+    expect(() =>
+      parseConfig({
+        persona: {
+          sceneCharCap: 500_000,
+          mergeScene: {
+            mode: "on",
+            candidatePairs: [{ a: "技术研究-a.md", b: "技术研究-b.md" }],
+            maxPairsPerRound: 2,
+          },
+        },
+      }),
+    ).toThrow(/maxPairsPerRound/);
+    expect(
+      parseConfig({
+        persona: {
+          sceneCharCap: 500_000,
+          mergeScene: {
+            mode: "on",
+            candidatePairs: [{ a: "技术研究-a.md", b: "技术研究-b.md" }],
+            maxPairsPerRound: 1,
+          },
+        },
+      }).persona.mergeScene?.maxPairsPerRound,
+    ).toBe(1);
   });
 
   it("非法 mode / 类型 → throw", () => {

@@ -241,6 +241,27 @@ describe("executeMerge (T03 local fs happy path)", () => {
     expect(existsSync(productionLike)).toBe(false);
   });
 
+  it("allowProductionDataDir=true 仅绕过生产目录保护（内部 on 分支），仍走 preflight", async () => {
+    const source = tempDataDir();
+    writeScene(source, "alpha.md", sceneRaw("m_1795000000000_aaaaaaaa", "alpha", "2026-11-01T00:00:00.000Z"));
+    writeScene(source, "beta.md", sceneRaw("m_1795000000001_bbbbbbbb", "beta", "2026-11-02T00:00:00.000Z"));
+    const { config, plan } = makePlan(source, "alpha.md", "beta.md");
+    const productionLike = join(tmpdir(), ".memory-tencentdb", "memory-tdai", "merge-stage3-allow-" + Date.now());
+
+    const result = await executeMerge({
+      plan,
+      config,
+      sceneCharCap: SCENE_CHAR_CAP,
+      dataDir: productionLike,
+      allowProductionDataDir: true,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected preflight failure");
+    // 只在 preflight 前有锁内零数据写：输入场景不存在 → MERGE_CONFLICT（不是生产保护）。
+    expect(result.error.code).toBe("MERGE_CONFLICT");
+    cleanupDirs.push(productionLike);
+  });
+
   it("returns MERGE_TARGET_EXISTS and releases the lock when the target appears after planning", async () => {
     const dataDir = tempDataDir();
     writeScene(dataDir, "alpha.md", sceneRaw("m_1795000000000_aaaaaaaa", "alpha", "2026-11-01T00:00:00.000Z"));
@@ -253,5 +274,23 @@ describe("executeMerge (T03 local fs happy path)", () => {
     if (result.ok) throw new Error("expected target existing");
     expect(result.error.code).toBe("MERGE_TARGET_EXISTS");
     expect(existsSync(join(dataDir, ".metadata", "merge.lock"))).toBe(false);
+  });
+
+  it("同 key 已完成再次执行：skipped idempotent，零写且不产生第二个 C（Standards P1-2）", async () => {
+    const dataDir = tempDataDir();
+    writeScene(dataDir, "alpha.md", sceneRaw("m_1795000000000_aaaaaaaa", "alpha", "2026-11-01T00:00:00.000Z"));
+    writeScene(dataDir, "beta.md", sceneRaw("m_1795000000001_bbbbbbbb", "beta", "2026-11-02T00:00:00.000Z"));
+    const { config, plan } = makePlan(dataDir, "alpha.md", "beta.md");
+    const first = await executeMerge({ plan, config, sceneCharCap: SCENE_CHAR_CAP, dataDir });
+    expect(first.ok).toBe(true);
+    const snapshot = readdirSync(join(dataDir, "scene_blocks")).sort();
+
+    const second = await executeMerge({ plan, config, sceneCharCap: SCENE_CHAR_CAP, dataDir });
+    expect(second.ok).toBe(true);
+    if (!second.ok) throw new Error("expected idempotent hit");
+    expect(second.status).toBe("skipped");
+    expect(second.code).toBe("idempotent");
+    expect(second.journalStage).toBe("done");
+    expect(readdirSync(join(dataDir, "scene_blocks")).sort()).toEqual(snapshot);
   });
 });
