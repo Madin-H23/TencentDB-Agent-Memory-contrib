@@ -2,13 +2,15 @@
  * memory-tdai CLI entry point.
  *
  * Registers the `memory-tdai` namespace under the OpenClaw CLI and
- * wires up all subcommands (currently: `seed`).
+ * wires up all subcommands (currently: `seed`, `merge` shadow tooling).
  *
  * Registration path:
  *   index.ts → api.registerCli() → registerMemoryTdaiCli() → registerSeedCommand()
+ *                                                     → registerMergeCommand()
  */
 
 import type { Command } from "commander";
+import { registerMergeCommand } from "./commands/merge.js";
 import { registerSeedCommand } from "./commands/seed.js";
 
 // ============================
@@ -54,6 +56,7 @@ export interface SeedCliContext {
 export function registerMemoryTdaiCli(program: Command, ctx: SeedCliContext): void {
   // Register subcommands
   registerSeedCommand(program, ctx);
+  registerMergeCommand(program, ctx);
 
   // Future: registerQueryCommand(program, ctx);
   // Future: registerStatsCommand(program, ctx);
