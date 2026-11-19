@@ -193,14 +193,34 @@ memory:
     # 动机=场景文件只增不减（it-ops 100% 帽死锁已一次性解锁；机制化滚动窗口防复发·
     # 抢在 ⑧ 折叠前把旧批次段搬进可召回 <scene>-archive.md·锚点全局守恒·读视图零变化）。
     # 审核闭环=spill 先于 ⑧（P0-2）/archive 先行 main 后行+段 date 去重（P0-3）/
-    # isArchiveFile 守卫（P1-3）；回滚=删本行+重启。
-    sceneArchive: true
+    # isArchiveFile 守卫（P1-3）。
+    # 2026-11-19 值守 on 切换（用户令「为了根治进行切换」）：shadow 观测 7 天，
+    # 多场景真实候选（生活 30 段/8774 字符、职业 37 段/8082 字符、闲鱼 4 段/2108 字符）
+    # 且 conserved=true（锚点守恒断言已验证）→ 拨 on 执行 spill 根治场景帽缓升。
+    # 依据：场景体量只增不减致治理场景 @95.8% 触 ALERT（cap 400K），⑧ 已折完活动段
+    # 旧叙事，残余候选须靠归档搬进可召回 <scene>-archive.md。切换前快照备份于
+    # backup-pre-archive-on-20261119（23 文件/4.9M）；锚点基线 2507/lost0。
+    # 回滚=改回 true（shadow）或删本行+重启。
+    sceneArchive:
+      enabled: true
+      mode: on
+      ageDays: 10
+      protectScenes: []
     # 2026-11-17 值守 ops（ops 三箭之三）：事实段行级归档 shadow 拨档（#31 已合并
     # c2aee10·两段式=superseded 体量卫生+冷行治帽·用户拍板当日实现收官）。shadow=
     # 只打 metric=l2_fact_archive（candidates/superseded/cold/freed/conserved·候选
-    # 规模与锚点分布报告=票面验收①）不写盘；on 才摘行双写（切换留用户）。ageDays
-    # 默认 60（严格大于对齐 C 案）。回滚=删本行+重启。
-    sceneFactArchive: true
+    # 规模与锚点分布报告=票面验收①）不写盘；on 才摘行双写。ageDays
+    # 默认 60（严格大于对齐 C 案）。
+    # 2026-11-19 值守 on 切换（用户令「为了根治进行切换」）：scene-near-cap 根因=
+    # 事实段 v2 形态只增不减（⑧ 已折完活动段，体量转移到事实行）。shadow 观测
+    # 多场景真实候选（生活 20 冷行/3764 字符、职业 9 冷行/3477 字符）且 conserved=true
+    # → 拨 on 执行摘行双写根治。切换前已备份场景文件 + 锚点基线 2507/lost0。
+    # 回滚=改回 true（shadow）或删本行+重启。
+    sceneFactArchive:
+      enabled: true
+      mode: on
+      ageDays: 60
+      protectScenes: []
     # 2026-11-12 拨 shadow（用户令「子代理审查通过则放行」·票P2-A1 分支B1·合流 eb1ae8b）：
     # L1 归档层影子计量——只打 metric=l1_archive_shadow（应归档计数）不写库、零召回过滤
     # （setL1ArchiveFilterActive(mode==on) 对 shadow 恒 false）；ageDays=60=实测
