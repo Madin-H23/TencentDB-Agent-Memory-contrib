@@ -13,6 +13,9 @@ let tmp: string;
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), "gwconfig-err-"));
+  // 隔离运行态覆盖层（origin#41）：与 config.layers 同因，防止本机在役覆写
+  // 文件污染沙箱；本测试当前断言不敏感，但一次性补齐避免将来加断言时假失败。
+  vi.stubEnv("TDAI_RUNTIME_OVERRIDES", join(tmp, "no-overrides.yaml"));
 });
 
 afterEach(() => {
