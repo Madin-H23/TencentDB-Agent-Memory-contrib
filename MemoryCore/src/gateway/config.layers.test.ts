@@ -14,6 +14,10 @@ let tmp: string;
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), "gwconfig-layers-"));
+  // 隔离运行态覆盖层（origin#41）：22dca42 后 loadGatewayConfig 会读
+  // <dataDir>/tdai-runtime-overrides.yaml；不隔离则本机在役覆写文件污染沙箱，
+  // 13 例读到真实配置值而假失败。指向不存在的文件 → fail-soft 回落沙箱 yaml。
+  vi.stubEnv("TDAI_RUNTIME_OVERRIDES", join(tmp, "no-overrides.yaml"));
 });
 
 afterEach(() => {
