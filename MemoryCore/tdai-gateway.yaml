@@ -13,6 +13,14 @@
 deployMode: standalone
 stateBackend: "local"
 
+# ── Worker（2026-11-17 值守 ops：ops 三箭之一）──
+worker:
+  # parked 锁冲突重试上限（#27 已合并 c2aee10 前身 96a5b5e3·默认 off=无限重试）。
+  # 依据=空转证据链：uptime 48h 内 parkedRetryAttempts 824→1338（+514/48h 持续空转）
+  # 且 parked 波动 0→2→0——锁冲突滞留无上限重试纯烧 CPU；true=达 8 次转 deadLetter
+  # （复用既有落库语义·任务可查不丢内容）。对照基线 977 次/12h 期待归零。
+  maxParkedRetries: true
+
 server:
   port: 8420
   host: "127.0.0.1"
@@ -30,28 +38,28 @@ llm:
   #   免费档额度扛不住日常蒸馏量）→ zhipu-free/glm-4.7-flash（10-18 晚起在役）。
   # 备选：智谱coding plan（open.bigmodel.cn/api/coding/paas/v4 订阅端点，key 同
   # TDAI_KEY_ZHIPU，已入面板目录，晚高峰可切）/ deepseek-official（按量付费）。
-  baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4"
+  baseUrl: "https://opencode.ai/zen/go/v1"
   # key 走 yaml 插值（启动件 set TDAI_KEY_ZHIPU）；注意启动件不得再设
   # TDAI_LLM_API_KEY——env 优先于 yaml，会把别家 key 强塞给本厂商。
-  apiKey: "${TDAI_KEY_ZHIPU}"
+  apiKey: "${TDAI_KEY_OPENCODE}"
   # 无自定义请求头：zhipu 不要求固定头（opencode-go 的 x-opencode-session 是
   # 上一家厂商的专项，切走即摘；headers 字段缺省=不发额外头）。
   # 厂商显示名（归属移植，v2 c00899f）：纯展示字段——L1 完成/延后/失败日志与
   # 面板蒸馏记录/死信两卡的「(厂商: 模型)」归属。不参与调用路由。
-  providerLabel: "智谱coding plan"
+  providerLabel: "opencode-go"
   # 全局模型（l2/l3 未显式覆盖 model 时沿用）：glm-4.7-flash（zhipu 免费档）。
   # 已知边界：**上下文远小于 nemotron 的 1M**——L2/L3 长输入会撞 Prompt exceeds
   # max length（10-19 实测 6 次，400 不可重试），待决策分层大上下文模型；
   # 晚高峰易触发上游「访问量过大」（并发负载）与「已达到速率限制」（账户级 RPM，
   # 并发 1 也挡不住）两类限流，退避已兜底、游标不动数据不丢。
-  model: "glm-5.3-flash"
+  model: "hy4-flash-free"
   maxTokens: 65536
   timeoutMs: 120000
   # 进程级并发闸门：按 baseUrl 分桶限流，防多子系统调用叠加触发厂商秒拒；0/缺省=不限。
   # 按厂商并发（2026-10-18）：面板目录条目 maxConcurrency 随切换写入本值——zhipu-free
   # 内置 1（晚高峰持续拥堵实证，串行最稳）；条目无设定=保留现值（生效行有回显，
   # 上家残留可经「编」修改）。
-  maxConcurrency: 4
+  maxConcurrency: 2
   # 整调用硬期限（P1，承接 v2 在役值）：≥ 各层超时+一次退避预算；缺省=timeout×2+30s
   callDeadlineMs: 360000
   # 蒸馏分层覆盖（2026-10-15 移植 v2 llm.layers）。修迁移失误：v3 曾全层单模型
@@ -86,6 +94,10 @@ llm:
       thinkingLevel: max
       # 同 l2（票04）。回退=删本键并重启。
       stream: true
+  headers:
+    # 会话标识走 env 注入（凭据零回显）：面板使用中产生的原值已脱敏，快照见 backup-pre-commit-20261119。
+    # 启动件设 TDAI_OPENCODE_SESSION 即恢复；未设时 expandEnvVars 展开为空串=该头不发。
+    x-opencode-session: ${TDAI_OPENCODE_SESSION}
 
 # ── Memory 引擎 ──
 memory:
@@ -130,6 +142,14 @@ memory:
       judgeTimeoutMs: 15000
       embeddingTimeoutMs: 5000
 
+    # 2026-11-17 值守 ops（ops 三箭之二）：写入侧凭据掩码 shadow 拨档（#28 之③
+    # 已合并 05f086be·双面覆盖 #33 b2e92ca·#34 形态增强 c2aee10）。shadow=不改文
+    # 只计量（metric=capture_credential_mask_shadow·读数=会掩多少处/误伤面）；
+    # on 才真掩（切换留用户）。依据=#28② 就地脱敏实证 9 行明文在库+变体形态
+    # （as_sk_/sk-or-v1-）已内置——shadow 读数验证零误伤后议 on。回滚=删本块+重启。
+    captureCredentialMask:
+      mode: shadow
+
   persona:
     triggerEveryN: 50
     # 场景数上限（2026-10-20 批次 2.3：20 -> 15，恢复上游默认）。此前调到 20
@@ -173,8 +193,34 @@ memory:
     # 动机=场景文件只增不减（it-ops 100% 帽死锁已一次性解锁；机制化滚动窗口防复发·
     # 抢在 ⑧ 折叠前把旧批次段搬进可召回 <scene>-archive.md·锚点全局守恒·读视图零变化）。
     # 审核闭环=spill 先于 ⑧（P0-2）/archive 先行 main 后行+段 date 去重（P0-3）/
-    # isArchiveFile 守卫（P1-3）；回滚=删本行+重启。
-    sceneArchive: true
+    # isArchiveFile 守卫（P1-3）。
+    # 2026-11-19 值守 on 切换（用户令「为了根治进行切换」）：shadow 观测 7 天，
+    # 多场景真实候选（生活 30 段/8774 字符、职业 37 段/8082 字符、闲鱼 4 段/2108 字符）
+    # 且 conserved=true（锚点守恒断言已验证）→ 拨 on 执行 spill 根治场景帽缓升。
+    # 依据：场景体量只增不减致治理场景 @95.8% 触 ALERT（cap 400K），⑧ 已折完活动段
+    # 旧叙事，残余候选须靠归档搬进可召回 <scene>-archive.md。切换前快照备份于
+    # backup-pre-archive-on-20261119（23 文件/4.9M）；锚点基线 2507/lost0。
+    # 回滚=改回 true（shadow）或删本行+重启。
+    sceneArchive:
+      enabled: true
+      mode: on
+      ageDays: 10
+      protectScenes: []
+    # 2026-11-17 值守 ops（ops 三箭之三）：事实段行级归档 shadow 拨档（#31 已合并
+    # c2aee10·两段式=superseded 体量卫生+冷行治帽·用户拍板当日实现收官）。shadow=
+    # 只打 metric=l2_fact_archive（candidates/superseded/cold/freed/conserved·候选
+    # 规模与锚点分布报告=票面验收①）不写盘；on 才摘行双写。ageDays
+    # 默认 60（严格大于对齐 C 案）。
+    # 2026-11-19 值守 on 切换（用户令「为了根治进行切换」）：scene-near-cap 根因=
+    # 事实段 v2 形态只增不减（⑧ 已折完活动段，体量转移到事实行）。shadow 观测
+    # 多场景真实候选（生活 20 冷行/3764 字符、职业 9 冷行/3477 字符）且 conserved=true
+    # → 拨 on 执行摘行双写根治。切换前已备份场景文件 + 锚点基线 2507/lost0。
+    # 回滚=改回 true（shadow）或删本行+重启。
+    sceneFactArchive:
+      enabled: true
+      mode: on
+      ageDays: 60
+      protectScenes: []
     # 2026-11-12 拨 shadow（用户令「子代理审查通过则放行」·票P2-A1 分支B1·合流 eb1ae8b）：
     # L1 归档层影子计量——只打 metric=l1_archive_shadow（应归档计数）不写库、零召回过滤
     # （setL1ArchiveFilterActive(mode==on) 对 shadow 恒 false）；ageDays=60=实测

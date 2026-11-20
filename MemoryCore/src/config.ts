@@ -36,6 +36,10 @@ import {
   type SceneFactArchiveConfig,
 } from "./core/scene/scene-fact-archive.js";
 import {
+  parseMergeSceneConfig,
+  type MergeSceneConfig,
+} from "./core/scene/scene-merge.js";
+import {
   parseSemanticGateConfig,
   type CaptureSemanticGateConfig,
 } from "./core/hooks/capture-semantic-gate.config.js";
@@ -245,6 +249,13 @@ export interface PersonaConfig {
    * 默认 undefined=off；true=shadow+60 天（影子先量）；非法 throw（不静默回落）。
    */
   sceneFactArchive?: SceneFactArchiveConfig;
+  /**
+   * [SPEC-E Stage 1] 确定性场景合并内核（默认 off）：planMerge/executeMerge 的
+   * 配置与门控。Stage 1 只允许 off|shadow；on 在 Stage 3 另行批准前解析即 throw。
+   * 缺省 undefined=off（yaml 不写=现有 L2 行为逐字节不变）；true=shadow+默认值；
+   * 非法 mode/阈值/路径/禁入名单/cap 组合 → throw（parseMergeSceneConfig，不静默回落）。
+   */
+  mergeScene?: MergeSceneConfig;
   /**
    * [P2-A2 L1 小批空转攒批] L1 runner 组并行池前的门槛前置判据：本片全组
    * qualified 均 < minMessages 且 qualified 总 chars < minChars 且 age(切片最旧行)
@@ -909,7 +920,7 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       maxL2Batch: num(personaGroup, "maxL2Batch") ?? 50,
       sceneIndexInPrompt: bool(personaGroup, "sceneIndexInPrompt") ?? false,
       // 方案C（exp/l2-plan-c-write-cap）：显式 0=off 必须原样通过（num() 只滤非有限数值，?? 不吃 0）。
-      sceneCharCap: num(personaGroup, "sceneCharCap") ?? 32_000,
+      sceneCharCap: num(personaGroup, "sceneCharCap") ?? DEFAULT_SCENE_CHAR_CAP,
       // 票⑥（exp/p1-6-supersede-inval）：显式失效替代硬删，默认 off=行为与基线逐字节一致。
       explicitInvalidation: bool(personaGroup, "explicitInvalidation") ?? false,
       // 票⑤（exp/p1-5-scene-format-v2）：场景格式 v2 双层化，默认 off=行为与基线逐字节一致。
@@ -927,6 +938,11 @@ export function parseConfig(raw: Record<string, unknown> | undefined): MemoryTda
       sceneArchive: parseSceneArchiveConfig(personaGroup.sceneArchive),
       // 票 origin#31（两段式）：事实段行级归档，默认 undefined=off（Phase 5 零 I/O）。
       sceneFactArchive: parseSceneFactArchiveConfig(personaGroup.sceneFactArchive),
+      // SPEC-E：确定性 mergeScene（默认 off）；on 需非空 candidatePairs 且 maxPairsPerRound=1。
+      mergeScene: parseMergeSceneConfig(
+        personaGroup.mergeScene,
+        num(personaGroup, "sceneCharCap") ?? DEFAULT_SCENE_CHAR_CAP,
+      ),
       // P2-A2：L1 小批空转攒批，默认 undefined=off；true=shadow+K5+chars200+30min。
       l1SmallBatchDefer: parseL1SmallBatchDeferConfig(personaGroup.l1SmallBatchDefer),
       l2ReadDedup: parseL2ReadDedupConfig(personaGroup.l2ReadDedup),
@@ -1077,6 +1093,8 @@ function strArray(src: Record<string, unknown>, key: string): string[] | undefin
   if (!Array.isArray(v)) return undefined;
   return v.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
 }
+
+const DEFAULT_SCENE_CHAR_CAP = 32_000;
 
 const VALID_STRATEGIES: RecallConfig["strategy"][] = ["embedding", "keyword", "hybrid"];
 

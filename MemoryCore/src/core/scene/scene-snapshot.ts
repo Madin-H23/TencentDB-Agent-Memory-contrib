@@ -22,6 +22,7 @@ import { stat, copyFile, writeFile, readdir, rm } from "node:fs/promises";
 import { readdirSync } from "node:fs";
 
 import { BackupManager } from "../../utils/backup.js";
+import { MERGE_ATOMIC_REPLACE_TMP_SUFFIX } from "./scene-merge.js";
 import type { Logger } from "../types.js";
 
 export const SCENE_SNAPSHOT_ANCHOR = "[scene-snapshot]";
@@ -63,6 +64,9 @@ export async function writeSceneSnapshot(params: {
       "scene_blocks",
       params.tag ?? `${SCENE_SNAPSHOT_ANCHOR.slice(1, -1)}-${Date.now()}`,
       params.keep,
+      // 排除 merge 事务的原子替换临时文件（gate H J_kill9）：kill -9 可能把它留在
+      // scene_blocks，浅拷贝若带入快照，恢复只清 live 目录，快照内残留会污染备份。
+      (name) => !name.endsWith(MERGE_ATOMIC_REPLACE_TMP_SUFFIX),
     );
   } catch (err) {
     params.logger?.warn?.(

@@ -21,13 +21,30 @@ import { CheckpointManager } from "../../utils/checkpoint.js";
 import { BackupManager } from "../../utils/backup.js";
 import { readSceneIndex, syncSceneIndex } from "../scene/scene-index.js";
 import type { SceneIndexEntry } from "../scene/scene-index.js";
-import { parseSceneBlock } from "../scene/scene-format.js";
+import { isArchiveSceneFile, parseSceneBlock } from "../scene/scene-format.js";
 import { compactSceneBlock } from "../scene/scene-compact.js";
 import type { SceneCompactionConfig } from "../scene/scene-compact.js";
 import { deterministicSupersede, type FactSupersedeConfig } from "./scene-supersede.js";
 import { filterSupersededByApproval, parseJudgeApprovalState } from "./fact-ops.js";
 import { planSceneSpill, type SceneArchiveConfig } from "./scene-archive.js";
 import { planFactSpill, type SceneFactArchiveConfig } from "./scene-fact-archive.js";
+import {
+  MERGE_SCENE_SHADOW_BUDGET_MS,
+  countSharedMergeAnchors,
+  deriveMergeTargetName,
+  executeMerge,
+  isMergeShadowCandidate,
+  mergeShadowPairChars,
+  planMerge,
+  recoverMergeJournal,
+  selectMergeCandidate,
+} from "./scene-merge.js";
+import type {
+  MergeSceneBackend,
+  MergeSceneConfig,
+  MergeShadowInput,
+  MergeShadowSelection,
+} from "./scene-merge.js";
 import { checkAnchorPreservation, countSupersededChars } from "../../utils/supersede.js";
 import { generateSceneNavigation, stripSceneNavigation } from "../scene/scene-navigation.js";
 import type { ResolvedRecallRanking } from "../scene/recall-ranking.js";
@@ -164,6 +181,13 @@ export interface SceneExtractorOptions {
    * yaml `persona.sceneFactArchive` 控制；off 时 Phase 5 该分支零调用零 I/O。
    */
   sceneFactArchive?: SceneFactArchiveConfig;
+  /**
+   * [N2/N3 场景确定性合并] Phase 4 成功后的 L2 shadow 钩子（缺省 undefined=off）：
+   * 按 candidatePairs 或共享锚点自动选一对活动场景，跑纯函数 planMerge 并输出
+   * `metric=l2_merge`。mode=shadow 只计量、零写；mode=on（Stage 3）真实执行一轮。
+   * yaml `persona.mergeScene` 控制；off 时钩子零 I/O。
+   */
+  mergeScene?: MergeSceneConfig;
   /** langfuse 上报身份四元组（team/user/agent/session）。传下来会填充 trace 顶级字段。 */
   traceContext?: TraceContext;
 }
@@ -217,12 +241,9 @@ function mergeArchiveFile(existing: string, appendText: string): string {
   return `${body}\n${appendText.replace(/\n{3,}/g, "\n\n")}`;
 }
 
-/** [P2-A3 审核 P1-3] 归档文件识别（META archive:true·防 ⑧/⑥b 误处理）。 */
-function isArchiveFile(raw: string): boolean {
-  const m = raw.match(/-----META-START-----([\s\S]*?)-----META-END-----/);
-  if (!m) return false;
-  return /^archive:[ \t]*true[ \t]*$/m.test(m[1] ?? "");
-}
+/** [P2-A3 审核 P1-3 → 2026-11-19 归档计数补丁] 归档识别统一走 scene-format 的
+ * `isArchiveSceneFile(filename, raw)`：文件名 `-archive.md` 或 META `archive: true` 任一命中即归档。
+ * 本地旧实现只看 META，META 被 `[DELETED]` 覆盖后失明（2026-11-19 事故根因之一）。 */
 
 export class SceneExtractor {
   private dataDir: string;
@@ -244,6 +265,14 @@ export class SceneExtractor {
   private factSupersede: FactSupersedeConfig | undefined;
   private sceneArchive: SceneArchiveConfig | undefined;
   private sceneFactArchive: SceneFactArchiveConfig | undefined;
+  private mergeScene: MergeSceneConfig | undefined;
+  /**
+   * 本轮 on 模式刚合并出的 C 文件名（Stage 3）。
+   * Phase 5 的 spill/compact/supersede/factArchive 必须跳过它：journal=done 记录了 C 的
+   * sha256，同轮再改写会让下一轮 recover 误判 MERGE_CONFLICT、每轮 ALERT 并阻塞新合并
+   *（seams P0）。该文件从下一轮起恢复正常治理。
+   */
+  private mergedTargetThisExtract: string | undefined;
   private traceContext: TraceContext | undefined;
 
   constructor(opts: SceneExtractorOptions) {
@@ -265,6 +294,7 @@ export class SceneExtractor {
     this.factSupersede = opts.factSupersede;
     this.sceneArchive = opts.sceneArchive;
     this.sceneFactArchive = opts.sceneFactArchive;
+    this.mergeScene = opts.mergeScene;
     this.traceContext = opts.traceContext;
 
     // Use injected LLMRunner if available, otherwise fall back to CleanContextRunner
@@ -279,6 +309,432 @@ export class SceneExtractor {
   }
 
   /**
+   * Phase 4.5 合并钩子分发（SPEC-E §4.13/§4.14）：off/undefined 零 I/O；
+   * shadow 只读选对+plan+metric；on 按 recover→选对→plan→execute 真实执行一轮。
+   */
+  private async runMergeHook(): Promise<void> {
+    const config = this.mergeScene;
+    if (!config || config.mode === "off") return;
+    if (config.mode === "shadow") {
+      await this.runMergeShadowHook();
+      return;
+    }
+    await this.runMergeOnHook(config);
+  }
+
+  /**
+   * Phase 4.5 场景合并 shadow 钩子（N2/N3，SPEC-E §4.13）。
+   *
+   * 只做：读目录事实 → 选对 → planMerge → 打一行 `metric=l2_merge`。
+   * 不做：executeMerge / 取锁 / 写 journal / sync index / 改文件 / GC。
+   * 整段受 MERGE_SCENE_SHADOW_BUDGET_MS 硬预算约束（读后/选对后/plan 后各查一次）；
+   * 超预算与异常只 warn，绝不影响 L2 抽取主流程。
+   */
+  private async runMergeShadowHook(): Promise<void> {
+    const config = this.mergeScene;
+    if (!config || config.mode !== "shadow") return;
+    const startMs = Date.now();
+    const elapsedMs = () => Date.now() - startMs;
+    try {
+      const sceneCharCap = this.sceneCharCap;
+      if (typeof sceneCharCap !== "number" || !Number.isFinite(sceneCharCap) || sceneCharCap <= 0) {
+        this.logMergeMetric({ result: "rejected", code: "scene_char_cap_unset", elapsedMs: elapsedMs() });
+        return;
+      }
+      const inputs = await this.readMergeShadowInputs();
+      if (this.shadowBudgetExceeded(startMs, { scanned: inputs.length })) return;
+      const pick = this.pickMergeShadowPair(inputs, config);
+      if (this.shadowBudgetExceeded(startMs, { scanned: inputs.length })) return;
+      if (pick.kind === "unavailable") {
+        this.logMergeMetric({ result: "rejected", code: "candidate_unavailable", scanned: inputs.length, elapsedMs: elapsedMs() });
+        return;
+      }
+      const selection: MergeShadowSelection | null = pick.selection;
+      if (selection === null) {
+        this.logMergeMetric({ result: "skipped", code: "no_candidate", scanned: inputs.length, elapsedMs: elapsedMs() });
+        return;
+      }
+      const a = selection.a;
+      const b = selection.b;
+      const target = deriveMergeTargetName(a.filename, b.filename);
+      const planned = planMerge(a, b, {
+        config,
+        now: new Date().toISOString(),
+        target,
+        sceneCharCap,
+        existingSceneNames: inputs.map((input) => input.filename),
+      });
+      const pair = `${a.filename} + ${b.filename}`;
+      if (this.shadowBudgetExceeded(startMs, {
+        pair,
+        charsA: a.raw.length,
+        charsB: b.raw.length,
+        sharedAnchors: selection.sharedAnchors,
+      })) {
+        return;
+      }
+      if (!planned.ok) {
+        const rejection = planned.rejection;
+        const severe = rejection.code === "anchor_mismatch" || rejection.code === "body_mismatch";
+        this.logMergeMetric({
+          result: "rejected",
+          code: rejection.code,
+          pair,
+          charsA: a.raw.length,
+          charsB: b.raw.length,
+          sharedAnchors: selection.sharedAnchors,
+          elapsedMs: elapsedMs(),
+          level: severe ? "warn" : "info",
+        });
+        return;
+      }
+      const plan = planned.plan;
+      this.logMergeMetric({
+        result: "planned",
+        key: plan.key.slice(0, 12),
+        pair,
+        target: plan.target,
+        charsA: plan.metrics.charsA,
+        charsB: plan.metrics.charsB,
+        charsC: plan.metrics.charsC,
+        anchorsIn: plan.metrics.anchorsIn,
+        anchorsOut: plan.metrics.anchorsOut,
+        readViewChars: plan.metrics.readViewChars,
+        sharedAnchors: selection.sharedAnchors,
+        elapsedMs: elapsedMs(),
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      try {
+        this.logMergeMetric({ result: "error", message, elapsedMs: elapsedMs(), level: "warn" });
+      } catch {
+        // logger 自身故障也不得影响 L2 抽取主流程。
+      }
+    }
+  }
+
+
+  /**
+   * Stage 3 mode=on：Phase 4.5 真实执行一轮合并（SPEC-E §4.14）。
+   *
+   * 顺序固定：恢复上轮未完成事务 → candidatePairs 白名单选对 → planMerge →
+   * executeMerge；每轮最多 1 对；不 GC。仅本地 fs 执行事务，非 local backend
+   * 只打 skipped/unsupported_backend。任何异常 fail-soft：warn + ALERT=l2_merge_error，
+   * 不改写 L2 success，未完成事务留待下一轮恢复。
+   */
+  private async runMergeOnHook(config: MergeSceneConfig): Promise<void> {
+    const startMs = Date.now();
+    const elapsedMs = () => Date.now() - startMs;
+    try {
+      const sceneCharCap = this.sceneCharCap;
+      if (typeof sceneCharCap !== "number" || !Number.isFinite(sceneCharCap) || sceneCharCap <= 0) {
+        this.logMergeMetric({ result: "rejected", code: "scene_char_cap_unset", elapsedMs: elapsedMs(), level: "warn" });
+        return;
+      }
+      const backend = this.resolveMergeBackend();
+      if (backend !== "local") {
+        this.logMergeMetric({
+          result: "skipped",
+          code: "unsupported_backend",
+          message: "backend=" + backend,
+          elapsedMs: elapsedMs(),
+          level: "warn",
+        });
+        return;
+      }
+      // 1) 先恢复上一轮遗留事务（无 journal 时零写、不加锁）。
+      const recovered = await recoverMergeJournal({
+        dataDir: this.dataDir,
+        config,
+        backend,
+        allowProductionDataDir: true,
+      });
+      if (!recovered.ok) {
+        const busy = recovered.error.code === "MERGE_LOCK_BUSY";
+        this.logMergeMetric({
+          result: busy ? "skipped" : "error",
+          code: recovered.error.code,
+          message: recovered.error.message,
+          elapsedMs: elapsedMs(),
+          level: "warn",
+        });
+        if (!busy) this.logMergeAlert(recovered.error.code, recovered.error.message);
+        return;
+      }
+      const recoveredCount = recovered.outcomes.filter(
+        (outcome) => outcome.action !== "noop" && outcome.action !== "skipped",
+      ).length;
+      // 2) 读目录事实 + 白名单选对（on 解析期已保证 candidatePairs 非空且每轮 1 对）。
+      const inputs = await this.readMergeShadowInputs();
+      const pick = this.pickMergeShadowPair(inputs, config);
+      if (pick.kind !== "configured" || !pick.selection) {
+        const unavailable = pick.kind === "unavailable";
+        if (unavailable && recoveredCount > 0) {
+          // 本轮到目前只补完了上轮未竟事务（白名单随即不齐）：报 recovered 而非 error。
+          this.logMergeMetric({
+            result: "skipped",
+            code: "recovered",
+            journalStage: "done",
+            message: "recovered=" + recoveredCount + "（白名单两文件已不齐）",
+            scanned: inputs.length,
+            elapsedMs: elapsedMs(),
+            level: "info",
+          });
+          return;
+        }
+        this.logMergeMetric({
+          result: "rejected",
+          code: unavailable ? "candidate_unavailable" : "no_candidate",
+          message: unavailable ? "白名单两文件已不齐（合并消费后为常态）" : undefined,
+          scanned: inputs.length,
+          elapsedMs: elapsedMs(),
+          // on 的白名单一旦消费就持续不齐：降为 info，避免每轮 WARN 噪声（Standards P2-8）。
+          level: unavailable ? "info" : "warn",
+        });
+        return;
+      }
+      const selection = pick.selection;
+      const a = selection.a;
+      const b = selection.b;
+      const pair = a.filename + " + " + b.filename;
+      const target = deriveMergeTargetName(a.filename, b.filename);
+      const planned = planMerge(a, b, {
+        config,
+        now: new Date().toISOString(),
+        target,
+        sceneCharCap,
+        existingSceneNames: inputs.map((input) => input.filename),
+      });
+      if (!planned.ok) {
+        const rejection = planned.rejection;
+        const severe = rejection.code === "anchor_mismatch" || rejection.code === "body_mismatch";
+        this.logMergeMetric({
+          result: "rejected",
+          code: rejection.code,
+          pair,
+          charsA: a.raw.length,
+          charsB: b.raw.length,
+          sharedAnchors: selection.sharedAnchors,
+          elapsedMs: elapsedMs(),
+          level: severe ? "warn" : "info",
+        });
+        return;
+      }
+      const plan = planned.plan;
+      // 3) 执行事务（内部持 merge 锁、写 journal、sync index/导航；失败下轮恢复）。
+      const executed = await executeMerge({
+        plan,
+        config,
+        sceneCharCap,
+        dataDir: this.dataDir,
+        backend,
+        allowProductionDataDir: true,
+      });
+      if (!executed.ok) {
+        // 锁忙是正常并发（另一轮/恢复持有 merge 锁），不是故障：skipped+warn，不报 ALERT。
+        const busy = executed.error.code === "MERGE_LOCK_BUSY";
+        this.logMergeMetric({
+          result: busy ? "skipped" : "error",
+          code: executed.error.code,
+          pair,
+          target: plan.target,
+          message: executed.error.message,
+          elapsedMs: elapsedMs(),
+          level: "warn",
+        });
+        if (!busy) this.logMergeAlert(executed.error.code, executed.error.message);
+        return;
+      }
+      const recoveredNote = recoveredCount > 0 ? "recovered=" + recoveredCount : undefined;
+      if (executed.status === "merged") {
+        this.logMergeMetric({
+          result: "merged",
+          key: executed.key.slice(0, 12),
+          pair,
+          target: executed.target,
+          charsA: plan.metrics.charsA,
+          charsB: plan.metrics.charsB,
+          charsC: plan.metrics.charsC,
+          anchorsIn: plan.metrics.anchorsIn,
+          anchorsOut: plan.metrics.anchorsOut,
+          readViewChars: plan.metrics.readViewChars,
+          sharedAnchors: selection.sharedAnchors,
+          journalStage: executed.journalStage ?? "done",
+          message: recoveredNote,
+          elapsedMs: elapsedMs(),
+        });
+        // 记录本轮合并产物：Phase 5 四个改写分支跳过它（journal=done 的 sha 已定稿）。
+        this.mergedTargetThisExtract = executed.target;
+        return;
+      }
+      // skipped 是零写路径（幂等命中 / 重试补完）：不得把 skipped 报成 merged，也不输出
+      // 本轮 plan 的规模字段（target 可能来自既有 journal，规模与目标口径不一致，
+      // Standards P1-2）。只报 code/target/journalStage/message。
+      this.logMergeMetric({
+        result: "skipped",
+        code: executed.code ?? "idempotent",
+        key: executed.key.slice(0, 12),
+        pair,
+        target: executed.target,
+        journalStage: executed.journalStage,
+        message: executed.message + (recoveredNote ? "; " + recoveredNote : ""),
+        elapsedMs: elapsedMs(),
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      try {
+        this.logMergeMetric({ result: "error", message, elapsedMs: elapsedMs(), level: "warn" });
+        this.logMergeAlert("MERGE_HOOK_EXCEPTION", message);
+      } catch {
+        // logger 自身故障也不得影响 L2 抽取主流程。
+      }
+    }
+  }
+
+  /** 执行后端判定：无 storage 或 LocalStorageBackend 视为可原子本地事务。 */
+  private resolveMergeBackend(): MergeSceneBackend {
+    const type = this.storage?.type;
+    if (!type || type === "local") return "local";
+    return type;
+  }
+
+  /** ALERT 行：Stage 3 执行失败/异常必须可被值守 grep 到，但不影响 L2 返回。 */
+  private logMergeAlert(code: string, message: string): void {
+    this.logger?.warn(
+      TAG + " ALERT=l2_merge_error code=" + code + " message=" + JSON.stringify(message) + " at=" + new Date().toISOString(),
+    );
+  }
+
+  /** 硬预算：超 MERGE_SCENE_SHADOW_BUDGET_MS 打 skipped/warn 并返回 true（不抛给 L2）。 */
+  private shadowBudgetExceeded(
+    startMs: number,
+    fields: { scanned?: number; pair?: string; charsA?: number; charsB?: number; sharedAnchors?: number },
+  ): boolean {
+    const elapsed = Date.now() - startMs;
+    if (elapsed <= MERGE_SCENE_SHADOW_BUDGET_MS) return false;
+    this.logMergeMetric({ result: "skipped", code: "budget_exceeded", ...fields, elapsedMs: elapsed, level: "warn" });
+    return true;
+  }
+
+  /**
+   * 选对：candidatePairs 非空时按配置序取第一对"两文件均存在且通过统一过滤口径"者；
+   * 无一可用 → candidate_unavailable（不回退自动选择，SPEC-E §4.13）；
+   * 否则走共享锚点自动选对。
+   */
+  private pickMergeShadowPair(
+    inputs: readonly MergeShadowInput[],
+    config: MergeSceneConfig,
+  ):
+    | { kind: "configured"; selection: MergeShadowSelection }
+    | { kind: "auto"; selection: MergeShadowSelection | null }
+    | { kind: "unavailable" } {
+    const pairs = config.candidatePairs;
+    if (pairs.length > 0) {
+      const byName = new Map<string, MergeShadowInput>();
+      for (const input of inputs) byName.set(input.filename, input);
+      for (const pair of pairs) {
+        const a = byName.get(pair.a);
+        const b = byName.get(pair.b);
+        if (!a || !b) continue;
+        if (!isMergeShadowCandidate(a.filename, a.raw, config.headScenes)) continue;
+        if (!isMergeShadowCandidate(b.filename, b.raw, config.headScenes)) continue;
+        return {
+          kind: "configured",
+          selection: { a, b, sharedAnchors: countSharedMergeAnchors(a, b), pairChars: mergeShadowPairChars(a, b) },
+        };
+      }
+      return { kind: "unavailable" };
+    }
+    return {
+      kind: "auto",
+      selection: selectMergeCandidate(inputs, {
+        headScenes: config.headScenes,
+        pairCharLimit: config.pairCharLimit,
+      }),
+    };
+  }
+
+  /** 读取目录事实（全部 .md，含归档；过滤交给选对器）。只读，单文件失败 fail-soft。 */
+  private async readMergeShadowInputs(): Promise<MergeShadowInput[]> {
+    const names: string[] = [];
+    const inputs: MergeShadowInput[] = [];
+    if (this.storage) {
+      names.push(...(await this.storage.readdirNames(StoragePaths.sceneBlocksDir, ".md")));
+      names.sort();
+      for (const name of names) {
+        try {
+          const raw = await this.storage.readFile(`${StoragePaths.sceneBlocksDir}${name}`);
+          if (typeof raw === "string") inputs.push({ filename: name, raw });
+        } catch {
+          // 单文件读取失败不阻断选对：跳过该文件，等下一轮快照。
+        }
+      }
+      return inputs;
+    }
+    const fs = await import("node:fs/promises");
+    const path = await import("node:path");
+    const sceneBlocksDir = path.default.join(this.dataDir, "scene_blocks");
+    try {
+      names.push(...(await fs.default.readdir(sceneBlocksDir)).filter((name: string) => name.endsWith(".md")));
+    } catch (err) {
+      if ((err as { code?: string }).code === "ENOENT") return [];
+      throw err;
+    }
+    names.sort();
+    for (const name of names) {
+      try {
+        const raw = await fs.default.readFile(path.default.join(sceneBlocksDir, name), "utf-8");
+        inputs.push({ filename: name, raw });
+      } catch {
+        // 同上：读取失败跳过该文件。
+      }
+    }
+    return inputs;
+  }
+
+  /** 单行 metric=l2_merge；只打规模/计数，不输出正文、summary 或锚点列表。 */
+  private logMergeMetric(fields: {
+    result: "planned" | "merged" | "rejected" | "skipped" | "error";
+    code?: string;
+    key?: string;
+    pair?: string;
+    target?: string;
+    charsA?: number;
+    charsB?: number;
+    charsC?: number;
+    anchorsIn?: number;
+    anchorsOut?: number;
+    readViewChars?: number;
+    sharedAnchors?: number;
+    scanned?: number;
+    message?: string;
+    journalStage?: string;
+    elapsedMs: number;
+    level?: "info" | "warn";
+  }): void {
+    const mode = this.mergeScene?.mode ?? "off";
+    const parts = ["metric=l2_merge", `mode=${mode}`, `result=${fields.result}`];
+    if (fields.code) parts.push(`code=${fields.code}`);
+    if (fields.key) parts.push(`key=${fields.key}`);
+    if (fields.pair) parts.push(`pair=${fields.pair}`);
+    if (fields.target) parts.push(`target=${fields.target}`);
+    if (typeof fields.charsA === "number") parts.push(`charsA=${fields.charsA}`);
+    if (typeof fields.charsB === "number") parts.push(`charsB=${fields.charsB}`);
+    if (typeof fields.charsC === "number") parts.push(`charsC=${fields.charsC}`);
+    if (typeof fields.anchorsIn === "number") parts.push(`anchorsIn=${fields.anchorsIn}`);
+    if (typeof fields.anchorsOut === "number") parts.push(`anchorsOut=${fields.anchorsOut}`);
+    if (typeof fields.readViewChars === "number") parts.push(`readViewChars=${fields.readViewChars}`);
+    if (typeof fields.sharedAnchors === "number") parts.push(`sharedAnchors=${fields.sharedAnchors}`);
+    if (typeof fields.scanned === "number") parts.push(`scanned=${fields.scanned}`);
+    if (fields.journalStage) parts.push(`journalStage=${fields.journalStage}`);
+    if (fields.message) parts.push(`message=${JSON.stringify(fields.message)}`);
+    parts.push(`elapsedMs=${fields.elapsedMs}`);
+    const line = `${TAG} ${parts.join(" ")}`;
+    if (fields.level === "warn") this.logger?.warn(line);
+    else this.logger?.info(line);
+  }
+
+  /**
    * Extract a batch of memories into scene blocks using the LLM agent.
    *
    * @param memories - Array of raw memory records from the API
@@ -287,6 +743,7 @@ export class SceneExtractor {
   async extract(memories: Array<{ content: string; created_at: string; id?: string }>): Promise<ExtractionResult> {
     const extractStartMs = Date.now();
     this.logger?.info(`${TAG} extract() start: ${memories.length} memories`);
+    this.mergedTargetThisExtract = undefined;
 
     if (memories.length === 0) {
       this.logger?.debug?.(`${TAG} extract() skipped: no memories`);
@@ -467,6 +924,17 @@ export class SceneExtractor {
       return { memoriesProcessed: 0, success: false, error: errMsg };
     }
 
+    // Phase 4.5: 场景合并钩子（N2/N3）——shadow 只读选对 + planMerge；on 真实执行一轮。
+    // 任何异常 fail-soft，绝不影响 L2 返回。
+    try {
+      await this.runMergeHook();
+    } catch (err) {
+      // 双保险：钩子内部已 catch；此处只兜 logger 等极端故障，绝不影响 L2 返回。
+      this.logger?.warn(
+        `${TAG} mergeScene shadow hook failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
     // Phase 5: Subsequent processing — safe cleanup of soft-deleted files
     //
     // Security: The LLM has no `exec` tool and cannot run shell commands.
@@ -498,6 +966,9 @@ export class SceneExtractor {
           raw = await fs.default.readFile(path.default.join(this.dataDir, "scene_blocks", file), "utf-8");
         }
         if (!raw || raw.trim().length === 0 || raw.trim() === "[DELETED]") {
+          // [归档计数补丁 2026-11-19] 只读归档不参与软删清理：L2 模型可能把归档当
+          // MERGE 目标写 [DELETED]（2026-11-19 事故即沿此路径 unlink 了 7 个归档）。
+          if (isArchiveSceneFile(file, raw)) continue;
           // Empty file or [DELETED] marker — soft-delete
           if (this.storage) {
             await this.storage.unlink(`${StoragePaths.sceneBlocksDir}${file}`);
@@ -511,7 +982,7 @@ export class SceneExtractor {
         } else {
           // Check if file has only META header but no actual content
           const block = parseSceneBlock(raw, file);
-          if (!block.content || block.content.trim().length === 0) {
+          if ((!block.content || block.content.trim().length === 0) && !isArchiveSceneFile(file, raw)) {
             if (this.storage) {
               await this.storage.unlink(`${StoragePaths.sceneBlocksDir}${file}`);
             } else {
@@ -521,9 +992,13 @@ export class SceneExtractor {
             }
             cleanedCount++;
             this.logger?.debug?.(`${TAG} extract() removed META-only file (no content): ${file}`);
-        } else if (isArchiveFile(raw)) {
+        } else if (isArchiveSceneFile(file, raw)) {
           // [P2-A3 审核 P1-3] 归档文件（META archive:true）不参与 spill/⑧/⑥b——
           // 防 archive 被 toV2Format 迁移退化与 factSupersede 污染只读语义。
+        } else if (file === this.mergedTargetThisExtract) {
+          // [Stage 3 seams P0] 本轮刚合并出的 C：Phase 5 不执行 spill/compact/
+          // supersede/factArchive。journal=done 已记录该文件 sha256，同轮改写会让
+          // 下一轮 recover 按 sha 误报 MERGE_CONFLICT；下一轮起恢复正常治理。
         } else {
           // [P2-A3 C 案·审核 P0-2] spill 先于 ⑧：先把活动段旧批次段抢救进可召回
           // archive（⑧ 折叠只进轮换 .backup·keep=10 会丢）；off 时零调用零 I/O。

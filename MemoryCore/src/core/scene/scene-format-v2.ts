@@ -62,7 +62,7 @@ export const V2_FACTS_HEADING = "## 事实";
 export const V2_ARCHIVE_HEADING = "## 活动";
 
 /** 段标题判定：行首逐字 `## <词>`，行尾只允许空白（CRLF 的 \r 被覆盖）。 */
-const V2_HEADING_RE = /^## (要点|事实|活动)[ \t\r]*$/;
+export const V2_HEADING_RE = /^## (要点|事实|活动)[ \t\r]*$/;
 
 export type V2SectionKey = "要点" | "事实" | "活动";
 
