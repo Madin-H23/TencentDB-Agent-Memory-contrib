@@ -1,6 +1,6 @@
 // #44 死信可观测/可恢复纯函数层直测：serializeDeadLetter + deadLetterRetryDecision。
 import { describe, it, expect } from "vitest";
-import { serializeDeadLetter, deadLetterRetryDecision } from "./pipeline-worker.js";
+import { serializeDeadLetter, deadLetterRetryDecision, buildDeadLetterList } from "./pipeline-worker.js";
 import type { DeadLetterEntry } from "./pipeline-worker.js";
 import type { TaskPayload } from "../core/state/types.js";
 
@@ -67,5 +67,27 @@ describe("deadletter · B 组：deadLetterRetryDecision 门控（默认 off）",
 
   it("边界：缺省 mode 当 off", () => {
     expect(deadLetterRetryDecision(undefined, false)).toEqual({ allowed: false, reason: "mode-off" });
+  });
+});
+
+describe("deadletter · C 组：buildDeadLetterList 列表组装（只读端点数据源）", () => {
+  it("空队列 → 空列表（不崩）", () => {
+    expect(buildDeadLetterList([])).toEqual([]);
+  });
+
+  it("多条目按 deadAt 降序（最新死信在前），逐条经 serializeDeadLetter 脱敏", () => {
+    const older = entry({ deadAt: 1000, task: task({ id: "old", sessionId: "sess-OLD" }) });
+    const newer = entry({ deadAt: 2000, task: task({ id: "new", sessionId: "sess-NEW", data: { secret: "DATA_SECRET_MARKER" } }) });
+    const list = buildDeadLetterList([older, newer]);
+    expect(list.map((d) => d.taskId)).toEqual(["new", "old"]);
+    expect(JSON.stringify(list)).not.toContain("DATA_SECRET_MARKER");
+    expect(list[0]).toEqual(serializeDeadLetter(newer));
+  });
+
+  it("不修改入参（纯函数）", () => {
+    const arr = [entry({ deadAt: 1 }), entry({ deadAt: 2 })];
+    const snapshot = arr.map((e) => e.deadAt);
+    buildDeadLetterList(arr);
+    expect(arr.map((e) => e.deadAt)).toEqual(snapshot);
   });
 });

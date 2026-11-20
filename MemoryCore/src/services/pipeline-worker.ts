@@ -150,6 +150,18 @@ export function serializeDeadLetter(entry: DeadLetterEntry): {
 }
 
 /**
+ * 死信队列 → 只读列表 DTO（origin#44 阶段2·GET /api/ops/dead-letters 数据源）。
+ * 按 deadAt 降序（最新在前），逐条经 serializeDeadLetter 脱敏；纯函数不改入参。
+ */
+export function buildDeadLetterList(
+  entries: readonly DeadLetterEntry[],
+): ReturnType<typeof serializeDeadLetter>[] {
+  return [...entries]
+    .sort((a, b) => b.deadAt - a.deadAt)
+    .map(serializeDeadLetter);
+}
+
+/**
  * 重投门控（origin#44）：默认 off=恒拒绝（敏感闸留用户）；on 且未入队才允许，幂等。
  */
 export function deadLetterRetryDecision(
