@@ -162,17 +162,51 @@ export function scoreRecallParts(parts: NormedRecallParts, ranking: ResolvedReca
 }
 
 /**
+ * query 与场景摘要的相关性（O1 最小起步·2026-11-25）：纯函数、零 I/O。
+ *
+ * token 口径：ASCII 词（`[a-z0-9]+`，小写归一）+ CJK 连续段的 2-gram（中文无空格，
+ * 单字粒度会过粗、整段粒度会漏部分重合，2-gram 是最小可区分折中）。
+ * 得分 = |query∩summary| / |query∪summary|，clamp [0,1]；query 无 token → null
+ * （调用方按 relevance=1 处理，即退化为"无查询"基线）。
+ * 边界：非法/超长 query 不抛——token 提取是纯字符串扫描，空集自然回落 null。
+ */
+export function relevanceFromQuery(query: string | undefined, summary: string | undefined): number | null {
+  if (!query || !query.trim()) return null;
+  const tokenize = (s: string): Set<string> => {
+    const out = new Set<string>();
+    const ascii = String(s ?? "").toLowerCase().match(/[a-z0-9]+/g) ?? [];
+    for (const t of ascii) out.add(t);
+    const cjk = String(s ?? "").match(/[\u4e00-\u9fff]+/g) ?? [];
+    for (const seg of cjk) {
+      if (seg.length === 1) out.add(seg);
+      for (let i = 0; i < seg.length - 1; i++) out.add(seg.slice(i, i + 2));
+    }
+    return out;
+  };
+  const q = tokenize(query);
+  if (q.size === 0) return null;
+  const s = tokenize(summary ?? "");
+  let inter = 0;
+  for (const t of q) if (s.has(t)) inter++;
+  const union = q.size + s.size - inter;
+  return union === 0 ? null : Math.max(0, Math.min(1, inter / union));
+}
+
+/**
  * 场景导航多信号排序（纯函数：不改输入数组、不产生 I/O）。
  *
- * - uses=heat（现库无独立使用计数字段，见模块头）；relevance=1（纯导航无查询）。
+ * - uses=heat（现库无独立使用计数字段，见模块头）；relevance 缺省恒 1（纯导航无查询），
+ *   传入 query 时由 relevanceFromQuery 算真实相关性（O1 最小起步）。
  * - 非有限 heat → 按 0 参与归一（parseSceneBlock 的 `parseInt||0` 已兜一层，这里
  *   防御 NaN/Infinity 毒化比较——NaN 参与比较会使排序结果实现相关，违反确定性）。
  * - 排序键：score 降序 → heat 降序 → 输入原序（平票确定性，见模块头）。
+ * - query 参数可选：省略/undefined → 与旧版逐字节同输出（relevance 恒 1）。
  */
 export function rankSceneEntries(
   entries: SceneIndexEntry[],
   ranking: ResolvedRecallRanking,
   nowMs: number,
+  query?: string,
 ): SceneIndexEntry[] {
   if (entries.length === 0) return [];
   const sanitized = entries.map((e) => (Number.isFinite(e.heat) ? e.heat : 0));
@@ -182,12 +216,12 @@ export function rankSceneEntries(
   }
   const scored = entries.map((e, i) => {
     const heat = sanitized[i]!;
+    // query 未传 → relevance 恒 1，与旧版逐字节一致；传了但无有效 token 也回落 1。
+    const rel = query === undefined ? null : relevanceFromQuery(query, e.summary);
     const parts: NormedRecallParts = {
       normHeat: logNorm(heat, hMax),
       recency: recallRecency(updatedToAgeDays(e.updated, nowMs), ranking.halfLifeDays),
-      // 纯导航场景无查询文本 → relevance 恒 1（等量平移不改次序）；有查询面接线时
-      // 在此传入真实相关性即可。
-      relevance: 1,
+      relevance: rel ?? 1,
       normUses: logNorm(heat, hMax),
     };
     return { e, i, heat, score: scoreRecallParts(parts, ranking) };
