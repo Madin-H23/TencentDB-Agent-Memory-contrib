@@ -9,6 +9,7 @@ import {
   logNorm,
   parseRecallRankingConfig,
   rankSceneEntries,
+  relevanceFromQuery,
   recallRecency,
   scoreRecallParts,
   updatedToAgeDays,
@@ -304,5 +305,109 @@ describe("formatRecallRankAnchor：观测锚点格式", () => {
     expect(formatRecallRankAnchor({ w1: 1, w2: 2, w3: 0, w4: 0.5, halfLifeDays: 7 }, 0)).toBe(
       "metric=l2_recall_rank value=1 scenes=0 signals=w1:1;w2:2;w3:0;w4:0.5;halfLifeDays:7",
     );
+  });
+});
+
+// query→relevance 纯函数（2026-11-25 O1 最小起步）：真实相关性第四信号，不改持久化/注入链路。
+// 契约：relevanceFromQuery(query, summary) = token 交集/并集 clamp[0,1]；
+//       query 缺省/空白 → rankSceneEntries 保持 relevance=1 逐字节兼容。
+describe("rankSceneEntries：query-aware relevance（O1 最小起步）", () => {
+  const U = "2026-10-30T00:00:00.000Z";
+
+  it("① query 命中低热场景 summary → 该场景前移（同 updated 同 heat 差由 relevance 翻转）", () => {
+    const low = entry({ filename: "low.md", summary: "蒸馏超时 与 提示词 调整", heat: 10, updated: U });
+    const high = entry({ filename: "high.md", summary: "基金配置 与 定投 复盘", heat: 20, updated: U });
+    // 无 query：热度序 high 在前
+    expect(rankSceneEntries([low, high], RECALL_RANKING_DEFAULTS, NOW).map((e) => e.filename)).toEqual(["high.md", "low.md"]);
+    // query 命中 low：relevance 高者翻转到前（w3=0.25 足以在 heat log1p 归一差内翻盘）
+    expect(rankSceneEntries([low, high], RECALL_RANKING_DEFAULTS, NOW, "蒸馏超时").map((e) => e.filename)).toEqual(["low.md", "high.md"]);
+  });
+
+  it("② 省略 query / 空白 query → 与无 query 逐字节一致（relevance=1 兼容）", () => {
+    const rows = [
+      entry({ filename: "a.md", heat: 5, updated: U }),
+      entry({ filename: "b.md", heat: 9, updated: U }),
+    ];
+    const base = rankSceneEntries(rows, RECALL_RANKING_DEFAULTS, NOW).map((e) => e.filename);
+    expect(rankSceneEntries(rows, RECALL_RANKING_DEFAULTS, NOW, undefined).map((e) => e.filename)).toEqual(base);
+    expect(rankSceneEntries(rows, RECALL_RANKING_DEFAULTS, NOW, "   ").map((e) => e.filename)).toEqual(base);
+    expect(rankSceneEntries(rows, RECALL_RANKING_DEFAULTS, NOW, "").map((e) => e.filename)).toEqual(base);
+  });
+
+  it("③ 纯函数：同 query 两次同序、输入数组不被改写", () => {
+    const rows = [
+      entry({ filename: "x.md", summary: "网络代理", heat: 3, updated: U }),
+      entry({ filename: "y.md", summary: "代理 重启", heat: 3, updated: U }),
+    ];
+    const snap = rows.map((e) => e.filename);
+    const a = rankSceneEntries(rows, RECALL_RANKING_DEFAULTS, NOW, "代理").map((e) => e.filename);
+    const b = rankSceneEntries(rows, RECALL_RANKING_DEFAULTS, NOW, "代理").map((e) => e.filename);
+    expect(a).toEqual(b);
+    expect(rows.map((e) => e.filename)).toEqual(snap);
+  });
+
+  it("④ 无 token query（纯符号/emoji/空白）→ 回落 relevance=1，不改变次序", () => {
+    // 仅验证「无 token query 不改变次序」：纯符号/emoji 不可能命中任何 summary，故本组
+    // 对回落值本身零区分力；回落=1 的精确契约由下方函数级断言 `toBeNull` 锁定。
+    const hit = entry({ filename: "hit.md", summary: "蒸馏超时", heat: 2, updated: U });
+    const miss = entry({ filename: "miss.md", summary: "基金定投", heat: 7, updated: U });
+    const base = rankSceneEntries([hit, miss], RECALL_RANKING_DEFAULTS, NOW).map((e) => e.filename);
+    for (const q of ["！！！", "…", "🔥🔥", "   ", ""]) {
+      expect(rankSceneEntries([hit, miss], RECALL_RANKING_DEFAULTS, NOW, q).map((e) => e.filename)).toEqual(base);
+    }
+  });
+
+  it("⑤ 非有限 heat + query 不产生 NaN 排序（确定性不抖动）", () => {
+    const bad = entry({ filename: "bad.md", summary: "蒸馏", heat: Number.NaN, updated: U });
+    const good = entry({ filename: "good.md", summary: "基金", heat: 10, updated: U });
+    const out = rankSceneEntries([bad, good], RECALL_RANKING_DEFAULTS, NOW, "蒸馏");
+    // 非有限 heat 按 0 参与归一、good=10 → good 得分仍高；query 不改变"NaN 不毒化"的确定性。
+    // 注意纯函数不改入参：bad.heat 仍是 NaN（原样保留），验证的是排序不被 NaN 毒化。
+    expect(out.map((e) => e.filename)).toEqual(["good.md", "bad.md"]);
+    expect(Number.isNaN(out.find((e) => e.filename === "bad.md")!.heat)).toBe(true);
+  });
+
+  // ⑥ 平票确定性仍成立（同 score 同 heat 保持输入序，query 不破坏第三键）。
+  // 变异记录（2026-11-25）：去掉源码 `|| (a.i - b.i)` 第三键后本断言仍绿——V8 的
+  // ES2019 稳定排序在全同时天然保输入序，该键属跨引擎保险，在当前引擎语义等价、
+  // 不可通过输出差异捕获。故不为此伪造测试；其余三变异（relevance 恒0/忽略 query/
+  // logNorm 换 min-max）均已实测转红。
+  it("⑥ 平票确定性仍成立（同 score 同 heat 保持输入序）", () => {
+    const a = entry({ filename: "a.md", summary: "同摘要", heat: 5, updated: U });
+    const b = entry({ filename: "b.md", summary: "同摘要", heat: 5, updated: U });
+    const out = rankSceneEntries([a, b], RECALL_RANKING_DEFAULTS, NOW, "同摘要");
+    expect(out.map((e) => e.filename)).toEqual(["a.md", "b.md"]);
+  });
+});
+
+// 函数级直接断言（审查 P1-2）：relevanceFromQuery 的边界与口径，避免只经排序间接测。
+describe("relevanceFromQuery：函数级边界", () => {
+  it("无 token query → null（undefined/空/空白/纯符号/emoji）", () => {
+    for (const q of [undefined, "", "   ", "！！！", "…", "🔥🔥"]) {
+      expect(relevanceFromQuery(q, "蒸馏超时")).toBeNull();
+    }
+  });
+  it("ASCII token：单字母/数字串会产出 token，未命中 summary → 0（非回落）", () => {
+    expect(relevanceFromQuery("a", "复盘")).toBe(0);
+    expect(relevanceFromQuery("12345678901234567890", "复盘")).toBe(0);
+  });
+  it("Jaccard 边界：全命中<1（短 query 命中长 summary）、全不命中=0、相等集合=1", () => {
+    const partial = relevanceFromQuery("蒸馏超时", "蒸馏超时 与 提示词")!;
+    expect(partial).toBeGreaterThan(0);
+    expect(partial).toBeLessThan(1);
+    expect(relevanceFromQuery("蒸馏超时", "蒸馏超时")).toBe(1);
+    expect(relevanceFromQuery("蒸馏", "基金定投")).toBe(0);
+  });
+  it("单字 CJK 与多字摘要不对称（2-gram 口径）：单字→0，多字命中→有效", () => {
+    expect(relevanceFromQuery("蒸", "蒸馏超时")).toBe(0);
+    expect(relevanceFromQuery("蒸馏", "蒸馏超时")).toBeGreaterThan(0);
+  });
+  it("summary 空/undefined → 0（query 有 token、summary 无 token）", () => {
+    expect(relevanceFromQuery("蒸馏", "")).toBe(0);
+    expect(relevanceFromQuery("蒸馏", undefined)).toBe(0);
+  });
+  it("混合中英/重复 token/emoji：emoji 被忽略，重复 token 由 Set 去重", () => {
+    expect(relevanceFromQuery("蒸馏🔥", "蒸馏超时")).toBeGreaterThan(0);
+    expect(relevanceFromQuery("蒸馏 蒸馏", "蒸馏超时")).toBe(relevanceFromQuery("蒸馏", "蒸馏超时"));
   });
 });
